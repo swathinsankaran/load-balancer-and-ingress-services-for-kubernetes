@@ -602,6 +602,7 @@ func HostRuleToIng(hrname string, namespace string, key string) ([]string, bool)
 }
 
 func HTTPRuleToIng(rrname string, namespace string, key string) ([]string, bool) {
+	utils.AviLog.Infof("key: %s, msg: called HTTPRuleToIng with parameters rrname: %s, namespace: %s", key, rrname, namespace)
 	var err error
 	allIngresses := make([]string, 0)
 	httprule, err := lib.GetCRDInformers().HTTPRuleInformer.Lister().HTTPRules(namespace).Get(rrname)
@@ -625,6 +626,7 @@ func HTTPRuleToIng(rrname string, namespace string, key string) ([]string, bool)
 		return nil, false
 	} else {
 		if httprule.Status.Status != lib.StatusAccepted {
+			utils.AviLog.Infof("key: %s, msg: status is not in Accepted state. httprule: %v", key, httprule)
 			return allIngresses, false
 		}
 
@@ -653,10 +655,12 @@ func HTTPRuleToIng(rrname string, namespace string, key string) ([]string, bool)
 	if !ok {
 		utils.AviLog.Debugf("key %s, msg: Couldn't find hostpath info for host: %s in cache", key, fqdn)
 	} else {
+		utils.AviLog.Infof("key: %s, msg: found pathRules: %v and pathIngs: %v for fqdn: %s", key, pathRules, pathIngs, fqdn)
 		for pathPrefix := range pathRules {
 			re := regexp.MustCompile(fmt.Sprintf(`^%s.*`, strings.ReplaceAll(pathPrefix, `/`, `\/`)))
 			for path, ingresses := range pathIngs {
 				if !re.MatchString(path) {
+					utils.AviLog.Infof("key: %s, msg: path not found for fqdn: %s", key, fqdn)
 					continue
 				}
 				utils.AviLog.Debugf("key: %s, msg: Computing for path %s in ingresses %v", key, path, ingresses)
@@ -673,10 +677,12 @@ func HTTPRuleToIng(rrname string, namespace string, key string) ([]string, bool)
 	if !ok {
 		utils.AviLog.Debugf("key %s, msg: Couldn't find hostpath info for host: %s in cache", key, oldFqdn)
 	} else {
+		utils.AviLog.Infof("key: %s, msg: found pathRules: %v and pathIngs: %v for fqdn: %s", key, oldPathRules, oldPathIngs, oldFqdn)
 		for oldPathPrefix := range oldPathRules {
 			re := regexp.MustCompile(fmt.Sprintf(`^%s.*`, strings.ReplaceAll(oldPathPrefix, `/`, `\/`)))
 			for oldPath, oldIngresses := range oldPathIngs {
 				if !re.MatchString(oldPath) {
+					utils.AviLog.Infof("key: %s, msg: path not found for oldfqdn: %s", key, oldFqdn)
 					continue
 				}
 				utils.AviLog.Debugf("key: %s, msg: Computing for oldPath %s in oldIngresses %v", key, oldPath, oldIngresses)
@@ -689,7 +695,7 @@ func HTTPRuleToIng(rrname string, namespace string, key string) ([]string, bool)
 		}
 	}
 
-	utils.AviLog.Debugf("key: %s, msg: Ingresses retrieved %s", key, allIngresses)
+	utils.AviLog.Infof("key: %s, msg: Ingresses retrieved %s", key, allIngresses)
 	return allIngresses, true
 }
 

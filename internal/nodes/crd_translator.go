@@ -136,11 +136,13 @@ func BuildL7HostRule(host, namespace, ingName, key string, vsNode AviVsEvhSniMod
 // when we get an ingress update and we are building the corresponding pools of that ingress
 // we need to get all httprules which match ingress's host/path
 func BuildPoolHTTPRule(host, poolPath, ingName, namespace, infraSettingName, key string, vsNode AviVsEvhSniModel, isSNI bool) {
+	utils.AviLog.Infof("key: %s, msg: called BuildPoolHTTPRule with parameters host: %s, poolPath: %s, ingName: %s, namespace: %s, infraSettingName: %s", key, host, poolPath, ingName, namespace, infraSettingName)
 	found, pathRules := objects.SharedCRDLister().GetFqdnHTTPRulesMapping(host)
 	if !found {
 		utils.AviLog.Debugf("key: %s, msg: HTTPRules for fqdn %s not found", key, host)
 		return
 	}
+	utils.AviLog.Infof("key: %s, msg: found pathRules: %v", key, pathRules)
 
 	// finds unique httprules to fetch from the client call
 	var getHTTPRules []string
@@ -172,12 +174,13 @@ func BuildPoolHTTPRule(host, poolPath, ingName, namespace, infraSettingName, key
 		rrNamespace := strings.Split(rule, "/")[0]
 		httpRulePath, ok := httpruleNameObjMap[rule+path]
 		if !ok {
+			utils.AviLog.Infof("key: %s, msg: rule+path: %s not found in httpruleNameObjMap: %v", key, rule+path, httpruleNameObjMap)
 			continue
 		}
 		if httpRulePath.TLS.Type != "" && httpRulePath.TLS.Type != lib.TypeTLSReencrypt {
 			continue
 		}
-
+		utils.AviLog.Infof("key: %s, msg: got poolrefs: %v", key, vsNode.GetPoolRefs())
 		for _, pool := range vsNode.GetPoolRefs() {
 			isPathSniEnabled := pool.SniEnabled
 			pathSslProfile := pool.SslProfileRef
@@ -209,6 +212,7 @@ func BuildPoolHTTPRule(host, poolPath, ingName, namespace, infraSettingName, key
 			} else {
 				poolName = pool.Name
 			}
+			utils.AviLog.Infof("key: %s, msg: secureRgx bool: %v, insecureRgx bool: %v", key, secureRgx.MatchString(poolName) && isSNI, insecureRgx.MatchString(poolName) && !isSNI)
 			if (secureRgx.MatchString(poolName) && isSNI) || (insecureRgx.MatchString(poolName) && !isSNI) {
 				utils.AviLog.Debugf("key: %s, msg: computing poolNode %s for httprule.paths.target %s", key, poolName, path)
 				// pool tls
