@@ -49,6 +49,8 @@ import (
 )
 
 func PopulateCache() error {
+	lib.AKOControlConfig().PodEventf(corev1.EventTypeNormal, "AKO-Debugging", "Populate Cache started")
+	defer lib.AKOControlConfig().PodEventf(corev1.EventTypeNormal, "AKO-Debugging", "Populate Cache ended")
 	var parentKeys []avicache.NamespaceName
 	var err error
 	avi_rest_client_pool := avicache.SharedAVIClients()
@@ -709,6 +711,8 @@ func (c *AviController) FullSync() {
 }
 
 func (c *AviController) FullSyncK8s() error {
+	lib.AKOControlConfig().PodEventf(corev1.EventTypeNormal, "AKO-Debugging", "Full Sync started")
+	defer lib.AKOControlConfig().PodEventf(corev1.EventTypeNormal, "AKO-Debugging", "Full Sync ended")
 	if c.DisableSync {
 		utils.AviLog.Infof("Sync disabled, skipping full sync")
 		return nil
