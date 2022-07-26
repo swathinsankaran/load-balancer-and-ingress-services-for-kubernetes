@@ -23,6 +23,8 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/api/models"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
+	_ "net/http/pprof"
+
 	"github.com/gorilla/mux"
 )
 

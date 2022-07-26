@@ -16,6 +16,7 @@ package models
 
 import (
 	"net/http"
+	"net/http/pprof"
 	"strings"
 	"sync"
 	"time"
@@ -66,7 +67,15 @@ func (a *StatusModel) ApiOperationMap() []OperationMap {
 		},
 	}
 
-	operationMapList = append(operationMapList, get)
+	getHeap := OperationMap{
+		Route:  "/api/pprof/heap",
+		Method: "GET",
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			pprof.Handler("heap").ServeHTTP(w, r)
+		},
+	}
+
+	operationMapList = append(operationMapList, get, getHeap)
 	return operationMapList
 }
 
