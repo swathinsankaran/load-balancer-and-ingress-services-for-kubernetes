@@ -18,6 +18,7 @@ const (
 	GraphLayer                    = "GraphLayer"
 	ObjectIngestionLayer          = "ObjectIngestionLayer"
 	StatusQueue                   = "StatusQueue"
+	SyncLayer                     = "SyncLayer"
 	LeastConnection               = "LB_ALGORITHM_LEAST_CONNECTIONS"
 	RandomConnection              = "RANDOM_CONN"
 	PassthroughConnection         = "PASSTHROUGH_CONN"

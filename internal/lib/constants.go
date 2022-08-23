@@ -61,6 +61,7 @@ const (
 	CLOSE_CONNECTION                           = "HTTP_SECURITY_ACTION_CLOSE_CONN"
 	IS_IN                                      = "IS_IN"
 	SLOW_SYNC_TIME                             = 90 // seconds
+	SyncLayerSyncTime                          = 1  // seconds
 	LOG_LEVEL                                  = "logLevel"
 	EnableEvents                               = "enableEvents"
 	LAYER7_ONLY                                = "layer7Only"

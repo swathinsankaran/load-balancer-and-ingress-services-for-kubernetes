@@ -25,6 +25,7 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/sync"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/api/models"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/clients"
@@ -53,10 +54,6 @@ func (rest *RestOperations) CleanupVS(key string, skipVS bool) {
 
 func (rest *RestOperations) DequeueNodes(key string) {
 	utils.AviLog.Infof("key: %s, msg: start rest layer sync.", key)
-	if !lib.AKOControlConfig().IsLeader() {
-		utils.AviLog.Infof("AKO is running as a follower")
-		return
-	}
 	// Got the key from the Graph Layer - let's fetch the model
 	ok, avimodelIntf := objects.SharedAviGraphLister().Get(key)
 	if !ok {
@@ -308,6 +305,11 @@ func (rest *RestOperations) RestOperation(vsName string, namespace string, avimo
 		}
 		utils.AviLog.Debugf("POST key: %s, vsKey: %s", key, vsKey)
 		utils.AviLog.Debugf("POST restops %s", utils.Stringify(rest_ops))
+		if !lib.AKOControlConfig().IsLeader() {
+			utils.AviLog.Infof("AKO is running as a follower, pushing the objects to sync layer")
+			sync.PublishToSyncLayer(key, rest_ops)
+			return
+		}
 		if success, _ := rest.ExecuteRestAndPopulateCache(rest_ops, vsKey, avimodel, key, false); !success {
 			return
 		}
@@ -466,6 +468,11 @@ func (rest *RestOperations) DeleteVSOper(vsKey avicache.NamespaceName, vs_cache_
 		rest_ops = rest.L4PolicyDelete(vs_cache_obj.L4PolicyCollection, namespace, rest_ops, key)
 		rest_ops = rest.PoolGroupDelete(vs_cache_obj.PGKeyCollection, namespace, rest_ops, key)
 		rest_ops = rest.PoolDelete(vs_cache_obj.PoolKeyCollection, namespace, rest_ops, key)
+		if !lib.AKOControlConfig().IsLeader() {
+			utils.AviLog.Infof("AKO is running as a follower, pushing the objects to sync layer")
+			sync.PublishToSyncLayer(key, rest_ops)
+			return true
+		}
 		success, _ := rest.ExecuteRestAndPopulateCache(rest_ops, vsKey, nil, key, false)
 		if success {
 			vsKeysPending := rest.cache.VsCacheMeta.AviGetAllKeys()

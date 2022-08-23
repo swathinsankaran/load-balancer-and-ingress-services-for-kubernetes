@@ -32,6 +32,7 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/rest"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/retry"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/status"
+	akosync "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/sync"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/clients"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/session"
@@ -483,6 +484,7 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 	var fastretrywg *sync.WaitGroup
 	var slowretrywg *sync.WaitGroup
 	var statusWG *sync.WaitGroup
+	var syncWG *sync.WaitGroup
 	if len(waitGroupMap) > 0 {
 		// Fetch all the waitgroups
 		ingestionwg, _ = waitGroupMap[0]["ingestion"]
@@ -490,6 +492,7 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 		fastretrywg, _ = waitGroupMap[0]["fastretry"]
 		slowretrywg, _ = waitGroupMap[0]["slowretry"]
 		statusWG, _ = waitGroupMap[0]["status"]
+		syncWG, _ = waitGroupMap[0]["sync"]
 	}
 
 	/** Sequence:
@@ -513,8 +516,9 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 		numGraphWorkers = 8
 	}
 	graphQueueParams := utils.WorkerQueue{NumWorkers: numGraphWorkers, WorkqueueName: utils.GraphLayer}
+	syncQueueParams := utils.WorkerQueue{NumWorkers: numGraphWorkers, WorkqueueName: utils.SyncLayer, SlowSyncTime: lib.SyncLayerSyncTime}
 	statusQueueParams := utils.WorkerQueue{NumWorkers: numGraphWorkers, WorkqueueName: utils.StatusQueue}
-	graphQueue = utils.SharedWorkQueue(&ingestionQueueParams, &graphQueueParams, &slowRetryQParams, &fastRetryQParams, &statusQueueParams).GetQueueByName(utils.GraphLayer)
+	graphQueue = utils.SharedWorkQueue(&ingestionQueueParams, &graphQueueParams, &slowRetryQParams, &fastRetryQParams, &statusQueueParams, &syncQueueParams).GetQueueByName(utils.GraphLayer)
 
 	// err := PopulateCache()
 	// if err != nil {
@@ -597,6 +601,10 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 	statusQueue := utils.SharedWorkQueue().GetQueueByName(utils.StatusQueue)
 	statusQueue.SyncFunc = SyncFromStatusQueue
 	statusQueue.Run(stopCh, statusWG)
+
+	syncQueue := utils.SharedWorkQueue().GetQueueByName(utils.SyncLayer)
+	syncQueue.SyncFunc = SyncFromSyncQueue
+	syncQueue.Run(stopCh, syncWG)
 
 LABEL:
 	for {
@@ -1274,6 +1282,11 @@ func SyncFromNodesLayer(key interface{}, wg *sync.WaitGroup) error {
 
 func SyncFromStatusQueue(key interface{}, wg *sync.WaitGroup) error {
 	status.DequeueStatus(key)
+	return nil
+}
+
+func SyncFromSyncQueue(obj interface{}, wg *sync.WaitGroup) error {
+	akosync.ProcessAndPublishToSyncLayer(obj.(*utils.RestOp))
 	return nil
 }
 
