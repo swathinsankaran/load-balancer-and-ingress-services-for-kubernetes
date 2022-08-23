@@ -15,6 +15,9 @@
 package rest
 
 import (
+	"fmt"
+	"time"
+
 	v1 "k8s.io/api/core/v1"
 
 	avicache "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
@@ -27,6 +30,13 @@ import (
 // based on the service metadata objects it finds in the cache
 // This is executed once AKO is done with populating the L3 cache in reboot scenarios
 func (rest *RestOperations) SyncObjectStatuses() {
+	t1 := time.Now()
+	defer lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "SyncObjectStatus", fmt.Sprintf("Sync completed in %0.2v minutes", time.Since(t1).Minutes()))
+
+	if !lib.AKOControlConfig().IsLeader() {
+		utils.AviLog.Debug("Follower AKO, returning")
+		return
+	}
 	vsKeys := rest.cache.VsCacheMeta.AviGetAllKeys()
 	utils.AviLog.Debugf("Ingress status sync for vsKeys %+v", utils.Stringify(vsKeys))
 

@@ -53,7 +53,10 @@ func (rest *RestOperations) CleanupVS(key string, skipVS bool) {
 
 func (rest *RestOperations) DequeueNodes(key string) {
 	utils.AviLog.Infof("key: %s, msg: start rest layer sync.", key)
-
+	if !lib.AKOControlConfig().IsLeader() {
+		utils.AviLog.Infof("AKO is running as a follower")
+		return
+	}
 	// Got the key from the Graph Layer - let's fetch the model
 	ok, avimodelIntf := objects.SharedAviGraphLister().Get(key)
 	if !ok {

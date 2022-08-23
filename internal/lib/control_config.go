@@ -16,6 +16,7 @@ package lib
 
 import (
 	"context"
+	"sync"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -104,6 +105,10 @@ type akoControlConfig struct {
 	// primaryaAKO is set to true/false if as per primaryaAKO value
 	//in values.yaml
 	primaryaAKO bool
+
+	// leadership status of AKO
+	isLeader     bool
+	isLeaderLock sync.RWMutex
 }
 
 var akoControlConfigInstance *akoControlConfig
@@ -113,6 +118,18 @@ func AKOControlConfig() *akoControlConfig {
 		akoControlConfigInstance = &akoControlConfig{}
 	}
 	return akoControlConfigInstance
+}
+
+func (c *akoControlConfig) SetIsLeaderFlag(flag bool) {
+	c.isLeaderLock.Lock()
+	defer c.isLeaderLock.Unlock()
+	c.isLeader = flag
+}
+
+func (c *akoControlConfig) IsLeader() bool {
+	c.isLeaderLock.RLock()
+	defer c.isLeaderLock.RUnlock()
+	return c.isLeader
 }
 
 func (c *akoControlConfig) SetAKOInstanceFlag(flag bool) {

@@ -26,6 +26,7 @@ import (
 	avicache "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/k8s"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/rest"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/api"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/api/models"
 	crd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned"
@@ -37,7 +38,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	k8srest "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	svcapi "sigs.k8s.io/service-apis/pkg/client/clientset/versioned"
 )
@@ -66,7 +67,7 @@ func InitializeAKC() {
 	kubeCluster := false
 	utils.AviLog.Info("AKO is running with version: ", version)
 	// Check if we are running inside kubernetes. Hence try authenticating with service token
-	cfg, err := rest.InClusterConfig()
+	cfg, err := k8srest.InClusterConfig()
 	if err != nil {
 		utils.AviLog.Warnf("We are not running inside kubernetes cluster. %s", err.Error())
 	} else {
@@ -288,6 +289,18 @@ func InitializeAKC() {
 		}
 	}
 
+	// AKO's Leader election
+	restlayer := rest.NewRestOperations(avicache.SharedAviObjCache(), avicache.SharedAVIClients())
+	leaderElector, err := lib.NewLeaderElector(kubeClient, k8s.PopulateCache, restlayer.SyncObjectStatuses)
+	if err != nil {
+		utils.AviLog.Fatalf("Leader election is not possible, shutting down AKO. Error: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := leaderElector.Run(ctx)
+	<-ready
+	utils.AviLog.Infof("Leader election completed")
+
 	c.InitializeNamespaceSync()
 	k8s.PopulateNodeCache(kubeClient)
 	waitGroupMap := make(map[string]*sync.WaitGroup)
@@ -304,6 +317,15 @@ func InitializeAKC() {
 	go c.InitController(informers, registeredInformers, ctrlCh, stopCh, quickSyncCh, waitGroupMap)
 	<-stopCh
 	close(ctrlCh)
+
+	cancel()
+	<-ctx.Done()
+	// Let's wait for 5 seconds to fully release the lock
+	// acquired by leader AKO.
+	if lib.AKOControlConfig().IsLeader() {
+		<-time.After(5 * time.Second)
+	}
+
 	doneChan := make(chan struct{})
 	go func() {
 		defer close(doneChan)

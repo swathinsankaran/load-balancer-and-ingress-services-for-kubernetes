@@ -49,6 +49,9 @@ import (
 )
 
 func PopulateCache() error {
+	t1 := time.Now()
+	defer lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "PopulateCache", fmt.Sprintf("PopulateCache completed in %0.2v minutes", time.Since(t1).Minutes()))
+
 	var parentKeys []avicache.NamespaceName
 	var err error
 	avi_rest_client_pool := avicache.SharedAVIClients()
@@ -513,12 +516,12 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 	statusQueueParams := utils.WorkerQueue{NumWorkers: numGraphWorkers, WorkqueueName: utils.StatusQueue}
 	graphQueue = utils.SharedWorkQueue(&ingestionQueueParams, &graphQueueParams, &slowRetryQParams, &fastRetryQParams, &statusQueueParams).GetQueueByName(utils.GraphLayer)
 
-	err := PopulateCache()
-	if err != nil {
-		c.DisableSync = true
-		utils.AviLog.Errorf("failed to populate cache, disabling sync")
-		lib.ShutdownApi()
-	}
+	// err := PopulateCache()
+	// if err != nil {
+	// 	c.DisableSync = true
+	// 	utils.AviLog.Errorf("failed to populate cache, disabling sync")
+	// 	lib.ShutdownApi()
+	// }
 
 	// Setup and start event handlers for objects.
 	c.addIndexers()
@@ -528,9 +531,9 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 	}
 	c.Start(stopCh)
 
-	// once the l3 cache is populated, we can call the updatestatus functions from here
-	restlayer := rest.NewRestOperations(avicache.SharedAviObjCache(), avicache.SharedAVIClients())
-	restlayer.SyncObjectStatuses()
+	// // once the l3 cache is populated, we can call the updatestatus functions from here
+	// restlayer := rest.NewRestOperations(avicache.SharedAviObjCache(), avicache.SharedAVIClients())
+	// restlayer.SyncObjectStatuses()
 
 	graphQueue.SyncFunc = SyncFromNodesLayer
 	graphQueue.Run(stopCh, graphwg)

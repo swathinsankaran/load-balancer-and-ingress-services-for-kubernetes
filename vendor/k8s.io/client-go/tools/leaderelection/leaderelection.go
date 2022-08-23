@@ -297,10 +297,12 @@ func (le *LeaderElector) release() bool {
 		RenewTime:            now,
 		AcquireTime:          now,
 	}
+	klog.Errorf("SWATHIN 1 release called as expected by me")
 	if err := le.config.Lock.Update(context.TODO(), leaderElectionRecord); err != nil {
 		klog.Errorf("Failed to release lock: %v", err)
 		return false
 	}
+	klog.Errorf("SWATHIN 2 release called as expected by me")
 	le.observedRecord = leaderElectionRecord
 	le.observedTime = le.clock.Now()
 	return true
