@@ -48,6 +48,9 @@ rules:
   - apiGroups: ["ako.vmware.com"]
     resources: ["multiclusteringresses/status","serviceimports/status"]
     verbs: ["get","patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "watch", "list", "patch", "update", "delete"]
 {{- if .Values.rbac.pspEnable }}
   - apiGroups:
     - policy

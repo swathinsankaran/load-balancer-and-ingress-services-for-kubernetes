@@ -49,11 +49,9 @@ func (w *FullSyncThread) Run() {
 			w.SyncFunction()
 			// Second the function that syncs the k8s objects.
 			w.QuickSyncFunction()
-			break
 		case <-time.After(w.Interval):
 			// Just the cache sync functions.
 			w.SyncFunction()
-			break
 		}
 	}
 }
