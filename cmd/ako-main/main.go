@@ -314,6 +314,8 @@ func InitializeAKC() {
 	waitGroupMap["graph"] = wgGraph
 	wgStatus := &sync.WaitGroup{}
 	waitGroupMap["status"] = wgStatus
+	wgSync := &sync.WaitGroup{}
+	waitGroupMap["sync"] = wgSync
 	go c.InitController(informers, registeredInformers, ctrlCh, stopCh, quickSyncCh, waitGroupMap)
 	<-stopCh
 	close(ctrlCh)
