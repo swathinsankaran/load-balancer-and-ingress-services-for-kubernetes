@@ -1286,7 +1286,7 @@ func SyncFromStatusQueue(key interface{}, wg *sync.WaitGroup) error {
 }
 
 func SyncFromSyncQueue(obj interface{}, wg *sync.WaitGroup) error {
-	akosync.ProcessAndPublishToSyncLayer(obj.(*utils.RestOp))
+	akosync.ProcessAndPublishToSyncLayer(obj.([]*utils.RestOp))
 	return nil
 }
 
