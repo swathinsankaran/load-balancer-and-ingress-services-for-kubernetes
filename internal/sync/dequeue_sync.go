@@ -14,8 +14,11 @@
 package sync
 
 import (
+	"fmt"
+
 	avicache "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
+
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
 	avimodels "github.com/vmware/alb-sdk/go/models"
@@ -28,18 +31,39 @@ type checksumObject struct {
 
 // ProcessAndPublishToSyncLayer will be called from the rest layer with list of restOp objects
 // It does the pre-processing of objects before pushing it to the sync layer workers.
-func ProcessAndPublishToSyncLayer(restOps *utils.RestOp) {
+func ProcessAndPublishToSyncLayer(restOps []*utils.RestOp) {
 	// TODO
+	objToRestOpMap := make(map[string]map[string]*utils.RestOp)
+	for _, restOp := range restOps {
+		key := fmt.Sprintf("%s:%s", restOp.Model, restOp.ObjName)
+		objToRestOpMap[key] = make(map[string]*utils.RestOp)
+		objToRestOpMap[key][string(restOp.Method)] = restOp
+	}
+	mergedRestOps := make([]*utils.RestOp, 0)
+	for _, rOp := range objToRestOpMap {
+		for _, op := range rOp {
+			op.Method = utils.RestGet
+			mergedRestOps = append(mergedRestOps, op)
+		}
+	}
+	_ = avicache.SharedAVIClients().AviClient[0]
+	utils.AviLog.Debugf("Merged Rest Ops: %+v", mergedRestOps)
+	//rest.AviRestOperateWrapper(client, mergedRestOps)
+	for _, restOp := range mergedRestOps {
+		key := fmt.Sprintf("%s:%s", restOp.Model, restOp.ObjName)
+		methodToRestOp, _ := objToRestOpMap[key]
+		for method := range methodToRestOp {
+			restOp.Method = utils.RestMethod(method)
+		}
+	}
 }
 
 // PublishToSyncLayer figures out the worker and push the restOp objects to it.
 func PublishToSyncLayer(key string, restOps []*utils.RestOp) {
 	sharedQueue := utils.SharedWorkQueue().GetQueueByName(utils.SyncLayer)
-	for _, restOp := range restOps {
-		bkt := utils.Bkt(restOp.ObjName, sharedQueue.NumWorkers)
-		sharedQueue.Workqueue[bkt].AddRateLimited(restOp)
-		utils.AviLog.Infof("key: %s, msg: Published key to sync layer with modelName: %s", key, restOp.ObjName)
-	}
+	bkt := utils.Bkt("", uint32(1))
+	sharedQueue.Workqueue[bkt].AddRateLimited(restOps)
+	utils.AviLog.Infof("Published key to sync layer with modelName: %+v", restOps)
 }
 
 // Dequeues the objects coming to the sync layer and does the GET operation from the controller
@@ -80,17 +104,21 @@ func DequeueSync(restOp *utils.RestOp) {
 			utils.AviLog.Warnf("Vs is not proper in the restOp %v", restOp)
 			return
 		}
+		results, err := getVS(restOp.Path)
+		if err != nil {
+			utils.AviLog.Warn(err)
+		}
 		if restOp.Method == "Delete" {
 			k := avicache.NamespaceName{Namespace: lib.GetTenant(), Name: *vs.Name}
 			avicache.SharedAviObjCache().VsCacheMeta.AviCacheDelete(k)
 			return
 		}
-		checksumFromRestOpObj, checksumFromController := processVsObj(restOp.Path, &vs)
+		checksumFromRestOpObj, checksumFromController := getVSChecksum(&vs, results)
 		if !validateChecksums(checksumFromRestOpObj, checksumFromController) {
 			utils.AviLog.Warnf("Checksum is not matching for vs object with name %v", vs.Name)
 			return
 		}
-		avicache.SharedAviObjCache().AviObjOneVSCachePopulate(avicache.SharedAVIClients().AviClient[0], utils.CloudName, *vs.Name)
+		avicache.SharedAviObjCache().AviObjectOneVSCachePopulate(avicache.SharedAVIClients().AviClient[0], utils.CloudName, *vs.Name, results)
 	} else {
 		utils.AviLog.Warnf("model not implemented")
 		return
@@ -112,42 +140,46 @@ func processPoolObj(uri string, pool *avimodels.Pool) (checksumFromRestOpObj *ch
 	return
 }
 
-func processVsObj(uri string, vs *avimodels.VirtualService) (checksumFromRestOpObj *checksumObject, checksumFromController *checksumObject) {
-	checksumFromRestOpObj = &checksumObject{
-		name:                *vs.Name,
-		cloudConfigCheckSum: *vs.CloudConfigCksum,
-	}
-
+func getVS(uri string) ([]interface{}, error) {
 	client := avicache.SharedAVIClients().AviClient[0]
 	var restResponse interface{}
 	err := lib.AviGet(client, uri, &restResponse)
 	if err != nil {
 		utils.AviLog.Warnf("Vs Get uri %v returned err %v", uri, err)
-		return nil, nil
-	} else {
-		resp, ok := restResponse.(map[string]interface{})
+		return nil, err
+	}
+	resp, ok := restResponse.(map[string]interface{})
+	if !ok {
+		err = fmt.Errorf("vs Get uri %v returned %v type %T not as map[string]interface{}", uri, restResponse, restResponse)
+		return nil, err
+	}
+	utils.AviLog.Debugf("Vs Get uri %v returned %v vses", uri, resp["count"])
+	results, ok := resp["results"].([]interface{})
+	if !ok {
+		err = fmt.Errorf("results not of type []interface{} Instead of type %T", resp["results"])
+		return nil, err
+	}
+	return results, nil
+
+}
+
+func getVSChecksum(vs *avimodels.VirtualService, results []interface{}) (checksumFromRestOpObj *checksumObject, checksumFromController *checksumObject) {
+	checksumFromRestOpObj = &checksumObject{
+		name:                *vs.Name,
+		cloudConfigCheckSum: *vs.CloudConfigCksum,
+	}
+
+	for _, vs_intf := range results {
+		vsObj, ok := vs_intf.(map[string]interface{})
 		if !ok {
-			utils.AviLog.Warnf("Vs Get uri %v returned %v type %T not as map[string]interface{}", uri, restResponse, restResponse)
+			utils.AviLog.Warnf("vs_intf is not of type map[string]interface{} Instead of type %T", vs_intf)
 			return nil, nil
 		}
-		utils.AviLog.Debugf("Vs Get uri %v returned %v vses", uri, resp["count"])
-		results, ok := resp["results"].([]interface{})
-		if !ok {
-			utils.AviLog.Warnf("results not of type []interface{} Instead of type %T", resp["results"])
-			return nil, nil
+		checksumFromController = &checksumObject{
+			name:                vsObj["name"].(string),
+			cloudConfigCheckSum: vsObj["cloud_config_cksum"].(string),
 		}
-		for _, vs_intf := range results {
-			vsObj, ok := vs_intf.(map[string]interface{})
-			if !ok {
-				utils.AviLog.Warnf("vs_intf is not of type map[string]interface{} Instead of type %T", vs_intf)
-				return nil, nil
-			}
-			checksumFromController = &checksumObject{
-				name:                vsObj["name"].(string),
-				cloudConfigCheckSum: vsObj["cloud_config_cksum"].(string),
-			}
-			break
-		}
+		break
 	}
 	return checksumFromRestOpObj, checksumFromController
 }
