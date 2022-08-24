@@ -520,12 +520,12 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 	statusQueueParams := utils.WorkerQueue{NumWorkers: numGraphWorkers, WorkqueueName: utils.StatusQueue}
 	graphQueue = utils.SharedWorkQueue(&ingestionQueueParams, &graphQueueParams, &slowRetryQParams, &fastRetryQParams, &statusQueueParams, &syncQueueParams).GetQueueByName(utils.GraphLayer)
 
-	// err := PopulateCache()
-	// if err != nil {
-	// 	c.DisableSync = true
-	// 	utils.AviLog.Errorf("failed to populate cache, disabling sync")
-	// 	lib.ShutdownApi()
-	// }
+	err := PopulateCache()
+	if err != nil {
+		c.DisableSync = true
+		utils.AviLog.Errorf("failed to populate cache, disabling sync")
+		lib.ShutdownApi()
+	}
 
 	// Setup and start event handlers for objects.
 	c.addIndexers()
@@ -535,9 +535,11 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 	}
 	c.Start(stopCh)
 
-	// // once the l3 cache is populated, we can call the updatestatus functions from here
-	// restlayer := rest.NewRestOperations(avicache.SharedAviObjCache(), avicache.SharedAVIClients())
-	// restlayer.SyncObjectStatuses()
+	if lib.AKOControlConfig().IsLeader() {
+		// once the l3 cache is populated, we can call the updatestatus functions from here
+		restlayer := rest.NewRestOperations(avicache.SharedAviObjCache(), avicache.SharedAVIClients())
+		restlayer.SyncObjectStatuses()
+	}
 
 	graphQueue.SyncFunc = SyncFromNodesLayer
 	graphQueue.Run(stopCh, graphwg)
@@ -1286,7 +1288,7 @@ func SyncFromStatusQueue(key interface{}, wg *sync.WaitGroup) error {
 }
 
 func SyncFromSyncQueue(obj interface{}, wg *sync.WaitGroup) error {
-	akosync.ProcessAndPublishToSyncLayer(obj.([]*utils.RestOp))
+	akosync.DequeueSync(obj.(*utils.RestOp))
 	return nil
 }
 

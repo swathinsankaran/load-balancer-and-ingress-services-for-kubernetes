@@ -115,6 +115,7 @@ type RestOp struct {
 	Model    string
 	Version  string
 	ObjName  string // Optional field - right only to be used for delete.
+	RetryNum int
 }
 
 type ServiceMetadataObj struct {
