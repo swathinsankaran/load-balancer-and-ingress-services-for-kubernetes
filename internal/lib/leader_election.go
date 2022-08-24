@@ -67,15 +67,15 @@ func NewLeaderElector(cs *kubernetes.Clientset, populateCache func() error,
 			utils.AviLog.Debug("Current AKO is the leader")
 			AKOControlConfig().SetIsLeaderFlag(true)
 			AKOControlConfig().PodEventf(v1.EventTypeNormal, "LeaderElection", "AKO became the leader")
-			if err := populateCache(); err != nil {
-				ShutdownApi()
-				utils.AviLog.Errorf("populate cache failed with error %v", err)
-				return
-			}
-			AKOControlConfig().PodEventf(v1.EventTypeNormal, "ControllerCacheSync", "Controller cache population completed")
+			// if err := populateCache(); err != nil {
+			// 	ShutdownApi()
+			// 	utils.AviLog.Errorf("populate cache failed with error %v", err)
+			// 	return
+			// }
+			// AKOControlConfig().PodEventf(v1.EventTypeNormal, "ControllerCacheSync", "Controller cache population completed")
 
 			// once the l3 cache is populated, we can call the updatestatus functions from here
-			go syncStatus()
+			// go syncStatus()
 			leaderElector.readyCh <- struct{}{}
 		},
 		OnStoppedLeading: func() {

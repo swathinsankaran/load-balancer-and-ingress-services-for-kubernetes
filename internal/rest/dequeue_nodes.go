@@ -306,7 +306,7 @@ func (rest *RestOperations) RestOperation(vsName string, namespace string, avimo
 		utils.AviLog.Debugf("POST restops %s", utils.Stringify(rest_ops))
 		if !lib.AKOControlConfig().IsLeader() {
 			utils.AviLog.Infof("AKO is running as a follower, pushing the objects to sync layer")
-			publishToSyncLayer(key, rest_ops)
+			PublishToSyncLayer(rest_ops)
 			return
 		}
 		if success, _ := rest.ExecuteRestAndPopulateCache(rest_ops, vsKey, avimodel, key, false); !success {
@@ -469,7 +469,7 @@ func (rest *RestOperations) DeleteVSOper(vsKey avicache.NamespaceName, vs_cache_
 		rest_ops = rest.PoolDelete(vs_cache_obj.PoolKeyCollection, namespace, rest_ops, key)
 		if !lib.AKOControlConfig().IsLeader() {
 			utils.AviLog.Infof("AKO is running as a follower, pushing the objects to sync layer")
-			publishToSyncLayer(key, rest_ops)
+			PublishToSyncLayer(rest_ops)
 			return true
 		}
 		success, _ := rest.ExecuteRestAndPopulateCache(rest_ops, vsKey, nil, key, false)
@@ -1726,10 +1726,13 @@ func (rest *RestOperations) PkiProfileDelete(pkiProfileDelete []avicache.Namespa
 	return rest_ops
 }
 
-// publishToSyncLayer figures out the worker and push the restOp objects to it.
-func publishToSyncLayer(key string, restOps []*utils.RestOp) {
-	sharedQueue := utils.SharedWorkQueue().GetQueueByName(utils.SyncLayer)
-	bkt := utils.Bkt(key, uint32(1))
-	sharedQueue.Workqueue[bkt].AddRateLimited(restOps)
+// PublishToSyncLayer figures out the worker and push the restOp objects to it.
+func PublishToSyncLayer(restOps []*utils.RestOp) {
+	for _, restOp := range restOps {
+		sharedQueue := utils.SharedWorkQueue().GetQueueByName(utils.SyncLayer)
+		modelName := lib.GetModelName(lib.GetTenant(), restOp.ObjName)
+		bkt := utils.Bkt(modelName, sharedQueue.NumWorkers)
+		sharedQueue.Workqueue[bkt].AddRateLimited(restOp)
+	}
 	utils.AviLog.Infof("Published key to sync layer with modelName: %+v", restOps)
 }
