@@ -26,7 +26,6 @@ import (
 	avicache "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/sync"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 )
 
@@ -143,7 +142,7 @@ func (rest *RestOperations) RestOperationForEvh(vsName string, namespace string,
 		}
 		if !lib.AKOControlConfig().IsLeader() {
 			utils.AviLog.Infof("AKO is running as a follower, pushing the objects to sync layer")
-			sync.PublishToSyncLayer(key, evh_rest_ops)
+			publishToSyncLayer(key, evh_rest_ops)
 			return
 		}
 		if success, processNextChild := rest.ExecuteRestAndPopulateCache(evh_rest_ops, vsKey, avimodel, key, true); !success {
