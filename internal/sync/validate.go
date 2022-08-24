@@ -17,6 +17,8 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 )
 
-func validateRestOperations(restOp *utils.RestOp) {
-
+func isSameChecksum(checksumFromRestOpObj, checksumFromController *checksumObject) bool {
+	h1 := utils.Hash(utils.Stringify(checksumFromRestOpObj))
+	h2 := utils.Hash(utils.Stringify(checksumFromController))
+	return h1 == h2
 }
