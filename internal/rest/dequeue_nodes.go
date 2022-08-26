@@ -304,11 +304,6 @@ func (rest *RestOperations) RestOperation(vsName string, namespace string, avimo
 		}
 		utils.AviLog.Debugf("POST key: %s, vsKey: %s", key, vsKey)
 		utils.AviLog.Debugf("POST restops %s", utils.Stringify(rest_ops))
-		if !lib.AKOControlConfig().IsLeader() {
-			utils.AviLog.Infof("AKO is running as a follower, pushing the objects to sync layer")
-			PublishToSyncLayer(rest_ops)
-			return
-		}
 		if success, _ := rest.ExecuteRestAndPopulateCache(rest_ops, vsKey, avimodel, key, false); !success {
 			return
 		}
@@ -467,11 +462,6 @@ func (rest *RestOperations) DeleteVSOper(vsKey avicache.NamespaceName, vs_cache_
 		rest_ops = rest.L4PolicyDelete(vs_cache_obj.L4PolicyCollection, namespace, rest_ops, key)
 		rest_ops = rest.PoolGroupDelete(vs_cache_obj.PGKeyCollection, namespace, rest_ops, key)
 		rest_ops = rest.PoolDelete(vs_cache_obj.PoolKeyCollection, namespace, rest_ops, key)
-		if !lib.AKOControlConfig().IsLeader() {
-			utils.AviLog.Infof("AKO is running as a follower, pushing the objects to sync layer")
-			PublishToSyncLayer(rest_ops)
-			return true
-		}
 		success, _ := rest.ExecuteRestAndPopulateCache(rest_ops, vsKey, nil, key, false)
 		if success {
 			vsKeysPending := rest.cache.VsCacheMeta.AviGetAllKeys()
@@ -518,6 +508,12 @@ func (rest *RestOperations) deleteSniVs(vsKey avicache.NamespaceName, vs_cache_o
 }
 
 func (rest *RestOperations) ExecuteRestAndPopulateCache(rest_ops []*utils.RestOp, aviObjKey avicache.NamespaceName, avimodel *nodes.AviObjectGraph, key string, isEvh bool, sslKey ...utils.NamespaceName) (bool, bool) {
+	if !lib.AKOControlConfig().IsLeader() {
+		utils.AviLog.Infof("AKO is running as a follower, pushing the objects to sync layer")
+		PublishToSyncLayer(rest_ops)
+		return true, true
+	}
+
 	// Choose a avi client based on the model name hash. This would ensure that the same worker queue processes updates for a given VS all the time.
 	shardSize := lib.GetshardSize()
 	if shardSize == 0 {

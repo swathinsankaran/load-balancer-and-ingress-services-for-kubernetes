@@ -626,6 +626,7 @@ LABEL:
 	fastRetryQueue.StopWorkers(stopCh)
 	slowRetryQueue.StopWorkers(stopCh)
 	statusQueue.StopWorkers(stopCh)
+	syncQueue.StopWorkers(stopCh)
 }
 
 func (c *AviController) RefreshAuthToken() {

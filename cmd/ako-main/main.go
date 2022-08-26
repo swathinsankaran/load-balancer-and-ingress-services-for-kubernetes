@@ -335,6 +335,7 @@ func InitializeAKC() {
 		wgGraph.Wait()
 		wgFastRetry.Wait()
 		wgStatus.Wait()
+		wgSync.Wait()
 	}()
 	// Timeout after 60 seconds.
 	timeout := 60 * time.Second

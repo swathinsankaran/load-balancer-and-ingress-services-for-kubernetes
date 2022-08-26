@@ -140,11 +140,6 @@ func (rest *RestOperations) RestOperationForEvh(vsName string, namespace string,
 		} else {
 			_, evh_rest_ops = rest.EvhNodeCU(evhNode, nil, namespace, sni_to_delete, evh_rest_ops, key)
 		}
-		if !lib.AKOControlConfig().IsLeader() {
-			utils.AviLog.Infof("AKO is running as a follower, pushing the objects to sync layer")
-			PublishToSyncLayer(evh_rest_ops)
-			return
-		}
 		if success, processNextChild := rest.ExecuteRestAndPopulateCache(evh_rest_ops, vsKey, avimodel, key, true); !success {
 			if !processNextChild {
 				utils.AviLog.Infof("key: %s, msg: Failure in processing EVH node: %s. Not processing other child nodes.", key, evhNode.Name)
