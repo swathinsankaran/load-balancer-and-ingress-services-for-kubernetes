@@ -21,7 +21,7 @@ import (
 	"regexp"
 	"time"
 
-	istiov1alpha3 "istio.io/client-go/pkg/apis/networking/v1alpha3"
+	istiov1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 
 	istiocrd "istio.io/client-go/pkg/clientset/versioned"
 	istioinformers "istio.io/client-go/pkg/informers/externalversions"
@@ -330,7 +330,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			if c.DisableSync {
 				return
 			}
-			vs := obj.(*istiov1alpha3.VirtualService)
+			vs := obj.(*istiov1beta1.VirtualService)
 			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(vs))
 			key := lib.IstioVirtualService + "/" + utils.ObjKey(vs)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
@@ -346,8 +346,8 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			if c.DisableSync {
 				return
 			}
-			oldObj := old.(*istiov1alpha3.VirtualService)
-			vs := new.(*istiov1alpha3.VirtualService)
+			oldObj := old.(*istiov1beta1.VirtualService)
+			vs := new.(*istiov1beta1.VirtualService)
 			if !reflect.DeepEqual(oldObj.Spec, vs.Spec) {
 				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(vs))
 				key := lib.IstioVirtualService + "/" + utils.ObjKey(vs)
@@ -360,14 +360,14 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			if c.DisableSync {
 				return
 			}
-			vs, ok := obj.(*istiov1alpha3.VirtualService)
+			vs, ok := obj.(*istiov1beta1.VirtualService)
 			if !ok {
 				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 				if !ok {
 					utils.AviLog.Errorf("couldn't get object from tombstone %#v", obj)
 					return
 				}
-				vs, ok = tombstone.Obj.(*istiov1alpha3.VirtualService)
+				vs, ok = tombstone.Obj.(*istiov1beta1.VirtualService)
 				if !ok {
 					utils.AviLog.Errorf("Tombstone contained object that is not an vs: %#v", obj)
 					return
@@ -389,7 +389,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			if c.DisableSync {
 				return
 			}
-			dr := obj.(*istiov1alpha3.DestinationRule)
+			dr := obj.(*istiov1beta1.DestinationRule)
 			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(dr))
 			key := lib.IstioDestinationRule + "/" + utils.ObjKey(dr)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
@@ -405,8 +405,8 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			if c.DisableSync {
 				return
 			}
-			oldObj := old.(*istiov1alpha3.DestinationRule)
-			dr := new.(*istiov1alpha3.DestinationRule)
+			oldObj := old.(*istiov1beta1.DestinationRule)
+			dr := new.(*istiov1beta1.DestinationRule)
 			if !reflect.DeepEqual(oldObj.Spec, dr.Spec) {
 				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(dr))
 				key := lib.IstioDestinationRule + "/" + utils.ObjKey(dr)
@@ -419,14 +419,14 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			if c.DisableSync {
 				return
 			}
-			dr, ok := obj.(*istiov1alpha3.DestinationRule)
+			dr, ok := obj.(*istiov1beta1.DestinationRule)
 			if !ok {
 				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 				if !ok {
 					utils.AviLog.Errorf("couldn't get object from tombstone %#v", obj)
 					return
 				}
-				dr, ok = tombstone.Obj.(*istiov1alpha3.DestinationRule)
+				dr, ok = tombstone.Obj.(*istiov1beta1.DestinationRule)
 				if !ok {
 					utils.AviLog.Errorf("Tombstone contained object that is not an vs: %#v", obj)
 					return
@@ -448,7 +448,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			if c.DisableSync {
 				return
 			}
-			vs := obj.(*istiov1alpha3.Gateway)
+			vs := obj.(*istiov1beta1.Gateway)
 			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(vs))
 			key := lib.IstioGateway + "/" + utils.ObjKey(vs)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
@@ -464,8 +464,8 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			if c.DisableSync {
 				return
 			}
-			oldObj := old.(*istiov1alpha3.Gateway)
-			vs := new.(*istiov1alpha3.Gateway)
+			oldObj := old.(*istiov1beta1.Gateway)
+			vs := new.(*istiov1beta1.Gateway)
 			if !reflect.DeepEqual(oldObj.Spec, vs.Spec) {
 				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(vs))
 				key := lib.IstioGateway + "/" + utils.ObjKey(vs)
@@ -478,14 +478,14 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			if c.DisableSync {
 				return
 			}
-			vs, ok := obj.(*istiov1alpha3.Gateway)
+			vs, ok := obj.(*istiov1beta1.Gateway)
 			if !ok {
 				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 				if !ok {
 					utils.AviLog.Errorf("couldn't get object from tombstone %#v", obj)
 					return
 				}
-				vs, ok = tombstone.Obj.(*istiov1alpha3.Gateway)
+				vs, ok = tombstone.Obj.(*istiov1beta1.Gateway)
 				if !ok {
 					utils.AviLog.Errorf("Tombstone contained object that is not an vs: %#v", obj)
 					return

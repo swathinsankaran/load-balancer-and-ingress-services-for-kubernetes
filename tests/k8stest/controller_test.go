@@ -395,3 +395,66 @@ func TestServiceImport(t *testing.T) {
 	}
 	waitAndverify(t, "ServiceImport/avi-system/SI-01")
 }
+
+func TestISTIOGateway(t *testing.T) {
+
+	os.Setenv("ENABLE_EVH", "true")
+	os.Setenv("ISTIO_ENABLED", "true")
+	defer func() {
+		os.Setenv("ENABLE_EVH", "false")
+		os.Setenv("ISTIO_ENABLED", "false")
+	}()
+	gwObj := integrationtest.FakeISTIOGateway{
+		Name:      "GW-01",
+		Namespace: "default",
+		Ports:     []uint32{80, 443},
+		Protocols: []string{"HTTP", "HTTPS"},
+		Hosts:     []string{"uk.bookinfo.com", "eu.bookinfo.com"},
+	}
+	fakeGw := gwObj.Create()
+	_, err := crdClient.AkoV1alpha1().ServiceImports("avi-system").Create(context.TODO(), fakeGw, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Istio Gateway. Error: %v", err)
+	}
+	waitAndverify(t, "ServiceImport/avi-system/GW-01")
+}
+
+func TestISTIOVirtualService(t *testing.T) {
+
+	os.Setenv("ENABLE_EVH", "true")
+	os.Setenv("ISTIO_ENABLED", "true")
+	defer func() {
+		os.Setenv("ENABLE_EVH", "false")
+		os.Setenv("ISTIO_ENABLED", "false")
+	}()
+	vsObj := integrationtest.FakeISTIOVirtualService{
+		Name:      "VS-01",
+		Namespace: "default",
+	}
+	fakeVS := vsObj.Create()
+	_, err := crdClient.AkoV1alpha1().ServiceImports("avi-system").Create(context.TODO(), fakeVS, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Service Import: %v", err)
+	}
+	waitAndverify(t, "ServiceImport/avi-system/SI-01")
+}
+
+func TestISTIODestinationRule(t *testing.T) {
+
+	os.Setenv("ENABLE_EVH", "true")
+	os.Setenv("ISTIO_ENABLED", "true")
+	defer func() {
+		os.Setenv("ENABLE_EVH", "false")
+		os.Setenv("ISTIO_ENABLED", "false")
+	}()
+	drObj := integrationtest.FakeISTIODestinationRule{
+		Name:      "DR-01",
+		Namespace: "default",
+	}
+	fakeDR := drObj.Create()
+	_, err := crdClient.AkoV1alpha1().ServiceImports("avi-system").Create(context.TODO(), fakeDR, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Service Import: %v", err)
+	}
+	waitAndverify(t, "ServiceImport/avi-system/SI-01")
+}

@@ -38,6 +38,9 @@ import (
 	crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned/fake"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
+	networkingv1beta1 "istio.io/api/networking/v1beta1"
+	istiov1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
+
 	"github.com/onsi/gomega"
 	"github.com/vmware/alb-sdk/go/models"
 	corev1 "k8s.io/api/core/v1"
@@ -1722,4 +1725,91 @@ func (si FakeServiceImport) Create() *akov1alpha1.ServiceImport {
 	}
 	siObj.Spec.SvcPorts = append(siObj.Spec.SvcPorts, backendPort)
 	return siObj
+}
+
+// Fake ISTIO Gateway
+type FakeISTIOGateway struct {
+	Name        string
+	Namespace   string
+	annotations map[string]string
+	Ports       []uint32
+	Protocols   []string
+	Hosts       []string
+	// TLS TODO
+}
+
+func (gw FakeISTIOGateway) Create() *istiov1beta1.Gateway {
+	gateway := &istiov1beta1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        gw.Name,
+			Namespace:   gw.Namespace,
+			Annotations: gw.annotations,
+		},
+	}
+
+	for i := range gw.Ports {
+		server := &networkingv1beta1.Server{
+			Port: &networkingv1beta1.Port{
+				Number:   gw.Ports[i],
+				Protocol: gw.Protocols[i],
+			},
+			Hosts: gw.Hosts,
+			// Tls: , // TODO
+		}
+		gateway.Spec.Servers = append(gateway.Spec.Servers, server)
+	}
+	return gateway
+}
+
+// Fake ISTIO VirtualService
+type FakeISTIOVirtualService struct {
+	Name        string
+	Namespace   string
+	annotations map[string]string
+	Hosts       []string
+	Gateways    []string
+	// TODO: include http, tls, tcp related configs
+}
+
+func (vs FakeISTIOVirtualService) Create() *istiov1beta1.VirtualService {
+	virtualService := &istiov1beta1.VirtualService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        vs.Name,
+			Namespace:   vs.Namespace,
+			Annotations: vs.annotations,
+		},
+	}
+	// TODO: include http, tls, tcp related configs
+	return virtualService
+}
+
+// Fake ISTIO DestinationRule
+type FakeISTIODestinationRule struct {
+	Name        string
+	Namespace   string
+	annotations map[string]string
+	Host        string
+	LbAlgorithm string // SIMPLE ("ROUND_ROBIN","LEAST_CONN","RANDOM","PASSTHROUGH") is only supported for MVP
+	// TODO: include other configs
+}
+
+func (dr FakeISTIODestinationRule) Create() *istiov1beta1.DestinationRule {
+	destinationRule := &istiov1beta1.DestinationRule{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        dr.Name,
+			Namespace:   dr.Namespace,
+			Annotations: dr.annotations,
+		},
+		Spec: networkingv1beta1.DestinationRule{
+			Host: dr.Host,
+			TrafficPolicy: &networkingv1beta1.TrafficPolicy{
+				LoadBalancer: &networkingv1beta1.LoadBalancerSettings{
+					LbPolicy: &networkingv1beta1.LoadBalancerSettings_Simple{
+						Simple: networkingv1beta1.LoadBalancerSettings_SimpleLB(networkingv1beta1.LoadBalancerSettings_SimpleLB_value[dr.LbAlgorithm]),
+					},
+				},
+			},
+		},
+	}
+	return destinationRule
 }
