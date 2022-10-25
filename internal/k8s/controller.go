@@ -28,6 +28,7 @@ import (
 	oshiftclient "github.com/openshift/client-go/route/clientset/versioned"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -147,10 +148,8 @@ func isIngressUpdated(oldIngress, newIngress *networkingv1.Ingress) bool {
 	delete(newAnnotation, lib.VSAnnotation)
 	delete(newAnnotation, lib.ControllerAnnotation)
 
-	oldAnnotationHash := utils.Hash(utils.Stringify(oldAnnotation))
-	newAnnotationHash := utils.Hash(utils.Stringify(newAnnotation))
-
-	if oldSpecHash != newSpecHash || oldAnnotationHash != newAnnotationHash {
+	if oldSpecHash != newSpecHash ||
+		!equality.Semantic.DeepEqual(oldAnnotation, newAnnotation) {
 		return true
 	}
 

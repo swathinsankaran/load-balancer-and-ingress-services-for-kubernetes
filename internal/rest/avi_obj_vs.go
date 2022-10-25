@@ -674,6 +674,9 @@ func (rest *RestOperations) AviVsCacheAdd(rest_op *utils.RestOp, key string) err
 				ServiceMetadataObj: svc_mdata_obj,
 				LastModified:       lastModifiedStr,
 			}
+			if found_parent {
+				vs_cache_obj.ParentVSRef = avicache.NamespaceName{Namespace: rest_op.Tenant, Name: parentVsObj.Name}
+			}
 			if val, ok := resp["enable_rhi"].(bool); ok {
 				vs_cache_obj.EnableRhi = val
 			}

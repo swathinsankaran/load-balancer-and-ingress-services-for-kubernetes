@@ -306,13 +306,13 @@ func (rest *RestOperations) AviHTTPPolicyCacheAdd(rest_op *utils.RestOp, vsKey a
 	for _, resp := range resp_elems {
 		name, ok := resp["name"].(string)
 		if !ok {
-			utils.AviLog.Warnf("Name not present in response %v", resp)
+			utils.AviLog.Warnf("key: %s, Name not present in response %v", key, resp)
 			continue
 		}
 
 		uuid, ok := resp["uuid"].(string)
 		if !ok {
-			utils.AviLog.Warnf("Uuid not present in response %v", resp)
+			utils.AviLog.Warnf("key: %s, Uuid not present in response %v", key, resp)
 			continue
 		}
 

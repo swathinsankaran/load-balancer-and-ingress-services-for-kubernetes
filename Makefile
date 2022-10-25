@@ -122,7 +122,7 @@ deps:
 # docker images
 .PHONY: docker
 docker: glob-vars
-	sudo docker build \
+	docker build \
 	-t $(BINARY_NAME_AKO):latest \
 	--label "BUILD_TAG=$(BUILD_TAG)" \
 	--label "BUILD_TIME=$(BUILD_TIME)" \

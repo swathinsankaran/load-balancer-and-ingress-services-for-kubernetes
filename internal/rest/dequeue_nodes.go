@@ -29,6 +29,7 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/clients"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/session"
+	"k8s.io/apimachinery/pkg/util/runtime"
 
 	avimodels "github.com/vmware/alb-sdk/go/models"
 )
@@ -514,7 +515,7 @@ func (rest *RestOperations) DeleteVSOper(vsKey avicache.NamespaceName, vs_cache_
 		success, _ := rest.ExecuteRestAndPopulateCache(rest_ops, vsKey, nil, key, false)
 		if success {
 			vsKeysPending := rest.cache.VsCacheMeta.AviGetAllKeys()
-			utils.AviLog.Infof("key: %s, msg: Number of VS deletion pending: %d", key, len(vsKeysPending))
+			utils.AviLog.Infof("key: %s, msg: Number of VS deletion pending: %d, %v", key, len(vsKeysPending), vsKeysPending)
 			if len(vsKeysPending) == 0 {
 				// All VSes got deleted, done with deleteConfig operation. Now notify the user
 				if lib.ConfigDeleteSyncChan != nil {
@@ -557,6 +558,11 @@ func (rest *RestOperations) deleteSniVs(vsKey avicache.NamespaceName, vs_cache_o
 }
 
 func (rest *RestOperations) ExecuteRestAndPopulateCache(rest_ops []*utils.RestOp, aviObjKey avicache.NamespaceName, avimodel *nodes.AviObjectGraph, key string, isEvh bool, sslKey ...utils.NamespaceName) (bool, bool) {
+
+	if !lib.AKOControlConfig().IsLeader() {
+		<-time.After(500 * time.Millisecond)
+	}
+
 	// Choose a avi client based on the model name hash. This would ensure that the same worker queue processes updates for a given VS all the time.
 	shardSize := lib.GetshardSize()
 	if shardSize == 0 {
@@ -567,7 +573,7 @@ func (rest *RestOperations) ExecuteRestAndPopulateCache(rest_ops []*utils.RestOp
 	if shardSize != 0 {
 		bkt := utils.Bkt(key, shardSize)
 		if len(rest.aviRestPoolClient.AviClient) > 0 && len(rest_ops) > 0 {
-			utils.AviLog.Infof("key: %s, msg: processing in rest queue number: %v", key, bkt)
+			utils.AviLog.Infof("key: %s, msg: processing in rest queue number: %v, caller %v", key, bkt, runtime.GetCaller())
 			aviclient := rest.aviRestPoolClient.AviClient[bkt]
 			err := AviRestOperateWrapper(aviclient, rest_ops)
 			if err == nil {
@@ -589,13 +595,18 @@ func (rest *RestOperations) ExecuteRestAndPopulateCache(rest_ops []*utils.RestOp
 				} else if avimodel != nil && !isEvh && len(avimodel.GetAviVS()) > 0 {
 					publishKey = avimodel.GetAviVS()[0].Name
 				}
-
+				utils.AviLog.Warnf("key: %s, SWATHIN publishKey %v", key, publishKey)
 				if publishKey == "" {
 					// This is a delete case for the virtualservice. Derive the virtualservice from the 'key'
 					splitKeys := strings.Split(key, "/")
 					if len(splitKeys) == 2 {
 						publishKey = splitKeys[1]
 					}
+				}
+				utils.AviLog.Warnf("key: %s, SWATHIN publishKey %v", key, publishKey)
+				if err.Error() == "results are empty for the request" {
+					rest.PublishKeyToRetryLayer(publishKey, key)
+					return false, processNextObj
 				}
 
 				if rest.CheckAndPublishForRetry(err, publishKey, key, avimodel) {
@@ -793,7 +804,6 @@ func (rest *RestOperations) RefreshCacheForRetryLayer(parentVsKey string, aviObj
 	retry := true
 	processNextObj := true
 	utils.AviLog.Warnf("key: %s, msg: problem in processing request for: %s", key, rest_op.Model)
-	utils.AviLog.Infof("key: %s, msg: error str: %s", key, errorStr)
 	aviObjCache := avicache.SharedAviObjCache()
 
 	if statuscode >= 500 && statuscode < 599 {
@@ -1039,7 +1049,7 @@ func (rest *RestOperations) RefreshCacheForRetryLayer(parentVsKey string, aviObj
 				switch rest_op.Obj.(type) {
 				case utils.AviRestObjMacro:
 					VSDataScriptSet = *rest_op.Obj.(utils.AviRestObjMacro).Data.(avimodels.VSDataScriptSet).Name
-				case avimodels.VSDataScript:
+				case avimodels.VSDataScriptSet:
 					VSDataScriptSet = *rest_op.Obj.(avimodels.VSDataScriptSet).Name
 				}
 				aviObjCache.AviPopulateOneVsDSCache(c, utils.CloudName, VSDataScriptSet)
@@ -1426,6 +1436,14 @@ func (rest *RestOperations) DatascriptCU(ds_nodes []*nodes.AviHTTPDataScriptNode
 							}
 						}
 					}
+				} else {
+					// If the DS Is not found - let's do a POST call.
+					for _, ds := range ds_nodes {
+						restOp := rest.AviDSBuild(ds, nil, key)
+						if restOp != nil {
+							rest_ops = append(rest_ops, restOp)
+						}
+					}
 				}
 			}
 		}
@@ -1697,6 +1715,7 @@ func (rest *RestOperations) SSLKeyCertDelete(ssl_to_delete []avicache.NamespaceN
 			ssl_cache_obj, _ := ssl_cache.(*avicache.AviSSLCache)
 			restOp := rest.AviSSLKeyCertDel(ssl_cache_obj.Uuid, namespace)
 			restOp.ObjName = del_ssl.Name
+			utils.AviLog.Infof("key %s, SWATHIN SSLCertKey DELETE Restop %v, called from %s", key, utils.Stringify(restOp), runtime.GetCaller())
 			//Objects with a CA ref should be deleted first
 			if !ssl_cache_obj.HasCARef {
 				noCARefRestOps = append(noCARefRestOps, restOp)

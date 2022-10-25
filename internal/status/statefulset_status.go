@@ -57,6 +57,13 @@ func ResetStatefulSetStatus() {
 }
 
 func ResetStatefulSetAnnotation() {
+
+	if !lib.AKOControlConfig().IsLeader() {
+		utils.AviLog.Debugf("AKO is running as a follower, not updating the annotation")
+		lib.AKOControlConfig().PodEventf(corev1.EventTypeNormal, lib.AKODeleteConfigUnset, "DeleteConfig unset in configmap, sync would be enabled")
+		return
+	}
+
 	ss, err := utils.GetInformers().ClientSet.AppsV1().StatefulSets(utils.GetAKONamespace()).Get(context.TODO(), lib.AKOStatefulSet, metav1.GetOptions{})
 	if err != nil {
 		utils.AviLog.Warnf("Error in getting ako statefulset: %v", err)
@@ -93,6 +100,12 @@ func ResetStatefulSetAnnotation() {
 }
 
 func AddStatefulSetAnnotation(reason string) {
+
+	if !lib.AKOControlConfig().IsLeader() {
+		utils.AviLog.Debug("AKO is running as a follower, not updating the annotation")
+		return
+	}
+
 	ss, err := utils.GetInformers().ClientSet.AppsV1().StatefulSets(utils.GetAKONamespace()).Get(context.TODO(), lib.AKOStatefulSet, metav1.GetOptions{})
 	if err != nil {
 		utils.AviLog.Warnf("Error in getting ako statefulset: %v", err)

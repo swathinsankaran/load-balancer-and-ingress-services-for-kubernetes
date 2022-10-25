@@ -1166,7 +1166,7 @@ func (c *AviObjCache) AviPopulateOneVsDSCache(client *clients.AviClient,
 	var uri string
 	akoUser := lib.AKOUser
 
-	uri = "/api/vsdatascript?name=" + objName + "&created_by=" + akoUser
+	uri = "/api/vsdatascriptset?name=" + objName + "&created_by=" + akoUser
 
 	result, err := lib.AviGetCollectionRaw(client, uri)
 	if err != nil {
@@ -2033,6 +2033,7 @@ func (c *AviObjCache) AviObjVSCachePopulate(client *clients.AviClient, cloud str
 					L4PolicyCollection:   l4Keys,
 					LastModified:         vs["_last_modified"].(string),
 				}
+				utils.AviLog.Debugf("SWATHIN UUID %s", vs["uuid"].(string))
 				if val, ok := vs["enable_rhi"]; ok {
 					vsMetaObj.EnableRhi = val.(bool)
 				}
@@ -2266,6 +2267,7 @@ func (c *AviObjCache) AviObjOneVSCachePopulate(client *clients.AviClient, cloud 
 					L4PolicyCollection:   l4Keys,
 					ServiceMetadataObj:   svc_mdata_obj,
 				}
+				utils.AviLog.Debugf("SWATHIN UUID %s", vs["uuid"].(string))
 				if val, ok := vs["enable_rhi"]; ok {
 					vsMetaObj.EnableRhi = val.(bool)
 				}
@@ -2715,6 +2717,12 @@ func validateAndConfigureSeGroup(client *clients.AviClient, returnErr *error) bo
 
 // ConfigureSeGroupLabels configures labels on the SeGroup if not present already
 func ConfigureSeGroupLabels(client *clients.AviClient, seGroup *models.ServiceEngineGroup) error {
+
+	if !lib.AKOControlConfig().IsLeader() {
+		utils.AviLog.Debugf("AKO is running as a follower, not configuring SE Group labels")
+		return nil
+	}
+
 	labels := seGroup.Labels
 	segName := *seGroup.Name
 	SetAdminTenant := session.SetTenant(lib.GetAdminTenant())

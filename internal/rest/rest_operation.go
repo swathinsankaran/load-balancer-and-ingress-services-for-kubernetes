@@ -246,6 +246,7 @@ type AviRestClientPool struct {
 }
 
 func AviRestOperate(c *clients.AviClient, rest_ops []*utils.RestOp) error {
+	var failure bool
 	for i, op := range rest_ops {
 		SetTenant := session.SetTenant(op.Tenant)
 		SetTenant(c.AviSession)
@@ -253,7 +254,15 @@ func AviRestOperate(c *clients.AviClient, rest_ops []*utils.RestOp) error {
 			SetVersion := session.SetVersion(op.Version)
 			SetVersion(c.AviSession)
 		}
-		switch op.Method {
+		method := op.Method
+		if !lib.AKOControlConfig().IsLeader() {
+			method = utils.RestGet
+			if op.Method == utils.RestPost {
+				utils.AviLog.Debugf("SWATHIN: Got a POST operation: %s, %s", op.ObjName, op.Path)
+				op.Path += "?name=" + op.ObjName
+			}
+		}
+		switch method {
 		case utils.RestPost:
 			op.Err = c.AviSession.Post(op.Path, op.Obj, &op.Response)
 		case utils.RestPut:
@@ -282,6 +291,10 @@ func AviRestOperate(c *clients.AviClient, rest_ops []*utils.RestOp) error {
 			} else if aviErr.HttpStatusCode == 404 && op.Method == utils.RestDelete {
 				utils.AviLog.Warnf("Error during rest operation: %v, object of type %s not found in the controller. Ignoring err: %v", op.Method, op.Model, op.Err)
 				continue
+			} else if aviErr.HttpStatusCode == 409 && op.Method == utils.RestPost {
+				utils.AviLog.Warnf("Error during rest operation: %v, object of type %s found in the controller. Ignoring err: %v", op.Method, op.Model, op.Err)
+				failure = true
+				continue
 			} else if !isErrorRetryable(aviErr.HttpStatusCode, *aviErr.Message) {
 				if op.Method != utils.RestPost {
 					continue
@@ -298,7 +311,22 @@ func AviRestOperate(c *clients.AviClient, rest_ops []*utils.RestOp) error {
 		} else {
 			utils.AviLog.Debugf(`RestOp method %v path %v tenant %v response %v`,
 				op.Method, op.Path, op.Tenant, utils.Stringify(op.Response))
+			if resp, ok := op.Response.(map[string]interface{}); ok {
+				if count, ok := resp["count"].(int); ok {
+					utils.AviLog.Debugf("SWATHIN count %v", count)
+					if count == 0 {
+						return errors.New("results are empty for the request")
+					}
+				} else {
+					utils.AviLog.Debugf("SWATHIN else count empty")
+				}
+			} else {
+				utils.AviLog.Debugf("SWATHIN else resp empty")
+			}
 		}
+	}
+	if failure {
+		return errors.New("aborted due to 409 errors")
 	}
 	return nil
 }

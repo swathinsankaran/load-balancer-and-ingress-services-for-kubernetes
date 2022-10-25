@@ -20,6 +20,7 @@ import (
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
+	"k8s.io/apimachinery/pkg/util/runtime"
 )
 
 type NamespaceName struct {
@@ -508,6 +509,7 @@ func (c *AviCache) AviCacheGetNameByUuid(uuid string) (interface{}, bool) {
 func (c *AviCache) AviCacheAdd(k interface{}, val interface{}) {
 	c.cache_lock.Lock()
 	defer c.cache_lock.Unlock()
+	utils.AviLog.Warnf("SWATHIN cache key %v, val %v, caller %s", k, val, runtime.GetCaller())
 	c.cache[k] = val
 }
 
