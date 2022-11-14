@@ -134,7 +134,6 @@ func (rest *RestOperations) AviSSLKeyCertAdd(rest_op *utils.RestOp, vsKey avicac
 			utils.AviLog.Warnf("Name not present in response %v", resp)
 			continue
 		}
-
 		uuid, ok := resp["uuid"].(string)
 		if !ok {
 			utils.AviLog.Warnf("Uuid not present in response %v", resp)

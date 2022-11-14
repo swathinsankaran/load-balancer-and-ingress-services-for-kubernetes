@@ -17,6 +17,7 @@ package k8s
 import (
 	v1 "k8s.io/api/core/v1"
 
+	avicache "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 )
@@ -39,17 +40,25 @@ func (c *AviController) OnStartedLeading() {
 	// 	return
 	// }
 
-	// When GetDeleteConfigMap returns true, it means that the deleteConfig is set.
+	// When deleteConfigFromConfigmap returns true, it means that the deleteConfig is set.
 	// A cleanup is required in this case.
-	isDeleteConfigSet := lib.GetDeleteConfigMap()
+	isDeleteConfigSet := deleteConfigFromConfigmap(c.informers.ClientSet)
 	if isDeleteConfigSet {
-		cleanupStaleVSes(isDeleteConfigSet)
+		lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "AKODeleteConfig", "AKO started deleting objects")
+		cache := avicache.SharedAviObjCache()
+		aviRestClientPool := avicache.SharedAVIClients()
+		client := aviRestClientPool.AviClient
+		cache.AviRefreshObjectCache(client, utils.CloudName)
+		c.DeleteModels()
+		SetDeleteSyncChannel()
+		lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "AKODeleteConfig", "Deleting objects done")
 		return
 	}
 
 	// // Populate the SNI VS keys to their respective parents
 	// // cache.PopulateVsMetaCache()
-	c.publishAllParentVSKeysToRestLayer()
+	c.publishAllVSKeysToRestLayer()
+	cleanupStaleVSes()
 	// lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "Debugging", "Finished refreshing objects")
 }
 
@@ -58,21 +67,22 @@ func (c *AviController) OnNewLeader() {
 	utils.AviLog.Debugf("AKO became a follower")
 	lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "LeaderElection", "AKO became a follower")
 
-	// When GetDeleteConfigMap returns true, it means that the deleteConfig is set.
+	// When deleteConfigFromConfigmap returns true, it means that the deleteConfig is set.
 	// A cleanup is required in this case.
-	isDeleteConfigSet := lib.GetDeleteConfigMap()
+	isDeleteConfigSet := deleteConfigFromConfigmap(c.informers.ClientSet)
 	if isDeleteConfigSet {
-		cleanupStaleVSes(isDeleteConfigSet)
+		lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "AKODeleteConfig", "AKO started deleting objects")
+		cleanupStaleVSes()
+		lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "AKODeleteConfig", "Deleting objects done")
 		return
 	}
 
-	c.publishAllParentVSKeysToRestLayer()
+	c.publishAllVSKeysToRestLayer()
+	cleanupStaleVSes()
 }
 
 func (c *AviController) OnStoppedLeading() {
 	lib.AKOControlConfig().SetIsLeaderFlag(false)
 	utils.AviLog.Debugf("AKO lost the leadership")
 	lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "LeaderElection", "AKO lost the leadership")
-	lib.SetDisableSync(true)
-	c.DisableSync = true
 }

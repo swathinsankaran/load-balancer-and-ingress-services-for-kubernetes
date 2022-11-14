@@ -6,7 +6,11 @@ metadata:
   labels:
     {{- include "ako.labels" . | nindent 4 }}
 spec:
+  {{ if gt .Values.replicaCount 2.0 }}
+  replicas: {{ 2 }}
+  {{ else }}
   replicas: {{ .Values.replicaCount }}
+  {{ end }}
   serviceName: ako
   selector:
     matchLabels:
@@ -263,10 +267,16 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-    {{- with .Values.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
-    {{- end }}
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: "app"
+                operator: In
+                values:
+                - ako
+            topologyKey: "kubernetes.io/hostname"
     {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}

@@ -101,44 +101,41 @@ func PopulateCache() error {
 	return nil
 }
 
-func cleanupStaleVSes(isDeleteConfigSet bool) {
+func cleanupStaleVSes() {
 
 	aviObjCache := avicache.SharedAviObjCache()
 	aviClient := avicache.SharedAVIClients()
 
-	if isDeleteConfigSet {
+	if lib.GetDeleteConfigMap() {
 		go SetDeleteSyncChannel()
-		allVsKeys := avicache.SharedAviObjCache().VsCacheMeta.AviGetAllKeys()
-		utils.AviLog.Infof("SWATHIN allVsKeys %v", allVsKeys)
-		deleteAviObjects(allVsKeys, aviObjCache, aviClient)
+		allParentVsKeys := aviObjCache.VsCacheMeta.AviCacheGetAllParentVSKeys()
+		deleteAviObjects(allParentVsKeys, aviObjCache, aviClient)
 	}
 
-	if !isDeleteConfigSet {
-		// Delete Stale objects by deleting model for dummy VS
-		restlayer := rest.NewRestOperations(aviObjCache, aviClient)
-		staleVSKey := lib.GetTenant() + "/" + lib.DummyVSForStaleData
-		if _, err := lib.IsClusterNameValid(); err != nil {
-			utils.AviLog.Errorf("AKO cluster name is invalid.")
-			return
+	// Delete Stale objects by deleting model for dummy VS
+	restlayer := rest.NewRestOperations(aviObjCache, aviClient)
+	staleVSKey := lib.GetTenant() + "/" + lib.DummyVSForStaleData
+	if _, err := lib.IsClusterNameValid(); err != nil {
+		utils.AviLog.Errorf("AKO cluster name is invalid.")
+		return
+	}
+	if aviClient != nil && len(aviClient.AviClient) > 0 {
+		utils.AviLog.Infof("Starting clean up of stale objects")
+		restlayer.CleanupVS(staleVSKey, true)
+		staleCacheKey := avicache.NamespaceName{
+			Name:      lib.DummyVSForStaleData,
+			Namespace: lib.GetTenant(),
 		}
-		if aviClient != nil && len(aviClient.AviClient) > 0 {
-			utils.AviLog.Infof("Starting clean up of stale objects")
-			restlayer.CleanupVS(staleVSKey, true)
-			staleCacheKey := avicache.NamespaceName{
-				Name:      lib.DummyVSForStaleData,
-				Namespace: lib.GetTenant(),
-			}
-			aviObjCache.VsCacheMeta.AviCacheDelete(staleCacheKey)
-		}
+		aviObjCache.VsCacheMeta.AviCacheDelete(staleCacheKey)
 	}
 
 	vsKeysPending := aviObjCache.VsCacheMeta.AviGetAllKeys()
-	if isDeleteConfigSet {
+	if lib.GetDeleteConfigMap() {
 		//Delete NPL annotations
 		DeleteNPLAnnotations()
 	}
 
-	if isDeleteConfigSet && len(vsKeysPending) == 0 && lib.ConfigDeleteSyncChan != nil {
+	if lib.GetDeleteConfigMap() && len(vsKeysPending) == 0 && lib.ConfigDeleteSyncChan != nil {
 		close(lib.ConfigDeleteSyncChan)
 		lib.ConfigDeleteSyncChan = nil
 	}
@@ -375,6 +372,7 @@ func (c *AviController) HandleConfigMap(k8sinfo K8sinformers, ctrlCh chan struct
 		},
 		UpdateFunc: func(old, obj interface{}) {
 			cm, ok := validateAviConfigMap(obj)
+			lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, lib.ValidatedUserInput, "configmap updated.")
 			oldcm, oldok := validateAviConfigMap(old)
 			if !ok || !oldok {
 				return
@@ -404,17 +402,19 @@ func (c *AviController) HandleConfigMap(k8sinfo K8sinformers, ctrlCh chan struct
 			lib.SetDisableSync(c.DisableSync)
 			if isValidUserInput {
 				if delModels {
-					if !lib.AKOControlConfig().IsLeader() {
-						utils.AviLog.Debugf("AKO is running as a follower, not deleting the models")
-						return
-					}
 					c.DeleteModels()
 					SetDeleteSyncChannel()
+					if !lib.AKOControlConfig().IsLeader() {
+						lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, lib.ValidatedUserInput, "AKO is running as a follower, not deleting SE labels")
+						utils.AviLog.Debugf("AKO is running as a follower")
+						return
+					}
 					isPrimaryAKO := lib.AKOControlConfig().GetAKOInstanceFlag()
 					if isPrimaryAKO && lib.GetServiceType() == "ClusterIP" {
 						avicache.DeConfigureSeGroupLabels()
 					}
 				} else {
+					lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, lib.ValidatedUserInput, "starting quick sync")
 					status.ResetStatefulSetAnnotation()
 					quickSyncCh <- struct{}{}
 				}
@@ -635,7 +635,7 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 	leReadyCh := leaderElector.Run(ctx, leaderElectionWG)
 	<-leReadyCh
 
-	cleanupStaleVSes(false)
+	// cleanupStaleVSes()
 
 	// once the l3 cache is populated, we can call the updatestatus functions from here
 	restlayer := rest.NewRestOperations(avicache.SharedAviObjCache(), avicache.SharedAVIClients())
@@ -920,7 +920,7 @@ func (c *AviController) FullSyncK8s() error {
 					resVer := meta.GetResourceVersion()
 					objects.SharedResourceVerInstanceLister().Save(key, resVer)
 				}
-				if err := validateHostRuleObj(key, hostRuleObj); err != nil {
+				if err := c.GetValidator().ValidateHostRuleObj(key, hostRuleObj); err != nil {
 					utils.AviLog.Warnf("key: %s, Error retrieved during validation of HostRule: %v", key, err)
 				}
 				nodes.DequeueIngestion(key, true)
@@ -938,7 +938,7 @@ func (c *AviController) FullSyncK8s() error {
 					resVer := meta.GetResourceVersion()
 					objects.SharedResourceVerInstanceLister().Save(key, resVer)
 				}
-				if err := validateHTTPRuleObj(key, httpRuleObj); err != nil {
+				if err := c.GetValidator().ValidateHTTPRuleObj(key, httpRuleObj); err != nil {
 					utils.AviLog.Warnf("key: %s, Error retrieved during validation of HTTPRule: %v", key, err)
 				}
 				nodes.DequeueIngestion(key, true)
@@ -956,7 +956,7 @@ func (c *AviController) FullSyncK8s() error {
 					resVer := meta.GetResourceVersion()
 					objects.SharedResourceVerInstanceLister().Save(key, resVer)
 				}
-				if err := validateAviInfraSetting(key, aviInfraObj); err != nil {
+				if err := c.GetValidator().ValidateAviInfraSetting(key, aviInfraObj); err != nil {
 					utils.AviLog.Warnf("key: %s, Error retrieved during validation of AviInfraSetting: %v", key, err)
 				}
 				nodes.DequeueIngestion(key, true)
@@ -1130,13 +1130,65 @@ func (c *AviController) FullSyncK8s() error {
 			nodes.DequeueIngestion(key, true)
 		}
 	}
-	c.publishAllParentVSKeysToRestLayer()
+	// c.publishAllParentVSKeysToRestLayer()
 	return nil
 }
 
 func (c *AviController) publishAllParentVSKeysToRestLayer() {
 	cache := avicache.SharedAviObjCache()
 	vsKeys := cache.VsCacheMeta.AviCacheGetAllParentVSKeys()
+	utils.AviLog.Debugf("Got the VS keys: %s", vsKeys)
+	allModelsMap := objects.SharedAviGraphLister().GetAll()
+	allModels := make(map[string]struct{})
+	vrfModelName := lib.GetModelName(lib.GetTenant(), lib.GetVrf())
+	for modelName := range allModelsMap.(map[string]interface{}) {
+		// ignore vrf model, as it has been published already
+		if modelName != vrfModelName && !lib.IsIstioKey(modelName) {
+			allModels[modelName] = struct{}{}
+		}
+	}
+	sharedQueue := utils.SharedWorkQueue().GetQueueByName(utils.GraphLayer)
+	syncNamespace := lib.GetNamespaceToSync()
+	for _, vsCacheKey := range vsKeys {
+		modelName := vsCacheKey.Namespace + "/" + vsCacheKey.Name
+		// Reverse map the model key from this.
+		if syncNamespace != "" {
+			shardVsPrefix := lib.ShardVSPrefix
+			if shardVsPrefix != "" {
+				if strings.HasPrefix(vsCacheKey.Name, shardVsPrefix) {
+					delete(allModels, modelName)
+					utils.AviLog.Infof("Model published L7 VS during namespace based sync: %s", modelName)
+					nodes.PublishKeyToRestLayer(modelName, "fullsync", sharedQueue)
+				}
+			}
+			// For namespace based syncs, the L4 VSes would be named: clusterName + "--" + namespace
+			if strings.HasPrefix(vsCacheKey.Name, lib.GetNamePrefix()+syncNamespace) {
+				delete(allModels, modelName)
+				utils.AviLog.Infof("Model published L4 VS during namespace based sync: %s", modelName)
+				nodes.PublishKeyToRestLayer(modelName, "fullsync", sharedQueue)
+			}
+		} else {
+			delete(allModels, modelName)
+			if vsCacheKey.Name == lib.DummyVSForStaleData ||
+				vsCacheKey.Name == "" {
+				continue
+			}
+			utils.AviLog.Infof("Model published in full sync %s", modelName)
+			nodes.PublishKeyToRestLayer(modelName, "fullsync", sharedQueue)
+		}
+	}
+	// Now also publish the newly generated models (if any)
+	// Publish all the models to REST layer.
+	utils.AviLog.Debugf("Newly generated models that do not exist in cache %s", utils.Stringify(allModels))
+	for modelName := range allModels {
+		nodes.PublishKeyToRestLayer(modelName, "fullsync", sharedQueue)
+	}
+}
+
+func (c *AviController) publishAllVSKeysToRestLayer() {
+	cache := avicache.SharedAviObjCache()
+	vsKeys := cache.VsCacheMeta.AviCacheGetAllParentVSKeys()
+	// vsKeys := cache.VsCacheMeta.AviGetAllKeys()
 	utils.AviLog.Debugf("Got the VS keys: %s", vsKeys)
 	allModelsMap := objects.SharedAviGraphLister().GetAll()
 	allModels := make(map[string]struct{})

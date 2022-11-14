@@ -109,7 +109,7 @@ func (v *AviObjectGraph) SetRetryCounter(num ...int) {
 	if len(num) > 0 {
 		v.RetryCount = num[0]
 	} else {
-		v.RetryCount = 5000
+		v.RetryCount = 100
 	}
 }
 

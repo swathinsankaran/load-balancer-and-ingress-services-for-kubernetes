@@ -30,17 +30,18 @@ type StatusOptions struct {
 }
 
 func PublishToStatusQueue(key string, statusOption StatusOptions) {
+
+	if !lib.AKOControlConfig().IsLeader() {
+		utils.AviLog.Debugf("AKO is not a leader, not updating the status")
+		return
+	}
+
 	statusQueue := utils.SharedWorkQueue().GetQueueByName(utils.StatusQueue)
 	bkt := utils.Bkt(key, statusQueue.NumWorkers)
 	statusQueue.Workqueue[bkt].AddRateLimited(statusOption)
 }
 
 func DequeueStatus(objIntf interface{}) error {
-
-	if !lib.AKOControlConfig().IsLeader() {
-		utils.AviLog.Debugf("AKO is not a leader, not updating the status")
-		return nil
-	}
 
 	obj, ok := objIntf.(StatusOptions)
 	if !ok {

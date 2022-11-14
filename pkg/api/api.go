@@ -77,6 +77,7 @@ func (a *ApiServer) initModels() {
 	// add common models in ApiServer
 	genericModels := []models.ApiModel{
 		models.RestStatus,
+		models.Cache,
 	}
 	a.Models = append(a.Models, genericModels...)
 

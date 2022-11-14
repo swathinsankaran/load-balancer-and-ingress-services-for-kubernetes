@@ -1862,6 +1862,7 @@ func (c *AviObjCache) AviObjVSCachePopulate(client *clients.AviClient, cloud str
 			var parentVSKey NamespaceName
 			if foundParent {
 				vs_uuid := ExtractUuid(vs_parent_ref.(string), "virtualservice-.*.#")
+				utils.AviLog.Infof("SWATHIN vh_parent_vs_ref %s, vs_uuid %s", vs_parent_ref.(string), vs_uuid)
 				utils.AviLog.Debugf("extracted the vs uuid from parent ref during cache population: %s", vs_uuid)
 				// Now let's get the VS key from this uuid
 				vsKey, gotVS := c.VsCacheLocal.AviCacheGetKeyByUuid(vs_uuid)
@@ -2114,6 +2115,7 @@ func (c *AviObjCache) AviObjOneVSCachePopulate(client *clients.AviClient, cloud 
 			var parentVSKey NamespaceName
 			if foundParent {
 				vs_uuid := ExtractUuidWithoutHash(vs_parent_ref.(string), "virtualservice-.*.")
+				utils.AviLog.Infof("SWATHIN vh_parent_vs_ref %s, vs_uuid %s", vs_parent_ref.(string), vs_uuid)
 				utils.AviLog.Debugf("extracted the vs uuid from parent ref during cache population: %s", vs_uuid)
 				// Now let's get the VS key from this uuid
 				vsKey, gotVS := c.VsCacheMeta.AviCacheGetKeyByUuid(vs_uuid)
@@ -3338,6 +3340,15 @@ func ExtractUuid(word, pattern string) string {
 }
 
 func ExtractUuidWithoutHash(word, pattern string) string {
+	r, _ := regexp.Compile(pattern)
+	result := r.FindAllString(word, -1)
+	if len(result) == 1 {
+		return result[0][:len(result[0])]
+	}
+	return ""
+}
+
+func ExtractVSNameFromKey(word, pattern string) string {
 	r, _ := regexp.Compile(pattern)
 	result := r.FindAllString(word, -1)
 	if len(result) == 1 {

@@ -1328,3 +1328,7 @@ func (c *AviController) Run(stopCh <-chan struct{}) error {
 
 	return nil
 }
+
+func (c *AviController) GetValidator() Validator {
+	return NewValidator()
+}

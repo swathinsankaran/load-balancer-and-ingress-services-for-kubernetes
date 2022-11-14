@@ -607,6 +607,9 @@ func (rest *RestOperations) AviVsCacheAdd(rest_op *utils.RestOp, key string) err
 		if found_parent {
 			// the uuid is expected to be in the format: "https://IP:PORT/api/virtualservice/virtualservice-88fd9718-f4f9-4e2b-9552-d31336330e0e#mygateway"
 			vs_uuid := avicache.ExtractUuid(vh_parent_uuid.(string), "virtualservice-.*.#")
+			if !lib.AKOControlConfig().IsLeader() {
+				vs_uuid = avicache.ExtractUuidWithoutHash(vh_parent_uuid.(string), "virtualservice-.*.")
+			}
 			utils.AviLog.Debugf("key: %s, msg: extracted the vs uuid from parent ref: %s", key, vs_uuid)
 			// Now let's get the VS key from this uuid
 			var foundvscache bool
@@ -616,10 +619,14 @@ func (rest *RestOperations) AviVsCacheAdd(rest_op *utils.RestOp, key string) err
 				parentVsObj = rest.getVsCacheObj(vhParentKey.(avicache.NamespaceName), key)
 				parentVsObj.AddToSNIChildCollection(uuid)
 			} else {
-				parentKey := avicache.NamespaceName{Namespace: rest_op.Tenant, Name: ExtractVsName(vh_parent_uuid.(string))}
+				parentVSName := ExtractVsName(vh_parent_uuid.(string))
+				if !lib.AKOControlConfig().IsLeader() {
+					parentVSName = avicache.ExtractVSNameFromKey(key, fmt.Sprintf("%s/.*", lib.GetTenant()))
+				}
+				parentKey := avicache.NamespaceName{Namespace: rest_op.Tenant, Name: ExtractVsName(parentVSName)}
 				vs_cache_obj := rest.cache.VsCacheMeta.AviCacheAddVS(parentKey)
 				vs_cache_obj.AddToSNIChildCollection(uuid)
-				utils.AviLog.Info(spew.Sprintf("key: %s, msg: added VS cache key during SNI update %v val %v", key, vhParentKey,
+				utils.AviLog.Info(spew.Sprintf("key: %s, msg: added VS cache key during SNI update %v val %v", key, parentKey,
 					vs_cache_obj))
 			}
 		}
@@ -674,8 +681,8 @@ func (rest *RestOperations) AviVsCacheAdd(rest_op *utils.RestOp, key string) err
 				ServiceMetadataObj: svc_mdata_obj,
 				LastModified:       lastModifiedStr,
 			}
-			if found_parent {
-				vs_cache_obj.ParentVSRef = avicache.NamespaceName{Namespace: rest_op.Tenant, Name: parentVsObj.Name}
+			if vhParentKey != nil {
+				vs_cache_obj.ParentVSRef = vhParentKey.(avicache.NamespaceName)
 			}
 			if val, ok := resp["enable_rhi"].(bool); ok {
 				vs_cache_obj.EnableRhi = val
@@ -850,6 +857,10 @@ func (rest *RestOperations) isHostPresentInSharedPool(hostname string, parentVs 
 
 func (rest *RestOperations) GetIPAddrsFromCache(vsCache *avicache.AviVsCache) []string {
 	var IPAddrs []string
+	vsCacheCopy, ok := vsCache.GetVSCopy()
+	if !ok {
+		return IPAddrs
+	}
 	if len(vsCache.VSVipKeyCollection) == 0 {
 		parentVSKey := vsCache.ParentVSRef
 		parentCache, ok := rest.cache.VsCacheMeta.AviCacheGet(parentVSKey)
@@ -866,12 +877,12 @@ func (rest *RestOperations) GetIPAddrsFromCache(vsCache *avicache.AviVsCache) []
 				// donot arrive at this step and go ahead fetching IP addresses from it's VSVIP
 				// Collection itself.
 				utils.AviLog.Infof("Getting IP Address from parent VS %v", parentCacheObj.Name)
-				vsCache = parentCacheObj
+				vsCacheCopy = parentCacheObj
 			}
 		}
 	}
 
-	for _, vsvipkey := range vsCache.VSVipKeyCollection {
+	for _, vsvipkey := range vsCacheCopy.VSVipKeyCollection {
 		vsvip_cache, ok := rest.cache.VSVIPCache.AviCacheGet(vsvipkey)
 		if ok {
 			vsvip_cache_obj, found := vsvip_cache.(*avicache.AviVSVIPCache)
