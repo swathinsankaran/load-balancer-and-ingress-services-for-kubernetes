@@ -270,9 +270,6 @@ func NewRestOperator(restOp *RestOperations) RestOperator {
 }
 
 func (l *leader) isRetryRequired(key string, err error) bool {
-	if err != nil {
-		utils.AviLog.Warnf("key: %s, msg: aborted the rest operation due to an error. err %s", key, err.Error())
-	}
 	return false
 }
 
@@ -349,7 +346,7 @@ func (f *follower) isRetryRequired(key string, err error) bool {
 	switch err.Error() {
 	case "Got empty response for non-delete operation",
 		"Got non-empty response for delete operation":
-		utils.AviLog.Warnf("key: %s, msg: aborted the rest operation due to an error. err %s", key, err.Error())
+		utils.AviLog.Debugf("key: %s, msg: aborted the rest operation due the reason: %s", key, err.Error())
 		return true
 	}
 	return false
@@ -368,10 +365,15 @@ func (f *follower) AviRestOperate(c *clients.AviClient, rest_ops []*utils.RestOp
 			SetVersion(c.AviSession)
 		}
 
-		op.Path += "?name=" + op.ObjName + "&include_name=true&cloud_ref.name=" +
-			utils.CloudName + "&created_by=" + lib.AKOUser
+		// op.Path += "?name=" + op.ObjName + "&include_name=true&cloud_ref.name=" + utils.CloudName
+		op.Path += "?name=" + op.ObjName + "&include_name=true"
+		if op.Model == "VsVip" {
+			op.Path += "&cloud_ref.name=" + utils.CloudName
+		} else {
+			op.Path += "&created_by=" + lib.AKOUser
+		}
 
-		utils.AviLog.Debugf("key: %s, msg: Got a REST operation: %s, %s", op.ObjName, op.Path)
+		utils.AviLog.Debugf("key: %s, msg: Got a REST operation: %s, %s", key, op.ObjName, op.Path)
 		op.Err = c.AviSession.Get(op.Path, &op.Response)
 		if op.Err != nil {
 			utils.AviLog.Warnf("key: %s msg: RestOp method %v path %v tenant %v Obj %s returned err %s with response %s",

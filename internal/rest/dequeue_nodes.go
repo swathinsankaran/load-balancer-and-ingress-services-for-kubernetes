@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	avicache "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
@@ -561,7 +562,42 @@ func (rest *RestOperations) deleteSniVs(vsKey avicache.NamespaceName, vs_cache_o
 	return true
 }
 
+func SaveCacheForRestAPI() {
+	go func() error {
+		for {
+			models.Cache.Lock.Lock()
+			utils.AviLog.Debugf("SWATHIN, saving cache")
+			models.Cache.L2Cache = objects.SharedAviGraphLister().GetAll()
+
+			getCache := func(cache *avicache.AviCache) []interface{} {
+				keys := cache.AviGetAllKeys()
+				var data []interface{}
+				for _, key := range keys {
+					obj, ok := cache.AviCacheGet(key)
+					if !ok {
+						continue
+					}
+					data = append(data, obj)
+				}
+				return data
+			}
+			models.Cache.L3VsCache = getCache(avicache.SharedAviObjCache().VsCacheMeta)
+			models.Cache.L3PoolCache = getCache(avicache.SharedAviObjCache().PoolCache)
+			models.Cache.L3PgCache = getCache(avicache.SharedAviObjCache().PgCache)
+			models.Cache.L3DSCache = getCache(avicache.SharedAviObjCache().DSCache)
+			models.Cache.L3L4PolicyCache = getCache(avicache.SharedAviObjCache().L4PolicyCache)
+
+			models.Cache.Lock.Unlock()
+			<-time.After(60 * time.Second)
+		}
+	}()
+}
+
+var once sync.Once
+
 func (rest *RestOperations) ExecuteRestAndPopulateCache(rest_ops []*utils.RestOp, aviObjKey avicache.NamespaceName, avimodel *nodes.AviObjectGraph, key string, isEvh bool, sslKey ...utils.NamespaceName) (bool, bool) {
+	once.Do(SaveCacheForRestAPI)
+
 	// Choose a avi client based on the model name hash. This would ensure that the same worker queue processes updates for a given VS all the time.
 	shardSize := lib.GetshardSize()
 	if shardSize == 0 {
