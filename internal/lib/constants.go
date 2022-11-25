@@ -127,6 +127,7 @@ const (
 	SyncStatusKey                              = "syncstatus"
 	NoFreeIPError                              = "No available free IPs"
 	ConfigDisallowedDuringUpgradeError         = "Configuration is disallowed during upgrade"
+	ConcurrentUpdateError                      = "Concurrent Update Error"
 	DataScript                                 = "Vsdatascript"
 	EVHVS                                      = "EVH VirtualService"
 	HTTPPS                                     = "HTTPPolicySet"

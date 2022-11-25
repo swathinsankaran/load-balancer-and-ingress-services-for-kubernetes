@@ -38,5 +38,8 @@ func (c *AviController) OnNewLeader() {
 func (c *AviController) OnStoppedLeading() {
 	lib.AKOControlConfig().SetIsLeaderFlag(false)
 	utils.AviLog.Debugf("AKO lost the leadership")
-	lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "LeaderElection", "AKO lost the leadership")
+	c.DisableSync = true
+	lib.SetDisableSync(true)
+	// lib.ShutdownApi()
+	utils.AviLog.Fatal("AKO is going to reboot")
 }

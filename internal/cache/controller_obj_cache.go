@@ -1298,6 +1298,7 @@ func (c *AviObjCache) AviPopulateOneVsVipCache(client *clients.AviClient,
 		utils.AviLog.Warnf("Failed to unmarshal vsvip data, err: %v", err)
 		return err
 	}
+	utils.AviLog.Infof("key: %s, Populate vsvip cache SWATHIN count %s elems %s", len(elems), elems) // TODO: remove this
 	for i := 0; i < len(elems); i++ {
 		vsvip := models.VsVip{}
 		err = json.Unmarshal(elems[i], &vsvip)
@@ -2715,6 +2716,11 @@ func validateAndConfigureSeGroup(client *clients.AviClient, returnErr *error) bo
 
 // ConfigureSeGroupLabels configures labels on the SeGroup if not present already
 func ConfigureSeGroupLabels(client *clients.AviClient, seGroup *models.ServiceEngineGroup) error {
+
+	if !lib.AKOControlConfig().IsLeader() {
+		return nil
+	}
+
 	labels := seGroup.Labels
 	segName := *seGroup.Name
 	SetAdminTenant := session.SetTenant(lib.GetAdminTenant())
@@ -2753,6 +2759,11 @@ func ConfigureSeGroupLabels(client *clients.AviClient, seGroup *models.ServiceEn
 
 // DeConfigureSeGroupLabels deconfigures labels on the SeGroup.
 func DeConfigureSeGroupLabels() {
+
+	if !lib.AKOControlConfig().IsLeader() {
+		return
+	}
+
 	if len(lib.GetLabels()) == 0 {
 		return
 	}

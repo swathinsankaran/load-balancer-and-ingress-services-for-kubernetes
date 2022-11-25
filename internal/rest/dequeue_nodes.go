@@ -1064,6 +1064,20 @@ func (rest *RestOperations) RefreshCacheForRetryLayer(parentVsKey string, aviObj
 			utils.AviLog.Infof("key: %s, msg: Controller upgrade in progress, would be added to slow retry queue", key)
 			fastRetry = false
 			processNextObj = false
+		} else if statuscode == 412 && strings.Contains(*aviError.Message, lib.ConcurrentUpdateError) {
+			utils.AviLog.Infof("key: %s, msg: Concurrent update error, would be added to fast retry queue", key)
+			switch rest_op.Model {
+			case "VsVip":
+				var VsVip string
+				switch rest_op.Obj.(type) {
+				case utils.AviRestObjMacro:
+					VsVip = *rest_op.Obj.(utils.AviRestObjMacro).Data.(avimodels.VsVip).Name
+				case avimodels.VsVip:
+					VsVip = *rest_op.Obj.(avimodels.VsVip).Name
+				}
+				utils.AviLog.Infof("key: %s, Populate vsvip cache SWATHIN %d", key, statuscode) // TODO: remove this
+				aviObjCache.AviPopulateOneVsVipCache(c, utils.CloudName, VsVip)
+			}
 		} else {
 
 			// We don't want to handle any other error code like 400 etc.
