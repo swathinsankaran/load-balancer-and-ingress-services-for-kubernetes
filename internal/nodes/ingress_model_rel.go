@@ -500,11 +500,10 @@ func NodeToRoute(nodeName string, namespace string, key string) ([]string, bool)
 func PodToIng(podName string, namespace string, key string) ([]string, bool) {
 	var allIngresses []string
 	podKey := namespace + "/" + podName
-	ok, servicesIntf := objects.SharedPodToSvcLister().Get(podKey)
+	ok, services := objects.SharedPodToSvcLister().Get(podKey)
 	if !ok {
 		return allIngresses, false
 	}
-	services := servicesIntf.([]string)
 	utils.AviLog.Debugf("key: %s, msg: Services retrieved:  %s", key, services)
 	for _, svc := range services {
 		_, svcName := utils.ExtractNamespaceObjectName(svc)

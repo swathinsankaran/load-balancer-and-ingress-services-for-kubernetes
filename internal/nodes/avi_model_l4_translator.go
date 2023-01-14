@@ -233,12 +233,12 @@ func PopulateServersForNPL(poolNode *AviPoolNode, ns string, serviceName string,
 	var poolMeta []AviPoolMetaServer
 
 	for _, pod := range pods {
-		var annotations []lib.NPLAnnotation
-		found, obj := objects.SharedNPLLister().Get(ns + "/" + pod.Name)
+		//var annotations []utils.NPLAnnotation
+		found, annotations := objects.SharedNPLLister().Get(ns + "/" + pod.Name)
 		if !found {
 			continue
 		}
-		annotations = obj.([]lib.NPLAnnotation)
+		//annotations = obj.([]utils.NPLAnnotation)
 		for _, a := range annotations {
 			var atype string
 			if utils.IsV4(a.NodeIP) {
@@ -301,12 +301,12 @@ func PopulateServersForNodePort(poolNode *AviPoolNode, ns string, serviceName st
 		}
 		svcPort := int32(port.NodePort)
 		poolNode.Port = svcPort
-		for _, nodeIntf := range allNodes {
-			node, ok := nodeIntf.(*corev1.Node)
-			if !ok {
-				utils.AviLog.Warnf("key: %s,msg: error in fetching node from node cache", key)
-				return nil
-			}
+		for _, node := range allNodes {
+			// node, ok := nodeIntf.(*corev1.Node)
+			// if !ok {
+			// 	utils.AviLog.Warnf("key: %s,msg: error in fetching node from node cache", key)
+			// 	return nil
+			// }
 			if nodePortFilter != nil {
 				// skip the node if node does not have node port selector labels
 				_, ok := node.ObjectMeta.Labels[nodePortSelector["key"]]

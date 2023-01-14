@@ -28,15 +28,15 @@ var crdonce sync.Once
 func SharedCRDLister() *CRDLister {
 	crdonce.Do(func() {
 		CRDinstance = &CRDLister{
-			FqdnHostRuleCache:      NewObjectMapStore(),
-			HostRuleFQDNCache:      NewObjectMapStore(),
-			FqdnHTTPRulesCache:     NewObjectMapStore(),
-			HTTPRuleFqdnCache:      NewObjectMapStore(),
-			FqdnToGSFQDNCache:      NewObjectMapStore(),
-			FqdnSharedVSModelCache: NewObjectMapStore(),
-			SharedVSModelFqdnCache: NewObjectMapStore(),
-			FqdnFqdnTypeCache:      NewObjectMapStore(),
-			FQDNToAliasesCache:     NewObjectMapStore(),
+			FqdnHostRuleCache:      NewObjectMapStore[string](),
+			HostRuleFQDNCache:      NewObjectMapStore[string](),
+			FqdnHTTPRulesCache:     NewObjectMapStore[map[string]string](),
+			HTTPRuleFqdnCache:      NewObjectMapStore[string](),
+			FqdnToGSFQDNCache:      NewObjectMapStore[string](),
+			FqdnSharedVSModelCache: NewObjectMapStore[string](),
+			SharedVSModelFqdnCache: NewObjectMapStore[string](),
+			FqdnFqdnTypeCache:      NewObjectMapStore[string](),
+			FQDNToAliasesCache:     NewObjectMapStore[[]string](),
 		}
 	})
 	return CRDinstance
@@ -49,32 +49,32 @@ type CRDLister struct {
 
 	// TODO: can be removed once we move to indexers
 	// fqdn.com: hr1
-	FqdnHostRuleCache *ObjectMapStore
+	FqdnHostRuleCache *ObjectMapStore[string]
 
 	// hr1: fqdn.com - required for httprule
-	HostRuleFQDNCache *ObjectMapStore
+	HostRuleFQDNCache *ObjectMapStore[string]
 
 	// hr1: gsfqdn.com
-	FqdnToGSFQDNCache *ObjectMapStore
+	FqdnToGSFQDNCache *ObjectMapStore[string]
 
 	// TODO: can be removed once we move to indexers
 	// fqdn.com: {path1: rr1, path2: rr1, path3: rr2}
-	FqdnHTTPRulesCache *ObjectMapStore
+	FqdnHTTPRulesCache *ObjectMapStore[(map[string]string)]
 
 	// rr1: fqdn1.com, rr2: fqdn2.com
-	HTTPRuleFqdnCache *ObjectMapStore
+	HTTPRuleFqdnCache *ObjectMapStore[string]
 
 	// shared-vs1-fqdn.com: Shared-VS-L7-1, shared-vs2-fqdn.com: SharedVS-L7-2
-	FqdnSharedVSModelCache *ObjectMapStore
+	FqdnSharedVSModelCache *ObjectMapStore[string]
 
 	// Shared-VS-L7-1: shared-vs1-fqdn.com, SharedVS-L7-2: shared-vs2-fqdn.com
-	SharedVSModelFqdnCache *ObjectMapStore
+	SharedVSModelFqdnCache *ObjectMapStore[string]
 
 	// shared-vs1-fqdn: contains, foo.com: exact
-	FqdnFqdnTypeCache *ObjectMapStore
+	FqdnFqdnTypeCache *ObjectMapStore[string]
 
 	// fqdn: alias1.com, alias2.com
-	FQDNToAliasesCache *ObjectMapStore
+	FQDNToAliasesCache *ObjectMapStore[[]string]
 }
 
 // FqdnHostRuleCache
@@ -83,7 +83,7 @@ func (c *CRDLister) GetFQDNToHostruleMapping(fqdn string) (bool, string) {
 	if !found {
 		return false, ""
 	}
-	return true, hostrule.(string)
+	return true, hostrule
 }
 
 func (c *CRDLister) GetFQDNToHostruleMappingWithType(fqdn string) (bool, string) {
@@ -98,19 +98,19 @@ func (c *CRDLister) GetFQDNToHostruleMappingWithType(fqdn string) (bool, string)
 
 		if fqdnType == string(akov1alpha1.Exact) && mFqdn == fqdn {
 			if found, hostrule := c.FqdnHostRuleCache.Get(mFqdn); found {
-				returnHostrules = append(returnHostrules, hostrule.(string))
+				returnHostrules = append(returnHostrules, hostrule)
 				break
 			}
 		} else if fqdnType == string(akov1alpha1.Contains) && strings.Contains(fqdn, mFqdn) {
 			if found, hostrule := c.FqdnHostRuleCache.Get(mFqdn); found {
-				returnHostrules = append(returnHostrules, hostrule.(string))
+				returnHostrules = append(returnHostrules, hostrule)
 				break
 			}
 		} else if fqdnType == string(akov1alpha1.Wildcard) && strings.HasPrefix(mFqdn, "*") {
 			wildcardFqdn := strings.Split(mFqdn, "*")[1]
 			if strings.HasSuffix(fqdn, wildcardFqdn) {
 				if found, hostrule := c.FqdnHostRuleCache.Get(mFqdn); found {
-					returnHostrules = append(returnHostrules, hostrule.(string))
+					returnHostrules = append(returnHostrules, hostrule)
 				}
 				break
 			}
@@ -128,7 +128,7 @@ func (c *CRDLister) GetHostruleToFQDNMapping(hostrule string) (bool, string) {
 	if !found {
 		return false, ""
 	}
-	return true, fqdn.(string)
+	return true, fqdn
 }
 
 func (c *CRDLister) GetLocalFqdnToGSFQDNMapping(fqdn string) (bool, string) {
@@ -136,7 +136,7 @@ func (c *CRDLister) GetLocalFqdnToGSFQDNMapping(fqdn string) (bool, string) {
 	if !found {
 		return false, ""
 	}
-	return true, gsfqdn.(string)
+	return true, gsfqdn
 }
 
 func (c *CRDLister) DeleteHostruleFQDNMapping(hostrule string) bool {
@@ -145,7 +145,7 @@ func (c *CRDLister) DeleteHostruleFQDNMapping(hostrule string) bool {
 	found, fqdn := c.HostRuleFQDNCache.Get(hostrule)
 	if found {
 		success1 := c.HostRuleFQDNCache.Delete(hostrule)
-		success2 := c.FqdnHostRuleCache.Delete(fqdn.(string))
+		success2 := c.FqdnHostRuleCache.Delete(fqdn)
 		return success1 && success2
 	}
 	return true
@@ -180,7 +180,7 @@ func (c *CRDLister) GetFQDNFQDNTypeMapping(fqdn string) string {
 	if !found {
 		return string(akov1alpha1.Exact)
 	}
-	return fqdnType.(string)
+	return fqdnType
 }
 
 func (c *CRDLister) DeleteFQDNFQDNTypeMapping(fqdn string) bool {
@@ -198,7 +198,7 @@ func (c *CRDLister) GetFqdnHTTPRulesMapping(fqdn string) (bool, map[string]strin
 	if !found {
 		return false, make(map[string]string)
 	}
-	return true, pathRules.(map[string]string)
+	return true, pathRules
 }
 
 func (c *CRDLister) GetHTTPRuleFqdnMapping(httprule string) (bool, string) {
@@ -206,7 +206,7 @@ func (c *CRDLister) GetHTTPRuleFqdnMapping(httprule string) (bool, string) {
 	if !found {
 		return false, ""
 	}
-	return true, fqdn.(string)
+	return true, fqdn
 }
 
 func (c *CRDLister) RemoveFqdnHTTPRulesMappings(httprule string) bool {
@@ -247,18 +247,18 @@ func (c *CRDLister) GetFQDNToSharedVSModelMapping(fqdn, fqdnType string) (bool, 
 	for _, mFqdn := range allFqdns {
 		if fqdnType == string(akov1alpha1.Exact) && mFqdn == fqdn {
 			if found, modelName := c.FqdnSharedVSModelCache.Get(mFqdn); found {
-				returnModelNames = append(returnModelNames, modelName.(string))
+				returnModelNames = append(returnModelNames, modelName)
 				break
 			}
 		} else if fqdnType == string(akov1alpha1.Contains) && strings.Contains(mFqdn, fqdn) {
 			if found, modelName := c.FqdnSharedVSModelCache.Get(mFqdn); found {
-				returnModelNames = append(returnModelNames, modelName.(string))
+				returnModelNames = append(returnModelNames, modelName)
 			}
 		} else if fqdnType == string(akov1alpha1.Wildcard) && strings.HasPrefix(fqdn, "*") {
 			wildcardFqdn := strings.Split(fqdn, "*")[1]
 			if strings.HasSuffix(mFqdn, wildcardFqdn) {
 				if found, modelName := c.FqdnSharedVSModelCache.Get(mFqdn); found {
-					returnModelNames = append(returnModelNames, modelName.(string))
+					returnModelNames = append(returnModelNames, modelName)
 				}
 			}
 		}
@@ -275,7 +275,7 @@ func (c *CRDLister) GetSharedVSModelFQDNMapping(modelName string) (bool, string)
 	if !found {
 		return false, ""
 	}
-	return true, fqdn.(string)
+	return true, fqdn
 }
 
 func (c *CRDLister) UpdateFQDNSharedVSModelMappings(fqdn, modelName string) {
@@ -300,10 +300,10 @@ func (c *CRDLister) GetFQDNToAliasesMapping(fqdn string) (bool, []string) {
 	if !found {
 		return false, nil
 	}
-	return true, aliases.([]string)
+	return true, aliases
 }
 
-func (c *CRDLister) GetAllFQDNToAliasesMapping() map[string]interface{} {
+func (c *CRDLister) GetAllFQDNToAliasesMapping() map[string][]string {
 	return c.FQDNToAliasesCache.GetAllObjectNames()
 }
 

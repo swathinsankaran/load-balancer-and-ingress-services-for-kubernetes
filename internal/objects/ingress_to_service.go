@@ -31,14 +31,14 @@ var routesvconce sync.Once
 func SharedSvcLister() *SvcLister {
 	svconce.Do(func() {
 		svclisterinstance = &SvcLister{
-			svcIngStore:         NewObjectStore(),
-			ingSvcStore:         NewObjectStore(),
-			secretIngStore:      NewObjectStore(),
-			ingSecretStore:      NewObjectStore(),
-			secretHostNameStore: NewObjectStore(),
-			ingHostStore:        NewObjectStore(),
-			classIngStore:       NewObjectStore(),
-			ingClassStore:       NewObjectStore(),
+			svcIngStore:         NewObjectStore[[]string](),
+			ingSvcStore:         NewObjectStore[[]string](),
+			secretIngStore:      NewObjectStore[[]string](),
+			ingSecretStore:      NewObjectStore[[]string](),
+			secretHostNameStore: NewObjectStore[[]string](),
+			ingHostStore:        NewObjectStore[map[string]*RouteIngrhost](),
+			classIngStore:       NewObjectStore[[]string](),
+			ingClassStore:       NewObjectStore[string](),
 		}
 	})
 	return svclisterinstance
@@ -47,37 +47,37 @@ func SharedSvcLister() *SvcLister {
 func OshiftRouteSvcLister() *SvcLister {
 	routesvconce.Do(func() {
 		oshiftroutesvclister = &SvcLister{
-			svcIngStore:         NewObjectStore(),
-			ingSvcStore:         NewObjectStore(),
-			secretIngStore:      NewObjectStore(),
-			ingSecretStore:      NewObjectStore(),
-			secretHostNameStore: NewObjectStore(),
-			ingHostStore:        NewObjectStore(),
-			classIngStore:       NewObjectStore(),
-			ingClassStore:       NewObjectStore(),
+			svcIngStore:         NewObjectStore[[]string](),
+			ingSvcStore:         NewObjectStore[[]string](),
+			secretIngStore:      NewObjectStore[[]string](),
+			ingSecretStore:      NewObjectStore[[]string](),
+			secretHostNameStore: NewObjectStore[[]string](),
+			ingHostStore:        NewObjectStore[map[string]*RouteIngrhost](),
+			classIngStore:       NewObjectStore[[]string](),
+			ingClassStore:       NewObjectStore[string](),
 		}
 	})
 	return oshiftroutesvclister
 }
 
 type SvcLister struct {
-	svcIngStore         *ObjectStore
-	secretIngStore      *ObjectStore
-	ingSvcStore         *ObjectStore
-	ingSecretStore      *ObjectStore
-	ingHostStore        *ObjectStore
-	secretHostNameStore *ObjectStore
-	ingClassStore       *ObjectStore
-	classIngStore       *ObjectStore
-	svcSIStore          *ObjectStore
-	SISvcStore          *ObjectStore
+	svcIngStore         *ObjectStore[[]string]
+	secretIngStore      *ObjectStore[[]string]
+	ingSvcStore         *ObjectStore[[]string]
+	ingSecretStore      *ObjectStore[[]string]
+	ingHostStore        *ObjectStore[map[string]*RouteIngrhost]
+	secretHostNameStore *ObjectStore[[]string]
+	ingClassStore       *ObjectStore[string]
+	classIngStore       *ObjectStore[[]string]
+	svcSIStore          *ObjectStore[[]string]
+	SISvcStore          *ObjectStore[[]string]
 }
 
 type SvcNSCache struct {
 	namespace       string
-	svcIngObject    *ObjectMapStore
-	secretIngObject *ObjectMapStore
-	classIngObject  *ObjectMapStore
+	svcIngObject    *ObjectMapStore[[]string]
+	secretIngObject *ObjectMapStore[[]string]
+	classIngObject  *ObjectMapStore[[]string]
 	IngressLock     sync.RWMutex
 	IngNSCache
 	SecretIngNSCache
@@ -98,24 +98,24 @@ type RouteIngrhost struct {
 }
 
 type IngNSCache struct {
-	ingSvcObjects *ObjectMapStore
+	ingSvcObjects *ObjectMapStore[[]string]
 }
 
 type SecretIngNSCache struct {
-	ingSecretObjects *ObjectMapStore
+	ingSecretObjects *ObjectMapStore[[]string]
 }
 
 type SecretHostNameNSCache struct {
 	SecretLock            sync.RWMutex
-	secretHostNameObjects *ObjectMapStore
+	secretHostNameObjects *ObjectMapStore[[]string]
 }
 
 type IngClassNSCache struct {
-	ingClassObjects *ObjectMapStore
+	ingClassObjects *ObjectMapStore[string]
 }
 
 type IngHostCache struct {
-	ingHostObjects *ObjectMapStore
+	ingHostObjects *ObjectMapStore[map[string]*RouteIngrhost]
 }
 
 func (v *SvcLister) IngressMappings(ns string) *SvcNSCache {
@@ -149,7 +149,7 @@ func (v *SvcNSCache) GetSvcToIng(svcName string) (bool, []string) {
 	if !found {
 		return false, make([]string, 0)
 	}
-	return true, ingNames.([]string)
+	return true, ingNames
 }
 
 func (v *SvcNSCache) DeleteSvcToIngMapping(svcName string) bool {
@@ -170,7 +170,7 @@ func (v *SvcNSCache) GetSecretToIng(secretName string) (bool, []string) {
 	if !found {
 		return false, make([]string, 0)
 	}
-	return true, ingNames.([]string)
+	return true, ingNames
 }
 
 func (v *SvcNSCache) DeleteSecretToIngMapping(secretName string) bool {
@@ -191,7 +191,7 @@ func (v *SvcNSCache) GetClassToIng(className string) (bool, []string) {
 	if !found {
 		return false, make([]string, 0)
 	}
-	return true, ingNSNames.([]string)
+	return true, ingNSNames
 }
 
 func (v *SvcNSCache) DeleteClassToIngMapping(className string) bool {
@@ -212,7 +212,7 @@ func (v *IngNSCache) GetIngToSvc(ingName string) (bool, []string) {
 	if !found {
 		return false, make([]string, 0)
 	}
-	return true, svcNames.([]string)
+	return true, svcNames
 }
 
 func (v *IngNSCache) DeleteIngToSvcMapping(ingName string) bool {
@@ -232,7 +232,7 @@ func (v *SecretIngNSCache) GetIngToSecret(ingName string) (bool, []string) {
 	if !found {
 		return false, make([]string, 0)
 	}
-	return true, secretNames.([]string)
+	return true, secretNames
 }
 
 func (v *SecretIngNSCache) DeleteIngToSecretMapping(ingName string) bool {
@@ -252,7 +252,7 @@ func (v *IngClassNSCache) GetIngToClass(ingName string) (bool, string) {
 	if !found {
 		return false, ""
 	}
-	return true, class.(string)
+	return true, class
 }
 
 func (v *IngClassNSCache) DeleteIngToClassMapping(ingName string) bool {
@@ -272,7 +272,7 @@ func (v *SecretHostNameNSCache) GetSecretToHostname(secretName string) (bool, []
 	if !found {
 		return false, make([]string, 0)
 	}
-	return true, hostNames.([]string)
+	return true, hostNames
 }
 
 func (v *SecretHostNameNSCache) DeleteSecretToHostNameMapping(secretName string) bool {
@@ -316,20 +316,20 @@ func (v *SecretHostNameNSCache) DecrementSecretToHostNameMapping(secretName stri
 	return hostnames
 }
 
-func (v *IngHostCache) GetIngToHost(ingName string) (bool, map[string]map[string][]string) {
-	found, hosts := v.ingHostObjects.Get(ingName)
-	if !found {
-		return false, make(map[string]map[string][]string, 0)
-	}
-	return true, hosts.(map[string]map[string][]string)
-}
+// func (v *IngHostCache) GetIngToHost(ingName string) (bool, map[string]map[string][]string) {
+// 	found, hosts := v.ingHostObjects.Get(ingName)
+// 	if !found {
+// 		return false, make(map[string]map[string][]string, 0)
+// 	}
+// 	return true, hosts.(map[string]map[string][]string)
+// }
 
 func (v *IngHostCache) GetRouteIngToHost(ingName string) (bool, map[string]*RouteIngrhost) {
 	found, hosts := v.ingHostObjects.Get(ingName)
 	if !found {
 		return false, make(map[string]*RouteIngrhost)
 	}
-	return true, hosts.(map[string]*RouteIngrhost)
+	return true, hosts
 }
 
 func (v *IngHostCache) UpdateRouteIngToHostMapping(ingName string, hostMap map[string]*RouteIngrhost) {
@@ -342,10 +342,10 @@ func (v *IngHostCache) DeleteIngToHostMapping(ingName string) bool {
 	return success
 }
 
-func (v *IngHostCache) UpdateIngToHostMapping(ingName string, hostMap map[string]map[string][]string) {
-	utils.AviLog.Debugf("Updated the ingress mappings with ingress: %s, hosts: %s", ingName, hostMap)
-	v.ingHostObjects.AddOrUpdate(ingName, hostMap)
-}
+// func (v *IngHostCache) UpdateIngToHostMapping(ingName string, hostMap map[string]map[string][]string) {
+// 	utils.AviLog.Debugf("Updated the ingress mappings with ingress: %s, hosts: %s", ingName, hostMap)
+// 	v.ingHostObjects.AddOrUpdate(ingName, hostMap)
+// }
 
 //===All cross mapping update methods are here.
 

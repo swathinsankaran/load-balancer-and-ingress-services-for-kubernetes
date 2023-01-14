@@ -20,21 +20,22 @@ import (
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 )
 
 type K8sNodeStore struct {
-	*ObjectMapStore
+	*ObjectMapStore[*v1.Node]
 }
 
 var nodeonce sync.Once
-var nodesStoreInstance *ObjectMapStore
+var nodesStoreInstance *ObjectMapStore[*v1.Node]
 
 func SharedNodeLister() *K8sNodeStore {
 	nodeonce.Do(func() {
-		nodesStoreInstance = NewObjectMapStore()
+		nodesStoreInstance = NewObjectMapStore[*v1.Node]()
 	})
 	return &K8sNodeStore{nodesStoreInstance}
 }

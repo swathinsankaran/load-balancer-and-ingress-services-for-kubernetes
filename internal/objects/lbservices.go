@@ -26,35 +26,35 @@ var lbonce sync.Once
 func SharedlbLister() *lbLister {
 	lbonce.Do(func() {
 		lbinstance = &lbLister{
-			lbStore:                     NewObjectMapStore(),
-			sharedVipKeyToServicesStore: NewObjectMapStore(),
-			serviceToSharedVipKeyStore:  NewObjectMapStore(),
+			lbStore:                     NewObjectMapStore[string](),
+			sharedVipKeyToServicesStore: NewObjectMapStore[[]string](),
+			serviceToSharedVipKeyStore:  NewObjectMapStore[string](),
 		}
 	})
 	return lbinstance
 }
 
 type lbLister struct {
-	lbStore *ObjectMapStore
+	lbStore *ObjectMapStore[string]
 
 	// annotationKey -> [svc1, svc2, svc3]
-	sharedVipKeyToServicesStore *ObjectMapStore
+	sharedVipKeyToServicesStore *ObjectMapStore[[]string]
 
 	// svc1 -> annotationKey
-	serviceToSharedVipKeyStore *ObjectMapStore
+	serviceToSharedVipKeyStore *ObjectMapStore[string]
 }
 
-func (a *lbLister) Save(svcName string, lb interface{}) {
+func (a *lbLister) Save(svcName string, lb string) {
 	utils.AviLog.Debugf("Saving lb svc :%s", svcName)
 	a.lbStore.AddOrUpdate(svcName, lb)
 }
 
-func (a *lbLister) Get(svcName string) (bool, interface{}) {
+func (a *lbLister) Get(svcName string) (bool, string) {
 	ok, obj := a.lbStore.Get(svcName)
 	return ok, obj
 }
 
-func (a *lbLister) GetAll() interface{} {
+func (a *lbLister) GetAll() map[string]string {
 	obj := a.lbStore.GetAllObjectNames()
 	return obj
 }
@@ -97,7 +97,7 @@ func (a *lbLister) GetSharedVipKeyToServices(key string) (bool, []string) {
 	if !found {
 		return false, make([]string, 0)
 	}
-	return true, serviceList.([]string)
+	return true, serviceList
 }
 
 func (a *lbLister) GetServiceToSharedVipKey(svc string) (bool, string) {
@@ -105,5 +105,5 @@ func (a *lbLister) GetServiceToSharedVipKey(svc string) (bool, string) {
 	if !found {
 		return false, ""
 	}
-	return true, key.(string)
+	return true, key
 }

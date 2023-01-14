@@ -24,8 +24,8 @@ var infraonce sync.Once
 func InfraSettingL7Lister() *AviInfraSettingL7Lister {
 	infraonce.Do(func() {
 		infral7lister = &AviInfraSettingL7Lister{
-			IngRouteInfraSettingStore:  NewObjectMapStore(),
-			InfraSettingShardSizeStore: NewObjectMapStore(),
+			IngRouteInfraSettingStore:  NewObjectMapStore[string](),
+			InfraSettingShardSizeStore: NewObjectMapStore[string](),
 		}
 	})
 	return infral7lister
@@ -35,10 +35,10 @@ type AviInfraSettingL7Lister struct {
 	InfraSettingIngRouteLock sync.RWMutex
 
 	// namespaced ingress/route -> infrasetting
-	IngRouteInfraSettingStore *ObjectMapStore
+	IngRouteInfraSettingStore *ObjectMapStore[string]
 
 	// infrasetting -> shardSize
-	InfraSettingShardSizeStore *ObjectMapStore
+	InfraSettingShardSizeStore *ObjectMapStore[string]
 }
 
 func (v *AviInfraSettingL7Lister) GetIngRouteToInfraSetting(ingrouteNsName string) (bool, string) {
@@ -46,7 +46,7 @@ func (v *AviInfraSettingL7Lister) GetIngRouteToInfraSetting(ingrouteNsName strin
 	if !found {
 		return false, ""
 	}
-	return true, infraSettingName.(string)
+	return true, infraSettingName
 }
 
 func (v *AviInfraSettingL7Lister) UpdateIngRouteInfraSettingMappings(ingrouteNsName, infraSettingName, shardSize string) {
@@ -70,5 +70,5 @@ func (v *AviInfraSettingL7Lister) GetInfraSettingToShardSize(infraSettingName st
 	if !found {
 		return false, ""
 	}
-	return true, shardSize.(string)
+	return true, shardSize
 }

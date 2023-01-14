@@ -21,20 +21,21 @@ import (
 	"sync"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
+	v1 "k8s.io/api/core/v1"
 )
 
-type ObjectStore struct {
-	NSObjectMap map[string]*ObjectMapStore
+type ObjectStore[T SupportedTypes] struct {
+	NSObjectMap map[string]*ObjectMapStore[T]
 	NSLock      sync.RWMutex
 }
 
-func NewObjectStore() *ObjectStore {
-	objectStore := &ObjectStore{}
-	objectStore.NSObjectMap = make(map[string]*ObjectMapStore)
+func NewObjectStore[T SupportedTypes]() *ObjectStore[T] {
+	objectStore := &ObjectStore[T]{}
+	objectStore.NSObjectMap = make(map[string]*ObjectMapStore[T])
 	return objectStore
 }
 
-func (store *ObjectStore) GetNSStore(nsName string) *ObjectMapStore {
+func (store *ObjectStore[T]) GetNSStore(nsName string) *ObjectMapStore[T] {
 	store.NSLock.Lock()
 	defer store.NSLock.Unlock()
 	val, ok := store.NSObjectMap[nsName]
@@ -42,14 +43,14 @@ func (store *ObjectStore) GetNSStore(nsName string) *ObjectMapStore {
 		return val
 	} else {
 		// This namespace is not initialized, let's initialze it
-		nsObjStore := NewObjectMapStore()
+		nsObjStore := NewObjectMapStore[T]()
 		// Update the store.
 		store.NSObjectMap[nsName] = nsObjStore
 		return nsObjStore
 	}
 }
 
-func (store *ObjectStore) DeleteNSStore(nsName string) bool {
+func (store *ObjectStore[T]) DeleteNSStore(nsName string) bool {
 	// Deletes the key for a namespace. Wipes off the entire NS. So use with care.
 	store.NSLock.Lock()
 	defer store.NSLock.Unlock()
@@ -63,7 +64,7 @@ func (store *ObjectStore) DeleteNSStore(nsName string) bool {
 
 }
 
-func (store *ObjectStore) GetAllNamespaces() []string {
+func (store *ObjectStore[T]) GetAllNamespaces() []string {
 	// Take a read lock on the store and write lock on NS object
 	store.NSLock.RLock()
 	defer store.NSLock.RUnlock()
@@ -75,24 +76,28 @@ func (store *ObjectStore) GetAllNamespaces() []string {
 
 }
 
-type ObjectMapStore struct {
-	ObjectMap map[string]interface{}
+type SupportedTypes interface {
+	[]string | map[string][]string | string | *v1.Node | []utils.NPLAnnotation | interface{} | utils.PodsWithTargetPort
+}
+
+type ObjectMapStore[T SupportedTypes] struct {
+	ObjectMap map[string]T
 	ObjLock   sync.RWMutex
 }
 
-func NewObjectMapStore() *ObjectMapStore {
-	nsObjStore := &ObjectMapStore{}
-	nsObjStore.ObjectMap = make(map[string]interface{})
+func NewObjectMapStore[T SupportedTypes]() *ObjectMapStore[T] {
+	nsObjStore := &ObjectMapStore[T]{}
+	nsObjStore.ObjectMap = make(map[string]T)
 	return nsObjStore
 }
 
-func (o *ObjectMapStore) AddOrUpdate(objName string, obj interface{}) {
+func (o *ObjectMapStore[T]) AddOrUpdate(objName string, obj T) {
 	o.ObjLock.Lock()
 	defer o.ObjLock.Unlock()
 	o.ObjectMap[objName] = obj
 }
 
-func (o *ObjectMapStore) Delete(objName string) bool {
+func (o *ObjectMapStore[T]) Delete(objName string) bool {
 	o.ObjLock.Lock()
 	defer o.ObjLock.Unlock()
 	_, ok := o.ObjectMap[objName]
@@ -104,18 +109,18 @@ func (o *ObjectMapStore) Delete(objName string) bool {
 
 }
 
-func (o *ObjectMapStore) Get(objName string) (bool, interface{}) {
+func (o *ObjectMapStore[T]) Get(objName string) (bool, T) {
 	o.ObjLock.RLock()
 	defer o.ObjLock.RUnlock()
 	val, ok := o.ObjectMap[objName]
 	if ok {
 		return true, val
 	}
-	return false, nil
+	return false, val
 
 }
 
-func (o *ObjectMapStore) GetAllObjectNames() map[string]interface{} {
+func (o *ObjectMapStore[T]) GetAllObjectNames() map[string]T {
 	o.ObjLock.RLock()
 	defer o.ObjLock.RUnlock()
 	// TODO (sudswas): Pass a copy instead of the reference
@@ -123,7 +128,7 @@ func (o *ObjectMapStore) GetAllObjectNames() map[string]interface{} {
 
 }
 
-func (o *ObjectMapStore) GetAllKeys() []string {
+func (o *ObjectMapStore[T]) GetAllKeys() []string {
 	o.ObjLock.RLock()
 	defer o.ObjLock.RUnlock()
 	allKeys := []string{}
@@ -133,10 +138,10 @@ func (o *ObjectMapStore) GetAllKeys() []string {
 	return allKeys
 }
 
-func (o *ObjectMapStore) CopyAllObjects() map[string]interface{} {
+func (o *ObjectMapStore[T]) CopyAllObjects() map[string]T {
 	o.ObjLock.RLock()
 	defer o.ObjLock.RUnlock()
-	CopiedObjMap := make(map[string]interface{})
+	CopiedObjMap := make(map[string]T)
 	for k, v := range o.ObjectMap {
 		CopiedObjMap[k] = v
 	}

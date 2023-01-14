@@ -25,7 +25,7 @@ var clusterIponce sync.Once
 
 func SharedClusterIpLister() *clusterIpLister {
 	clusterIponce.Do(func() {
-		clusterIpStore := NewObjectMapStore()
+		clusterIpStore := NewObjectMapStore[interface{}]()
 		clusterIpinstance = &clusterIpLister{}
 		clusterIpinstance.clusterIpStore = clusterIpStore
 	})
@@ -33,7 +33,7 @@ func SharedClusterIpLister() *clusterIpLister {
 }
 
 type clusterIpLister struct {
-	clusterIpStore *ObjectMapStore
+	clusterIpStore *ObjectMapStore[interface{}]
 }
 
 func (a *clusterIpLister) Save(svcName string, lb interface{}) {
@@ -46,7 +46,7 @@ func (a *clusterIpLister) Get(svcName string) (bool, interface{}) {
 	return ok, obj
 }
 
-func (a *clusterIpLister) GetAll() interface{} {
+func (a *clusterIpLister) GetAll() map[string]interface{} {
 	obj := a.clusterIpStore.GetAllObjectNames()
 	return obj
 }

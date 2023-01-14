@@ -27,7 +27,7 @@ var avionce sync.Once
 
 func SharedAviGraphLister() *AviGraphLister {
 	avionce.Do(func() {
-		AviGraphStore := NewObjectMapStore()
+		AviGraphStore := NewObjectMapStore[interface{}]()
 		aviGraphinstance = &AviGraphLister{}
 		aviGraphinstance.AviGraphStore = AviGraphStore
 	})
@@ -35,7 +35,7 @@ func SharedAviGraphLister() *AviGraphLister {
 }
 
 type AviGraphLister struct {
-	AviGraphStore *ObjectMapStore
+	AviGraphStore *ObjectMapStore[interface{}]
 }
 
 func (a *AviGraphLister) Save(vsName string, aviGraph interface{}) {
@@ -48,7 +48,7 @@ func (a *AviGraphLister) Get(vsName string) (bool, interface{}) {
 	return ok, obj
 }
 
-func (a *AviGraphLister) GetAll() interface{} {
+func (a *AviGraphLister) GetAll() map[string]interface{} {
 	obj := a.AviGraphStore.GetAllObjectNames()
 	return obj
 }

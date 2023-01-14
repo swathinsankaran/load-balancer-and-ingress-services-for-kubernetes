@@ -314,3 +314,14 @@ func init() {
 		CloudName = "Default-Cloud"
 	}
 }
+
+type NPLAnnotation struct {
+	PodPort  int    `json:"podPort"`
+	NodeIP   string `json:"nodeIP"`
+	NodePort int    `json:"nodePort"`
+}
+
+type PodsWithTargetPort struct {
+	Pods       []NamespaceName
+	TargetPort int32
+}

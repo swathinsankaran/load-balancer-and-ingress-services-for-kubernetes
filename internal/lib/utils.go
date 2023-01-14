@@ -29,17 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-type NPLAnnotation struct {
-	PodPort  int    `json:"podPort"`
-	NodeIP   string `json:"nodeIP"`
-	NodePort int    `json:"nodePort"`
-}
-
-type PodsWithTargetPort struct {
-	Pods       []utils.NamespaceName
-	TargetPort int32
-}
-
 func ExtractTypeNameNamespace(key string) (string, string, string) {
 	segments := strings.Split(key, "/")
 	if len(segments) == 3 {
@@ -125,11 +114,8 @@ func GetPodsFromService(namespace, serviceName string, targetPortName intstr.Int
 		if k8serrors.IsNotFound(err) {
 			return pods, targetPort
 		}
-		if found, podsIntf := objects.SharedSvcToPodLister().Get(svcKey); found {
-			savedPods, ok := podsIntf.(PodsWithTargetPort)
-			if ok {
-				return savedPods.Pods, savedPods.TargetPort
-			}
+		if found, savedPods := objects.SharedSvcToPodLister().Get(svcKey); found {
+			return savedPods.Pods, savedPods.TargetPort
 		}
 		return pods, targetPort
 	}
@@ -161,7 +147,7 @@ func GetPodsFromService(namespace, serviceName string, targetPortName intstr.Int
 		pods = append(pods, utils.NamespaceName{Namespace: pod.Namespace, Name: pod.Name})
 	}
 
-	objects.SharedSvcToPodLister().Save(svcKey, PodsWithTargetPort{Pods: pods, TargetPort: targetPort})
+	objects.SharedSvcToPodLister().Save(svcKey, utils.PodsWithTargetPort{Pods: pods, TargetPort: targetPort})
 	return pods, targetPort
 }
 

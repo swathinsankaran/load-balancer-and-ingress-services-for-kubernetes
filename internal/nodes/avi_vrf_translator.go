@@ -49,7 +49,7 @@ func (o *AviObjectGraph) BuildVRFGraph(key string, vrfName string) error {
 	utils.AviLog.Debugf("key: %s, All Nodes %v", key, allNodes)
 	routeid := 1
 	for _, k := range nodeKeys {
-		node := allNodes[k].(*v1.Node)
+		node := allNodes[k]
 		nodeRoutes, err := o.addRouteForNode(node, vrfName, routeid)
 		if err != nil {
 			utils.AviLog.Errorf("key: %s, Error Adding vrf for node %s: %v", key, node.Name, err)

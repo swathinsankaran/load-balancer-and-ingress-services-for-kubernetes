@@ -351,26 +351,21 @@ func handlePod(key, namespace, podName string, fullsync bool) {
 
 		utils.AviLog.Infof("key: %s, msg: Pod not found, deleting from SharedNPLLister", key)
 		objects.SharedNPLLister().Delete(podKey)
-		if found, lbSvcIntf := objects.SharedPodToLBSvcLister().Get(podKey); found {
-			lbSvcs, ok := lbSvcIntf.([]string)
-			if ok {
-				//If namespace valid, do L4 service handling
-				if utils.IsServiceNSValid(namespace) {
-					utils.AviLog.Debugf("key: %s, msg: handling l4 Services %v", key, lbSvcs)
-					for _, lbSvc := range lbSvcs {
-						lbSvcKey := utils.L4LBService + "/" + lbSvc
-						handleL4Service(lbSvcKey, fullsync)
-					}
+		if found, lbSvcs := objects.SharedPodToLBSvcLister().Get(podKey); found {
+			//If namespace valid, do L4 service handling
+			if utils.IsServiceNSValid(namespace) {
+				utils.AviLog.Debugf("key: %s, msg: handling l4 Services %v", key, lbSvcs)
+				for _, lbSvc := range lbSvcs {
+					lbSvcKey := utils.L4LBService + "/" + lbSvc
+					handleL4Service(lbSvcKey, fullsync)
 				}
-			} else {
-				utils.AviLog.Warnf("key: %s, msg: list services for pod is not of type []string", key)
 			}
 		}
 		objects.SharedPodToLBSvcLister().Delete(podKey)
 		return
 	}
 	ann := pod.GetAnnotations()
-	var annotations []lib.NPLAnnotation
+	var annotations []utils.NPLAnnotation
 	if err := json.Unmarshal([]byte(ann[lib.NPLPodAnnotation]), &annotations); err != nil {
 		utils.AviLog.Infof("key: %s, got error while unmarshaling NPL annotations: %v", key, err)
 	}

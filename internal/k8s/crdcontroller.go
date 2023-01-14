@@ -333,7 +333,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			key := lib.IstioVirtualService + "/" + utils.ObjKey(vs)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 			ok, resVer := objects.SharedResourceVerInstanceLister().Get(key)
-			if ok && resVer.(string) == vs.ResourceVersion {
+			if ok && resVer == vs.ResourceVersion {
 				utils.AviLog.Debugf("key: %s, msg: Same resource version returning", key)
 				return
 			}
@@ -393,7 +393,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 			bkt := utils.Bkt(namespace, numWorkers)
 			ok, resVer := objects.SharedResourceVerInstanceLister().Get(key)
-			if ok && resVer.(string) == dr.ResourceVersion {
+			if ok && resVer == dr.ResourceVersion {
 				utils.AviLog.Debugf("key: %s, msg: Same resource version returning", key)
 				return
 			}
@@ -451,7 +451,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			key := lib.IstioGateway + "/" + utils.ObjKey(vs)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 			ok, resVer := objects.SharedResourceVerInstanceLister().Get(key)
-			if ok && resVer.(string) == vs.ResourceVersion {
+			if ok && resVer == vs.ResourceVersion {
 				utils.AviLog.Debugf("key: %s, msg: Same resource version returning", key)
 				return
 			}

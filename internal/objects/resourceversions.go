@@ -20,37 +20,37 @@ import (
 	"sync"
 )
 
-var resouceVerInstance *ResourceVersionLister
+var resouceVerInstance *ResourceVersionLister[string]
 var resourceVerOnce sync.Once
 
-func SharedResourceVerInstanceLister() *ResourceVersionLister {
+func SharedResourceVerInstanceLister() *ResourceVersionLister[string] {
 	resourceVerOnce.Do(func() {
-		ResourceVerStore := NewObjectMapStore()
-		resouceVerInstance = &ResourceVersionLister{}
+		ResourceVerStore := NewObjectMapStore[string]()
+		resouceVerInstance = &ResourceVersionLister[string]{}
 		resouceVerInstance.ResourceVerStore = ResourceVerStore
 	})
 	return resouceVerInstance
 }
 
-type ResourceVersionLister struct {
-	ResourceVerStore *ObjectMapStore
+type ResourceVersionLister[T SupportedTypes] struct {
+	ResourceVerStore *ObjectMapStore[T]
 }
 
-func (a *ResourceVersionLister) Save(vsName string, resVer interface{}) {
+func (a *ResourceVersionLister[T]) Save(vsName string, resVer T) {
 	a.ResourceVerStore.AddOrUpdate(vsName, resVer)
 }
 
-func (a *ResourceVersionLister) Get(resName string) (bool, interface{}) {
+func (a *ResourceVersionLister[T]) Get(resName string) (bool, T) {
 	ok, obj := a.ResourceVerStore.Get(resName)
 	return ok, obj
 }
 
-func (a *ResourceVersionLister) GetAll() interface{} {
+func (a *ResourceVersionLister[T]) GetAll() map[string]T {
 	obj := a.ResourceVerStore.GetAllObjectNames()
 	return obj
 }
 
-func (a *ResourceVersionLister) Delete(resName string) {
+func (a *ResourceVersionLister[T]) Delete(resName string) {
 	a.ResourceVerStore.Delete(resName)
 
 }

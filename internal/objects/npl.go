@@ -16,6 +16,8 @@ package objects
 
 import (
 	"sync"
+
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 )
 
 var nplInstance *NPLLister
@@ -23,7 +25,7 @@ var nplOnce sync.Once
 
 func SharedNPLLister() *NPLLister {
 	nplOnce.Do(func() {
-		store := NewObjectMapStore()
+		store := NewObjectMapStore[[]utils.NPLAnnotation]()
 		nplInstance = &NPLLister{}
 		nplInstance.store = store
 	})
@@ -32,19 +34,19 @@ func SharedNPLLister() *NPLLister {
 
 // NPLLister stores a list of NPL annotations for a pod
 type NPLLister struct {
-	store *ObjectMapStore
+	store *ObjectMapStore[[]utils.NPLAnnotation]
 }
 
-func (a *NPLLister) Save(key string, val interface{}) {
+func (a *NPLLister) Save(key string, val []utils.NPLAnnotation) {
 	a.store.AddOrUpdate(key, val)
 }
 
-func (a *NPLLister) Get(key string) (bool, interface{}) {
+func (a *NPLLister) Get(key string) (bool, []utils.NPLAnnotation) {
 	ok, obj := a.store.Get(key)
 	return ok, obj
 }
 
-func (a *NPLLister) GetAll() interface{} {
+func (a *NPLLister) GetAll() map[string][]utils.NPLAnnotation {
 	obj := a.store.GetAllObjectNames()
 	return obj
 }
@@ -59,7 +61,7 @@ var podSvcOnce sync.Once
 
 func SharedPodToSvcLister() *PodSvcLister {
 	podSvcOnce.Do(func() {
-		store := NewObjectMapStore()
+		store := NewObjectMapStore[[]string]()
 		podSvcInstance = &PodSvcLister{}
 		podSvcInstance.store = store
 	})
@@ -69,19 +71,19 @@ func SharedPodToSvcLister() *PodSvcLister {
 // PodSvcLister stores list of services for a pod.
 // For all these services, the Pod acts a backend through matching selector
 type PodSvcLister struct {
-	store *ObjectMapStore
+	store *ObjectMapStore[[]string]
 }
 
-func (a *PodSvcLister) Save(key string, val interface{}) {
+func (a *PodSvcLister) Save(key string, val []string) {
 	a.store.AddOrUpdate(key, val)
 }
 
-func (a *PodSvcLister) Get(key string) (bool, interface{}) {
+func (a *PodSvcLister) Get(key string) (bool, []string) {
 	ok, obj := a.store.Get(key)
 	return ok, obj
 }
 
-func (a *PodSvcLister) GetAll() interface{} {
+func (a *PodSvcLister) GetAll() map[string][]string {
 	obj := a.store.GetAllObjectNames()
 	return obj
 }
@@ -95,7 +97,7 @@ var svcPodOnce sync.Once
 
 func SharedSvcToPodLister() *SvcPodLister {
 	svcPodOnce.Do(func() {
-		store := NewObjectMapStore()
+		store := NewObjectMapStore[utils.PodsWithTargetPort]()
 		svcPodInstance = &SvcPodLister{}
 		svcPodInstance.store = store
 	})
@@ -104,19 +106,19 @@ func SharedSvcToPodLister() *SvcPodLister {
 
 // SvcPodLister stores list of pods for a service with matching label selector
 type SvcPodLister struct {
-	store *ObjectMapStore
+	store *ObjectMapStore[utils.PodsWithTargetPort]
 }
 
-func (a *SvcPodLister) Save(key string, val interface{}) {
+func (a *SvcPodLister) Save(key string, val utils.PodsWithTargetPort) {
 	a.store.AddOrUpdate(key, val)
 }
 
-func (a *SvcPodLister) Get(key string) (bool, interface{}) {
+func (a *SvcPodLister) Get(key string) (bool, utils.PodsWithTargetPort) {
 	ok, obj := a.store.Get(key)
 	return ok, obj
 }
 
-func (a *SvcPodLister) GetAll() interface{} {
+func (a *SvcPodLister) GetAll() map[string]utils.PodsWithTargetPort {
 	obj := a.store.GetAllObjectNames()
 	return obj
 }
@@ -130,7 +132,7 @@ var podLBSvcOnce sync.Once
 
 func SharedPodToLBSvcLister() *PodLBSvcLister {
 	podLBSvcOnce.Do(func() {
-		store := NewObjectMapStore()
+		store := NewObjectMapStore[[]string]()
 		podLBSvcInstance = &PodLBSvcLister{}
 		podLBSvcInstance.store = store
 	})
@@ -139,19 +141,19 @@ func SharedPodToLBSvcLister() *PodLBSvcLister {
 
 // PodLBSvcLister stores list of services of type LB for a pod.
 type PodLBSvcLister struct {
-	store *ObjectMapStore
+	store *ObjectMapStore[[]string]
 }
 
-func (a *PodLBSvcLister) Save(key string, val interface{}) {
+func (a *PodLBSvcLister) Save(key string, val []string) {
 	a.store.AddOrUpdate(key, val)
 }
 
-func (a *PodLBSvcLister) Get(key string) (bool, interface{}) {
+func (a *PodLBSvcLister) Get(key string) (bool, []string) {
 	ok, obj := a.store.Get(key)
 	return ok, obj
 }
 
-func (a *PodLBSvcLister) GetAll() interface{} {
+func (a *PodLBSvcLister) GetAll() map[string][]string {
 	obj := a.store.GetAllObjectNames()
 	return obj
 }

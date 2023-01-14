@@ -30,11 +30,11 @@ var gwonce sync.Once
 func ServiceGWLister() *SvcGWLister {
 	gwonce.Do(func() {
 		gwsvclister = &SvcGWLister{
-			GwClassGWStore:   NewObjectMapStore(),
-			GwGwClassStore:   NewObjectMapStore(),
-			GwListenersStore: NewObjectMapStore(),
-			SvcGWStore:       NewObjectMapStore(),
-			GwSvcsStore:      NewObjectMapStore(),
+			GwClassGWStore:   NewObjectMapStore[[]string](),
+			GwGwClassStore:   NewObjectMapStore[string](),
+			GwListenersStore: NewObjectMapStore[[]string](),
+			SvcGWStore:       NewObjectMapStore[string](),
+			GwSvcsStore:      NewObjectMapStore[map[string][]string](),
 		}
 	})
 	return gwsvclister
@@ -44,31 +44,31 @@ type SvcGWLister struct {
 	SvcGWLock sync.RWMutex
 
 	// gwclass -> [ns1/gw1, ns1/gw2, ns2/gw3]
-	GwClassGWStore *ObjectMapStore
+	GwClassGWStore *ObjectMapStore[[]string]
 
 	// nsX/gw1 -> gwclass
-	GwGwClassStore *ObjectMapStore
+	GwGwClassStore *ObjectMapStore[string]
 
 	// the protocol and port mapped here are of the gateway listener config
 	// that has the appropriate labels
 	// nsX/gw1 -> [proto1/port1, proto2/port2]
-	GwListenersStore *ObjectMapStore
+	GwListenersStore *ObjectMapStore[[]string]
 
 	// ns1/svc -> nsX/gw1
-	SvcGWStore *ObjectMapStore
+	SvcGWStore *ObjectMapStore[string]
 
 	// the protocol and port mapped here are of the service
 	// nsX/gw1 -> {proto1/port1: ns1/svc1, proto2/port2: ns2/svc2, ...}
-	GwSvcsStore *ObjectMapStore
+	GwSvcsStore *ObjectMapStore[map[string][]string]
 }
 
 // Gateway <-> GatewayClass
 func (v *SvcGWLister) GetGWclassToGateways(gwclass string) (bool, []string) {
 	found, gatewayList := v.GwClassGWStore.Get(gwclass)
 	if !found {
-		return false, make([]string, 0)
+		return false, gatewayList
 	}
-	return true, gatewayList.([]string)
+	return true, gatewayList
 }
 
 func (v *SvcGWLister) GetGatewayToGWclass(gateway string) (bool, string) {
@@ -76,7 +76,7 @@ func (v *SvcGWLister) GetGatewayToGWclass(gateway string) (bool, string) {
 	if !found {
 		return false, ""
 	}
-	return true, gwClass.(string)
+	return true, gwClass
 }
 
 func (v *SvcGWLister) UpdateGatewayGWclassMappings(gateway, gwclass string) {
@@ -116,7 +116,7 @@ func (v *SvcGWLister) GetGWListeners(gateway string) (bool, []string) {
 	if !found {
 		return false, make([]string, 0)
 	}
-	return true, listeners.([]string)
+	return true, listeners
 }
 
 func (v *SvcGWLister) UpdateGWListeners(gateway string, listeners []string) {
@@ -135,7 +135,7 @@ func (v *SvcGWLister) GetSvcToGw(service string) (bool, string) {
 	if !found {
 		return false, ""
 	}
-	return true, gateway.(string)
+	return true, gateway
 }
 
 func (v *SvcGWLister) GetGwToSvcs(gateway string) (bool, map[string][]string) {
@@ -143,7 +143,7 @@ func (v *SvcGWLister) GetGwToSvcs(gateway string) (bool, map[string][]string) {
 	if !found {
 		return false, make(map[string][]string)
 	}
-	return true, services.(map[string][]string)
+	return true, services
 }
 
 func (v *SvcGWLister) UpdateGatewayMappings(gateway string, svcListener map[string][]string, service string) {

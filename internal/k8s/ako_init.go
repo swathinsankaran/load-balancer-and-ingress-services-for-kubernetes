@@ -719,7 +719,7 @@ func (c *AviController) FullSync() {
 		}
 		allModelsMap := objects.SharedAviGraphLister().GetAll()
 		var allModels []string
-		for modelName := range allModelsMap.(map[string]interface{}) {
+		for modelName := range allModelsMap {
 			allModels = append(allModels, modelName)
 		}
 		for _, modelName := range allModels {
@@ -1085,7 +1085,7 @@ func (c *AviController) publishAllParentVSKeysToRestLayer() {
 	allModelsMap := objects.SharedAviGraphLister().GetAll()
 	allModels := make(map[string]struct{})
 	vrfModelName := lib.GetModelName(lib.GetTenant(), lib.GetVrf())
-	for modelName := range allModelsMap.(map[string]interface{}) {
+	for modelName := range allModelsMap {
 		// ignore vrf model, as it has been published already
 		if modelName != vrfModelName && !lib.IsIstioKey(modelName) {
 			allModels[modelName] = struct{}{}
@@ -1131,8 +1131,7 @@ func (c *AviController) DeleteModels() {
 	utils.AviLog.Infof("Deletion of all avi objects triggered")
 	publisher := status.NewStatusPublisher()
 	publisher.AddStatefulSetAnnotation(lib.ObjectDeletionStartStatus)
-	allModels := objects.SharedAviGraphLister().GetAll()
-	allModelsMap := allModels.(map[string]interface{})
+	allModelsMap := objects.SharedAviGraphLister().GetAll()
 	if len(allModelsMap) == 0 {
 		utils.AviLog.Infof("No Avi Object to delete, status would be updated in Statefulset")
 		publisher.AddStatefulSetAnnotation(lib.ObjectDeletionDoneStatus)
@@ -1189,26 +1188,16 @@ func DeleteNPLAnnotations() {
 	}
 	publisher := status.NewStatusPublisher()
 	// Delete NPL annotations from the Services
-	allSvcIntf := objects.SharedClusterIpLister().GetAll()
-	allSvcs, ok := allSvcIntf.(map[string]interface{})
-	if !ok {
-		utils.AviLog.Infof("Can not delete NPL annotations, wrong type of object in ClusterIpLister: %T", allSvcIntf)
-	} else {
-		for nsSvc := range allSvcs {
-			ns, _, svc := lib.ExtractTypeNameNamespace(nsSvc)
-			publisher.DeleteNPLAnnotation(nsSvc, ns, svc)
-		}
+	allSvcs := objects.SharedClusterIpLister().GetAll()
+	for nsSvc := range allSvcs {
+		ns, _, svc := lib.ExtractTypeNameNamespace(nsSvc)
+		publisher.DeleteNPLAnnotation(nsSvc, ns, svc)
 	}
 	objects.SharedlbLister().GetAll()
-	allLBSvcIntf := objects.SharedlbLister().GetAll()
-	allLBSvcs, ok := allLBSvcIntf.(map[string]interface{})
-	if !ok {
-		utils.AviLog.Infof("Can not delete NPL annotations, wrong type of object in lbLister: %T", allLBSvcIntf)
-	} else {
-		for nsSvc := range allLBSvcs {
-			ns, _, svc := lib.ExtractTypeNameNamespace(nsSvc)
-			publisher.DeleteNPLAnnotation(nsSvc, ns, svc)
-		}
+	allLBSvcs := objects.SharedlbLister().GetAll()
+	for nsSvc := range allLBSvcs {
+		ns, _, svc := lib.ExtractTypeNameNamespace(nsSvc)
+		publisher.DeleteNPLAnnotation(nsSvc, ns, svc)
 	}
 }
 

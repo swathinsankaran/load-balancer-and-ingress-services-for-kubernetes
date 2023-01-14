@@ -29,10 +29,10 @@ var hsonce sync.Once
 func SharedHostNameLister() *HostNameLister {
 	hsonce.Do(func() {
 		hostNameListerInstance = &HostNameLister{
-			secureHostNameStore: objects.NewObjectMapStore(),
-			namespaceStore:      objects.NewObjectMapStore(),
+			secureHostNameStore: objects.NewObjectMapStore[SecureHostNameMapProp](),
+			namespaceStore:      objects.NewObjectMapStore[string](),
 			HostNamePathStore: HostNamePathStore{
-				hostNamePathStore: objects.NewObjectMapStore(),
+				hostNamePathStore: objects.NewObjectMapStore[map[string][]string](),
 			},
 		}
 	})
@@ -40,8 +40,8 @@ func SharedHostNameLister() *HostNameLister {
 }
 
 type HostNameLister struct {
-	secureHostNameStore *objects.ObjectMapStore
-	namespaceStore      *objects.ObjectMapStore
+	secureHostNameStore *objects.ObjectMapStore[SecureHostNameMapProp]
+	namespaceStore      *objects.ObjectMapStore[string]
 	HostNamePathStore
 }
 
@@ -55,7 +55,7 @@ func (a *HostNameLister) Get(hostname string) (bool, SecureHostNameMapProp) {
 	if !ok {
 		return ok, SecureHostNameMapProp{}
 	}
-	return ok, obj.(SecureHostNameMapProp)
+	return ok, obj
 }
 
 func (a *HostNameLister) Delete(hostname string) {
@@ -67,16 +67,11 @@ func (a *HostNameLister) SaveNamespace(hostname string, namespace string) {
 }
 
 func (a *HostNameLister) GetNamespace(hostname string) (bool, string) {
-	found, obj := a.namespaceStore.Get(hostname)
+	found, ns := a.namespaceStore.Get(hostname)
 	if !found {
 		return false, ""
 	}
 
-	ns, ok := obj.(string)
-	if !ok {
-		utils.AviLog.Warnf("Wrong object type for namespace for the hostname %s: T", hostname, obj)
-		return false, ""
-	}
 	return true, ns
 }
 
@@ -88,7 +83,7 @@ func (a *HostNameLister) DeleteNamespace(hostname string) {
 // cache sample: foo.com -> {path1: [ns1/ingress1], path2: [ns2/ingress2]}
 type HostNamePathStore struct {
 	sync.RWMutex
-	hostNamePathStore *objects.ObjectMapStore
+	hostNamePathStore *objects.ObjectMapStore[map[string][]string]
 }
 
 func (h *HostNamePathStore) GetHostPathStore(host string) (bool, map[string][]string) {
@@ -96,7 +91,7 @@ func (h *HostNamePathStore) GetHostPathStore(host string) (bool, map[string][]st
 	if !ok {
 		return false, make(map[string][]string)
 	}
-	return true, obj.(map[string][]string)
+	return true, obj
 }
 
 func (h *HostNamePathStore) GetHostsFromHostPathStore(host, fqdnMatchType string) []string {
@@ -123,7 +118,7 @@ func (h *HostNamePathStore) GetHostPathStoreIngresses(host, path string) (bool, 
 	if !ok {
 		return false, []string{}
 	}
-	mmap := obj.(map[string][]string)
+	mmap := obj
 	if _, ok := mmap[path]; !ok {
 		return false, []string{}
 	}

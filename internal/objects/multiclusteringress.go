@@ -28,24 +28,24 @@ var once sync.Once
 func SharedMultiClusterIngressSvcLister() *SvcLister {
 	once.Do(func() {
 		mciSvcListerInstance = &SvcLister{
-			svcIngStore:         NewObjectStore(),
-			ingSvcStore:         NewObjectStore(),
-			secretIngStore:      NewObjectStore(),
-			ingSecretStore:      NewObjectStore(),
-			secretHostNameStore: NewObjectStore(),
-			ingHostStore:        NewObjectStore(),
-			classIngStore:       NewObjectStore(),
-			ingClassStore:       NewObjectStore(),
-			svcSIStore:          NewObjectStore(),
-			SISvcStore:          NewObjectStore(),
+			svcIngStore:         NewObjectStore[[]string](),
+			ingSvcStore:         NewObjectStore[[]string](),
+			secretIngStore:      NewObjectStore[[]string](),
+			ingSecretStore:      NewObjectStore[[]string](),
+			secretHostNameStore: NewObjectStore[[]string](),
+			ingHostStore:        NewObjectStore[map[string]*RouteIngrhost](),
+			classIngStore:       NewObjectStore[[]string](),
+			ingClassStore:       NewObjectStore[string](),
+			svcSIStore:          NewObjectStore[[]string](),
+			SISvcStore:          NewObjectStore[[]string](),
 		}
 	})
 	return mciSvcListerInstance
 }
 
 type mciNSCache struct {
-	svcSICache *ObjectMapStore
-	SISvcCache *ObjectMapStore
+	svcSICache *ObjectMapStore[[]string]
+	SISvcCache *ObjectMapStore[[]string]
 	sync.RWMutex
 }
 
@@ -87,7 +87,7 @@ func (c *mciNSCache) GetSvcToSI(svcName string) (bool, []string) {
 	if !found {
 		return false, make([]string, 0)
 	}
-	return true, siNames.([]string)
+	return true, siNames
 }
 
 func (c *mciNSCache) DeleteSvcToSIMapping(svcName string) bool {
@@ -114,7 +114,7 @@ func (c *mciNSCache) GetSIToSvc(siName string) (bool, []string) {
 	if !found {
 		return false, make([]string, 0)
 	}
-	return true, svcNames.([]string)
+	return true, svcNames
 }
 
 func (c *mciNSCache) DeleteSIToSvcMapping(siName string) bool {
