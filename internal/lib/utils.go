@@ -15,6 +15,8 @@
 package lib
 
 import (
+	"bytes"
+	"encoding/gob"
 	"regexp"
 	"strings"
 
@@ -248,4 +250,10 @@ func CorrectLabelToSatisfyRFC1035(name *string, prefix string) {
 		utils.AviLog.Warnf("Label %s has been changed to : %s", previousLabel, *name)
 	}
 
+}
+
+func DeepCopy(dst, src interface{}) {
+	buf := new(bytes.Buffer)
+	gob.NewEncoder(buf).Encode(src)
+	gob.NewDecoder(buf).Decode(dst)
 }

@@ -46,8 +46,10 @@ func (o *AviObjectGraph) BuildVRFGraph(key, vrfName, nodeName string, deleteFlag
 
 	routeid := 1
 	if len(aviVrfNode.StaticRoutes) != 0 {
+		// second node
 		routeid = len(aviVrfNode.StaticRoutes) + 1
 	} else {
+		// first node - routeid is always 1
 		aviVrfNode.NodeStaticRoutes = make(map[string]StaticRouteDetails)
 	}
 	var nodeRoutes []*models.StaticRoute

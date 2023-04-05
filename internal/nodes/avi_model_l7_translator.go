@@ -18,9 +18,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jinzhu/copier"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
 	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
+	akov1alpha2 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha2"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
 	avimodels "github.com/vmware/alb-sdk/go/models"
@@ -493,8 +495,8 @@ func (o *AviObjectGraph) BuildPolicyPGPoolsForSNI(vsNode []*AviVsNode, tlsNode *
 }
 
 func (o *AviObjectGraph) BuildPoolSecurity(poolNode *AviPoolNode, tlsData TlsSettings, key string, aviMarkers utils.AviObjectMarkers) {
-	poolNode.SniEnabled = true
-	poolNode.SslProfileRef = fmt.Sprintf("/api/sslprofile?name=%s", lib.DefaultPoolSSLProfile)
+	poolNode.SniEnabled = proto.Bool(true)
+	poolNode.SslProfileRef = proto.String(fmt.Sprintf("/api/sslprofile?name=%s", lib.DefaultPoolSSLProfile))
 
 	utils.AviLog.Infof("key: %s, Added ssl profile for pool %s", key, poolNode.Name)
 	if tlsData.destCA == "" {
@@ -692,4 +694,44 @@ func buildPoolWithInfraSetting(key string, pool *AviPoolNode, infraSetting *akov
 
 		utils.AviLog.Debugf("key: %s, msg: Applied AviInfraSetting configuration over PoolNode %s", key, pool.Name)
 	}
+}
+
+func buildWithL4Rule(key string, vs *AviVsNode, l4Rule *akov1alpha2.L4Rule) {
+
+	if l4Rule == nil {
+		return
+	}
+
+	copier.Copy(vs, &l4Rule.Spec)
+
+	vs.AviVsNodeCommonFields.ConvertToRef()
+	vs.AviVsNodeGeneratedFields.ConvertToRef()
+
+	utils.AviLog.Debugf("key: %s, msg: Applied L4Rule %s configuration over VS %s", key, l4Rule.Name, vs.Name)
+}
+
+func buildPoolWithL4Rule(key string, pool *AviPoolNode, l4Rule *akov1alpha2.L4Rule) {
+
+	if l4Rule == nil {
+		return
+	}
+
+	index := -1
+	for i, poolProperty := range l4Rule.Spec.BackendProperties {
+		if *poolProperty.Port == int(pool.Port) &&
+			*poolProperty.Protocol == pool.Protocol {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		utils.AviLog.Warnf("key: %s, msg: L4Rule %s doesn't match any pools present.", key, l4Rule.Name)
+		return
+	}
+	copier.Copy(pool, l4Rule.Spec.BackendProperties[index])
+
+	pool.AviPoolCommonFields.ConvertToRef()
+	pool.AviPoolGeneratedFields.ConvertToRef()
+
+	utils.AviLog.Debugf("key: %s, msg: Applied L4Rule %s configuration over Pool %s", key, l4Rule.Name, pool.Name)
 }
