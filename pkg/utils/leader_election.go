@@ -26,29 +26,34 @@ import (
 )
 
 type callBackFunc func()
+type callBackFuncWithParams func(le LeaderElector)
 
 type leaderElector struct {
+	ctx           context.Context
+	wg            *sync.WaitGroup
 	identity      string
 	leaderElector *leaderelection.LeaderElector
 	readyCh       chan struct{}
 }
 
 type LeaderElector interface {
-	Run(ctx context.Context, wg *sync.WaitGroup) chan struct{}
+	Run() chan struct{}
 }
 
-func NewLeaderElector(clientset kubernetes.Interface,
-	OnStartedLeadingCallback, OnStoppedLeadingCallback, OnNewLeaderCallback callBackFunc) (LeaderElector, error) {
+func NewLeaderElector(ctx context.Context, clientset kubernetes.Interface,
+	OnStartedLeadingCallback, OnNewLeaderCallback callBackFunc, OnStoppedLeadingCallback callBackFuncWithParams, wg *sync.WaitGroup) (LeaderElector, error) {
 
 	leaderElector := &leaderElector{}
 	leaderElector.identity = os.Getenv("POD_NAME")
 	leaderElector.readyCh = make(chan struct{})
+	leaderElector.ctx = ctx
+	leaderElector.wg = wg
 
 	leaderConfig := leaderElector.GetLeaderConfig(
 		clientset,
 		OnStartedLeadingCallback,
-		OnStoppedLeadingCallback,
 		OnNewLeaderCallback,
+		OnStoppedLeadingCallback,
 	)
 	var err error
 	leaderElector.leaderElector, err = leaderelection.NewLeaderElector(leaderConfig)
@@ -59,7 +64,7 @@ func NewLeaderElector(clientset kubernetes.Interface,
 }
 
 func (le *leaderElector) GetLeaderConfig(clientset kubernetes.Interface, OnStartedLeadingCallback,
-	OnStoppedLeadingCallback, OnNewLeaderCallback callBackFunc) leaderelection.LeaderElectionConfig {
+	OnNewLeaderCallback callBackFunc, OnStoppedLeadingCallback callBackFuncWithParams) leaderelection.LeaderElectionConfig {
 	return leaderelection.LeaderElectionConfig{
 		Name:            le.identity,
 		Lock:            le.GetLeaseLock(clientset),
@@ -67,7 +72,7 @@ func (le *leaderElector) GetLeaderConfig(clientset kubernetes.Interface, OnStart
 		LeaseDuration:   leaseDuration,
 		RenewDeadline:   renewDeadline,
 		RetryPeriod:     retryPeriod,
-		Callbacks:       le.GetLeaderCallbacks(OnStartedLeadingCallback, OnStoppedLeadingCallback, OnNewLeaderCallback),
+		Callbacks:       le.GetLeaderCallbacks(OnStartedLeadingCallback, OnNewLeaderCallback, OnStoppedLeadingCallback),
 	}
 }
 
@@ -85,14 +90,14 @@ func (le *leaderElector) GetLeaseLock(clientset kubernetes.Interface) *resourcel
 }
 
 func (le *leaderElector) GetLeaderCallbacks(OnStartedLeadingCallback,
-	OnStoppedLeadingCallback, OnNewLeaderCallback callBackFunc) leaderelection.LeaderCallbacks {
+	OnNewLeaderCallback callBackFunc, OnStoppedLeadingCallback callBackFuncWithParams) leaderelection.LeaderCallbacks {
 	return leaderelection.LeaderCallbacks{
 		OnStartedLeading: func(ctx context.Context) {
 			OnStartedLeadingCallback()
 			le.OnNewLeaderElected()
 		},
 		OnStoppedLeading: func() {
-			OnStoppedLeadingCallback()
+			OnStoppedLeadingCallback(le)
 		},
 		OnNewLeader: func(identity string) {
 			if identity == le.identity {
@@ -104,20 +109,16 @@ func (le *leaderElector) GetLeaderCallbacks(OnStartedLeadingCallback,
 	}
 }
 
-var once sync.Once
-
 func (le *leaderElector) OnNewLeaderElected() {
-	once.Do(func() {
-		close(le.readyCh)
-	})
+	le.readyCh <- struct{}{}
 }
 
-func (le *leaderElector) Run(ctx context.Context, wg *sync.WaitGroup) chan struct{} {
+func (le *leaderElector) Run() chan struct{} {
 	AviLog.Debug("Leader election is in-progress")
-	wg.Add(1)
+	le.wg.Add(1)
 	go func() {
-		defer wg.Done()
-		le.leaderElector.Run(ctx)
+		defer le.wg.Done()
+		le.leaderElector.Run(le.ctx)
 		AviLog.Debug("leader election goroutine exited")
 	}()
 	return le.readyCh

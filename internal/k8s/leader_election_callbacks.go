@@ -49,9 +49,12 @@ func (c *AviController) OnNewLeader() {
 	c.cleanupStaleVSes()
 }
 
-func (c *AviController) OnStoppedLeading() {
+func (c *AviController) OnStoppedLeading(le utils.LeaderElector) {
 	lib.AKOControlConfig().SetIsLeaderFlag(false)
-	c.DisableSync = true
-	lib.SetDisableSync(true)
-	utils.AviLog.Fatal("AKO lost the leadership")
+	utils.AviLog.Debugf("AKO lost the leadership")
+	lib.AKOControlConfig().PodEventf(v1.EventTypeNormal, "LeaderElection", "AKO lost the leadership")
+
+	// Participating in the leader election again instead of rebooting.
+	leReadyCh := le.Run()
+	<-leReadyCh
 }

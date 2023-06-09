@@ -575,12 +575,12 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 		c.cleanupStaleVSes()
 	} else {
 		// Leader election happens after populating controller cache and fullsynck8s.
-		leaderElector, err := utils.NewLeaderElector(informers.Cs, c.OnStartedLeading, c.OnStoppedLeading, c.OnNewLeader)
+		leaderElector, err := utils.NewLeaderElector(ctx, informers.Cs, c.OnStartedLeading, c.OnNewLeader, c.OnStoppedLeading, leaderElectionWG)
 		if err != nil {
 			utils.AviLog.Fatalf("Leader election failed with error %v, shutting down AKO.", err)
 		}
 
-		leReadyCh := leaderElector.Run(ctx, leaderElectionWG)
+		leReadyCh := leaderElector.Run()
 		<-leReadyCh
 	}
 
