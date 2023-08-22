@@ -15,6 +15,7 @@
 package objects
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
@@ -39,6 +40,11 @@ func GatewayApiLister() *GWLister {
 			secretToListener:           objects.NewObjectMapStore(),
 			gatewayToSecret:            objects.NewObjectMapStore(),
 			routeToChildVS:             objects.NewObjectMapStore(),
+			gatewayToListenerStore:     objects.NewObjectMapStore(),
+			gatewayListenerToHostname:  objects.NewObjectMapStore(),
+			gatewayListenerToRoute:     objects.NewObjectMapStore(),
+			routeToGatewayListener:     objects.NewObjectMapStore(),
+			gatewayRouteToHostname:     objects.NewObjectMapStore(),
 		}
 	})
 	return gwLister
@@ -82,8 +88,73 @@ type GWLister struct {
 
 	// routeType/routeNs/routeName -> [childvs, ...]
 	routeToChildVS *objects.ObjectMapStore
+
+	// Namespace/Gateway -> [listener1, listener2, ...]
+	gatewayToListenerStore *objects.ObjectMapStore
+
+	// Namespace/Gateway/Listner -> hostname
+	gatewayListenerToHostname *objects.ObjectMapStore
+
+	// namespace/gateway/listener -> routeType/routeNs/routeName
+	gatewayListenerToRoute *objects.ObjectMapStore
+
+	// routeType/routeNs/routeName -> [namespace/gateway/listener, ...]
+	routeToGatewayListener *objects.ObjectMapStore
+
+	//gatewayNS/gatewayName -> [hostname, ...]
+	gatewayRouteToHostname *objects.ObjectMapStore
+
+	//svc -> gw
+	//route <-> gw
+	//secret -> gw
 }
 
+func (g *GWLister) GetGatewayToRoutes(gwNsName string) []string {
+	g.gwLock.RLock()
+	defer g.gwLock.RUnlock()
+
+	var routes []string
+	_, listeners := g.gatewayToListenerStore.Get(gwNsName)
+	for _, listener := range listeners.([]string) {
+		listenerSlice := strings.Split(listener, "/")
+
+		found, route := g.gatewayListenerToRoute.Get(gwNsName + "/" + listenerSlice[0])
+		if found {
+			if !utils.HasElem(routes, route) {
+				routes = append(routes, route.(string))
+			}
+		}
+	}
+	return routes
+}
+
+func (g *GWLister) UpdateGatewayRouteToHostname(ns, gw string, hostnames []string) {
+	g.gwLock.Lock()
+	defer g.gwLock.Unlock()
+
+	key := getKeyForGateway(ns, gw)
+	g.gatewayRouteToHostname.AddOrUpdate(key, hostnames)
+
+}
+func (g *GWLister) GetGatewayRouteToHostname(ns, gw string) (bool, []string) {
+	g.gwLock.RLock()
+	defer g.gwLock.RUnlock()
+
+	key := getKeyForGateway(ns, gw)
+	found, hostnames := g.gatewayRouteToHostname.Get(key)
+	if found {
+		return true, hostnames.([]string)
+	}
+	return false, make([]string, 0)
+}
+
+func (g *GWLister) UpdateRouteToGateway(routeTypeNsName string, gateways []string) {
+	g.gwLock.Lock()
+	defer g.gwLock.Unlock()
+
+	g.routeToGateway.AddOrUpdate(routeTypeNsName, gateways)
+
+}
 func (g *GWLister) IsGatewayClassControllerAKO(gwClass string) (bool, bool) {
 	g.gwLock.RLock()
 	defer g.gwLock.RUnlock()
@@ -110,6 +181,11 @@ func (g *GWLister) DeleteGatewayClass(gwClass string) {
 	defer g.gwLock.Unlock()
 
 	g.gatewayClassStore.Delete(gwClass)
+}
+
+func (g *GWLister) IsGatewayInStore(gwNsName string) bool {
+	gateways := g.gatewayToListenerStore.GetAllKeys()
+	return utils.HasElem(gateways, gwNsName)
 }
 
 func (g *GWLister) GetGatewayClassToGateway(gwClass string) []string {
@@ -159,6 +235,39 @@ func (g *GWLister) UpdateGatewayToGatewayClass(ns, gw, gwClass string) {
 	}
 }
 
+func (g *GWLister) UpdateGatewayToListener(gwNsName string, listeners []string) {
+	g.gwLock.Lock()
+	defer g.gwLock.Unlock()
+
+	g.gatewayToListenerStore.AddOrUpdate(gwNsName, listeners)
+}
+func (g *GWLister) GetGatewayListenerToHostname(ns, gw, listner string) string {
+	g.gwLock.RLock()
+	defer g.gwLock.RUnlock()
+
+	key := getKeyForGateway(ns, gw) + "/" + listner
+	_, obj := g.gatewayListenerToHostname.Get(key)
+
+	return obj.(string)
+}
+func (g *GWLister) UpdateGatewayListenerToHostname(gwListenerNsName, hostname string) {
+	g.gwLock.Lock()
+	defer g.gwLock.Unlock()
+
+	g.gatewayListenerToHostname.AddOrUpdate(gwListenerNsName, hostname)
+}
+
+func (g *GWLister) GetGatewayToListeners(ns, gw string) []string {
+	g.gwLock.RLock()
+	defer g.gwLock.RUnlock()
+
+	key := getKeyForGateway(ns, gw)
+
+	_, listenerList := g.gatewayToListenerStore.Get(key)
+	return listenerList.([]string)
+
+}
+
 func (g *GWLister) DeleteGatewayToGatewayClass(ns, gw string) {
 	g.gwLock.Lock()
 	defer g.gwLock.Unlock()
@@ -167,6 +276,7 @@ func (g *GWLister) DeleteGatewayToGatewayClass(ns, gw string) {
 	found, gwClass := g.gatewayToGatewayClassStore.Get(key)
 	if found {
 		g.gatewayToGatewayClassStore.Delete(key)
+		g.gatewayToListenerStore.Delete(key)
 		_, gatewayList := g.gatewayClassToGatewayStore.Get(gwClass.(string))
 		gatewayListObj := gatewayList.([]string)
 		gatewayListObj = utils.Remove(gatewayListObj, key)
@@ -206,6 +316,13 @@ func (g *GWLister) DeleteGatewayToRoute(gwNsName string) {
 	defer g.gwLock.Unlock()
 
 	g.gatewayToRoute.Delete(gwNsName)
+}
+
+func (g *GWLister) DeleteGatewayListenerToRoute(gwNsName string) {
+	g.gwLock.Lock()
+	defer g.gwLock.Unlock()
+
+	g.gatewayListenerToRoute.Delete(gwNsName)
 }
 
 func (g *GWLister) UpdateGatewayRouteMappings(gwNsName, routeTypeNsName string) {
@@ -490,5 +607,46 @@ func (g *GWLister) DeleteServiceRouteMappings(svcNsName string) {
 			svcNsNameList = utils.Remove(svcNsNameList, svcNsName)
 			g.routeToService.AddOrUpdate(svcNsName, svcNsNameList)
 		}
+	}
+}
+
+func (g *GWLister) GetRouteToGatewayListener(routeType, routeNsName string) []string {
+	g.gwLock.RLock()
+	defer g.gwLock.RUnlock()
+
+	routeKey := routeType + "/" + routeNsName
+	_, obj := g.routeToGatewayListener.Get(routeKey)
+	return obj.([]string)
+
+}
+func (g *GWLister) UpdateGatewayListenerRouteMappings(gwListener, routeTypeNsName string) {
+	g.gwLock.Lock()
+	defer g.gwLock.Unlock()
+
+	g.gatewayListenerToRoute.AddOrUpdate(gwListener, routeTypeNsName)
+
+	// update route to gw mapping
+	if found, obj := g.routeToGatewayListener.Get(routeTypeNsName); found {
+		gwListeners := obj.([]string)
+		if !utils.HasElem(gwListeners, gwListener) {
+			gwListeners = append(gwListeners, gwListener)
+		}
+		g.routeToGatewayListener.AddOrUpdate(routeTypeNsName, gwListeners)
+	} else {
+		gwListeners := []string{gwListener}
+		g.routeToGatewayListener.AddOrUpdate(routeTypeNsName, gwListeners)
+	}
+}
+
+func (g *GWLister) DeleteGatewayListenerRouteMappings(routeTypeNsName string) {
+	g.gwLock.Lock()
+	defer g.gwLock.Unlock()
+
+	if found, obj := g.routeToGatewayListener.Get(routeTypeNsName); found {
+		gatewayListenerList := obj.([]string)
+		for _, gatewayListener := range gatewayListenerList {
+			g.gatewayListenerToRoute.Delete(gatewayListener)
+		}
+		g.routeToGatewayListener.Delete(routeTypeNsName)
 	}
 }

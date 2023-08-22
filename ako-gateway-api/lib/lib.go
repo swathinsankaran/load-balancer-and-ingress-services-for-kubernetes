@@ -15,9 +15,6 @@
 package lib
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
-
 	"k8s.io/client-go/kubernetes"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
@@ -46,20 +43,20 @@ func GetGatewayParentName(namespace, gwName string) string {
 	return lib.GetNamePrefix() + namespace + "-" + gwName + "-EVH"
 }
 
-// child vs name format - clustername--encoded value of parentNs-parentName-childNs-childName-encodedStr
-func GetChildName(parentNs, parentName, childNs, childName, encodedStr string) string {
-	str := parentNs + "-" + parentName + "-" + childNs + "-" + childName + "-" + encodedStr
-	return lib.GetNamePrefix() + Encode(str)
-}
+// // child vs name format - clustername--encoded value of parentNs-parentName-childNs-childName-encodedStr
+// func GetChildName(parentNs, parentName, childNs, childName, encodedStr string) string {
+// 	str := parentNs + "-" + parentName + "-" + childNs + "-" + childName + "-" + encodedStr
+// 	return lib.GetNamePrefix() + Encode(str)
+// }
 
 func CheckGatewayClassController(controllerName string) bool {
 	return controllerName == lib.AviIngressController
 }
 
-func Encode(s string) string {
-	hash := sha1.Sum([]byte(s))
-	return hex.EncodeToString(hash[:])
-}
+// func Encode(s string) string {
+// 	hash := sha1.Sum([]byte(s))
+// 	return hex.EncodeToString(hash[:])
+// }
 
 func FindListenerByName(name string, listener []gatewayv1beta1.Listener) int {
 	for i := range listener {
@@ -77,4 +74,19 @@ func FindListenerStatusByName(name string, status []gatewayv1beta1.ListenerStatu
 		}
 	}
 	return -1
+}
+
+func GetChildName(parentNs, parentName, routeNs, routeName, matchName string) string {
+	name := lib.GetNamePrefix() + parentNs + "-" + parentName + "-" + routeNs + "-" + routeName + "-" + utils.Stringify(utils.Hash(matchName)) + "-EVH"
+	return lib.Encode(name, lib.EVHVS)
+}
+
+func GetPoolName(parentNs, parentName, routeNs, routeName, matchName, backendNs, backendName, backendPort string) string {
+	name := lib.GetNamePrefix() + parentNs + "-" + parentName + "-" + routeNs + "-" + routeName + "-" + utils.Stringify(utils.Hash(matchName)) + "-" + backendNs + "-" + backendName + "-" + backendPort
+	return lib.Encode(name, lib.Pool)
+}
+
+func GetPoolGroupName(parentNs, parentName, routeNs, routeName, matchName string) string {
+	name := lib.GetNamePrefix() + parentNs + "-" + parentName + "-" + routeNs + "-" + routeName + "-" + utils.Stringify(utils.Hash(matchName)) + "-PG"
+	return lib.Encode(name, lib.PG)
 }

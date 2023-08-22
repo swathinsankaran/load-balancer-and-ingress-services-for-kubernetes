@@ -16,8 +16,11 @@ package nodes
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/vmware/alb-sdk/go/models"
+	avimodels "github.com/vmware/alb-sdk/go/models"
 	"google.golang.org/protobuf/proto"
 
 	akogatewayapilib "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/lib"
@@ -27,26 +30,28 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 )
 
-func (o *AviObjectGraph) ProcessL7Routes(key string, routeModel RouteModel, parentNsName string, childVSes map[string]struct{}) {
+func (o *AviObjectGraph) ProcessL7Routes(key string, routeModel RouteModel, parentNsName string, childVSes map[string]struct{}, listeners []string) {
 	for _, rule := range routeModel.ParseRouteRules().Rules {
 
 		// TODO: add the scenarios where we will not create child VS here.
+		if rule.Matches == nil || rule.Backends == nil {
+			continue
+		}
 
-		o.BuildChildVS(key, routeModel, parentNsName, rule, childVSes)
+		o.BuildChildVS(key, routeModel, parentNsName, rule, childVSes, listeners)
 	}
 }
 
-func (o *AviObjectGraph) BuildChildVS(key string, routeModel RouteModel, parentNsName string, rule *Rule, childVSes map[string]struct{}) {
-
+func (o *AviObjectGraph) BuildChildVS(key string, routeModel RouteModel, parentNsName string, rule *Rule, childVSes map[string]struct{}, listeners []string) {
 	parentNode := o.GetAviEvhVS()
-
-	// TODO: check and add
-	parentNode[0].VHDomainNames = routeModel.ParseRouteRules().Hosts
-	parentNode[0].VSVIPRefs[0].FQDNs = routeModel.ParseRouteRules().Hosts
-
+	// parentSlice := strings.Split(parentNsName, "/")
+	// parentNs, parentName := parentSlice[0], parentSlice[1]
 	parentNs, _, parentName := lib.ExtractTypeNameNamespace(parentNsName)
-	childVSName := akogatewayapilib.GetChildName(parentNs, parentName, routeModel.GetNamespace(), routeModel.GetName(), akogatewayapilib.Encode(utils.Stringify(rule.Matches)))
+
+	//childVSName := akogatewayapilib.GetChildName(parentNs, parentName, routeModel.GetNamespace(), routeModel.GetName(), akogatewayapilib.Encode(utils.Stringify(rule.Matches)))
+	childVSName := akogatewayapilib.GetChildName(parentNs, parentName, routeModel.GetNamespace(), routeModel.GetName(), utils.Stringify(rule.Matches))
 	childVSes[childVSName] = struct{}{}
+	//childVSName := "child-vs-name" //TODO: logic to get the child name (done)
 
 	childNode := parentNode[0].GetEvhNodeForName(childVSName)
 	if childNode == nil {
@@ -63,13 +68,26 @@ func (o *AviObjectGraph) BuildChildVS(key string, routeModel RouteModel, parentN
 	childNode.ApplicationProfile = utils.DEFAULT_L7_APP_PROFILE
 	childNode.ServiceEngineGroup = lib.GetSEGName()
 	childNode.VrfContext = lib.GetVrf()
-	childNode.VHDomainNames = routeModel.ParseRouteRules().Hosts
+	//childNode.VHDomainNames = routeModel.ParseRouteRules().Hosts
 
 	// TODO: add markers
 	//	evhNode.AviMarkers = lib.PopulateVSNodeMarkers(namespace, host, infraSettingName)
+	childNode.AviMarkers = utils.AviObjectMarkers{
+		GatewayName: parentName,
+		Namespace:   parentNs,
+	}
+	found, hosts := akogatewayapiobjects.GatewayApiLister().GetGatewayRouteToHostname(parentNs, parentName)
+	if found {
+		childNode.VHDomainNames = hosts
+		childNode.AviMarkers.Host = hosts
+		parentNode[0].VHDomainNames = routeModel.ParseRouteRules().Hosts
+		parentNode[0].VSVIPRefs[0].FQDNs = routeModel.ParseRouteRules().Hosts
+	} else {
+		return
+	}
 
 	// create pg pool from the backend
-	o.BuildPGPool(key, childNode, routeModel, rule)
+	o.BuildPGPool(key, childNode, routeModel, parentNsName, rule, listeners)
 
 	// create vhmatch from the match
 	o.BuildVHMatch(key, childNode, routeModel, rule)
@@ -86,10 +104,55 @@ func (o *AviObjectGraph) BuildChildVS(key string, routeModel RouteModel, parentN
 	utils.AviLog.Infof("key: %s, msg: processing of child vs %s attached to parent vs %s completed", key, childNode.Name, childNode.VHParentName)
 }
 
-func (o *AviObjectGraph) BuildPGPool(key string, childVsNode *nodes.AviEvhVsNode, routeModel RouteModel, rule *Rule) {
+func (o *AviObjectGraph) BuildPGPool(key string, childVsNode *nodes.AviEvhVsNode, routeModel RouteModel, parentNsName string, rule *Rule, listeners []string) {
 
-	// create the PG from backends
-
+	parentSlice := strings.Split(parentNsName, "/")
+	parentNs, parentName := parentSlice[0], parentSlice[1]
+	listenerSlice := strings.Split(listeners[0], "/")
+	listenerProtocol := listenerSlice[2]
+	PGName := akogatewayapilib.GetPoolGroupName(parentNs, parentName,
+		routeModel.GetNamespace(), routeModel.GetName(),
+		utils.Stringify(rule.Matches))
+	PG := nodes.AviPoolGroupNode{
+		Name:   PGName,
+		Tenant: lib.GetTenant(),
+	}
+	for _, backend := range rule.Backends {
+		svcObj, err := utils.GetInformers().ServiceInformer.Lister().Services(backend.Namespace).Get(backend.Name)
+		if err != nil {
+			utils.AviLog.Debugf("key: %s, msg: there was an error in retrieving the service", key)
+			return
+		}
+		poolName := akogatewayapilib.GetPoolName(parentNs, parentName,
+			routeModel.GetNamespace(), routeModel.GetName(),
+			utils.Stringify(rule.Matches),
+			backend.Namespace, backend.Name, strconv.Itoa(int(backend.Port)))
+		poolNode := &nodes.AviPoolNode{
+			Name:     poolName,
+			Tenant:   lib.GetTenant(),
+			Protocol: listenerProtocol,
+			PortName: "",
+			ServiceMetadata: lib.ServiceMetadataObj{
+				NamespaceServiceName: []string{backend.Namespace + "/" + backend.Name},
+			},
+			VrfContext: lib.GetVrf(),
+		}
+		poolNode.NetworkPlacementSettings, _ = lib.GetNodeNetworkMap()
+		serviceType := lib.GetServiceType()
+		if serviceType == lib.NodePortLocal {
+			//TODO: support NPL
+		} else if serviceType == lib.NodePort {
+			//TODO: support nodeport
+		} else {
+			if servers := nodes.PopulateServers(poolNode, svcObj.ObjectMeta.Namespace, svcObj.ObjectMeta.Name, false, key); servers != nil {
+				poolNode.Servers = servers
+			}
+		}
+		childVsNode.PoolRefs = append(childVsNode.PoolRefs, poolNode)
+		pool_ref := fmt.Sprintf("/api/pool?name=%s", poolNode.Name)
+		PG.Members = append(PG.Members, &avimodels.PoolGroupMember{PoolRef: &pool_ref, Ratio: &backend.Weight})
+	}
+	childVsNode.PoolGroupRefs = append(childVsNode.PoolGroupRefs, &PG)
 }
 
 func (o *AviObjectGraph) BuildVHMatch(key string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, rule *Rule) {

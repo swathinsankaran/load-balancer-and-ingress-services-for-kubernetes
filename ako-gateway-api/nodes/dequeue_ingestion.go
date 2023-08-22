@@ -79,10 +79,11 @@ func DequeueIngestion(key string, fullsync bool) {
 			}
 
 			childVSes := make(map[string]struct{}, 0)
+			listeners := akogatewayapiobjects.GatewayApiLister().GetRouteToGatewayListener(objType, namespace+"/"+name)
 
 			switch objType { // Extend this for other routes
 			case lib.HTTPRoute: //, GRPCRoute, TLSRoute:
-				model.ProcessL7Routes(key, routeModel, gatewayNsName, childVSes)
+				model.ProcessL7Routes(key, routeModel, gatewayNsName, childVSes, listeners)
 			// case TCPRoute, UDPRoute:
 			//  model.ProcessL4Routes(key, routeModel, gatewayNsName)
 			default:

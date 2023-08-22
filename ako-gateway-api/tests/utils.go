@@ -401,6 +401,41 @@ func GetHTTPRouteRuleV1Beta1(paths []string, matchHeaders []string, filterAction
 	return rule
 }
 
+func GetHTTPRouteRulesV1Beta1() []gatewayv1beta1.HTTPRouteRule {
+	rules := make([]gatewayv1beta1.HTTPRouteRule, 0)
+	// TODO: add few rules
+
+	//login rule
+	var serviceKind gatewayv1beta1.Kind
+	var servicePort gatewayv1beta1.PortNumber
+	serviceKind = "Service"
+	servicePort = 8080
+	pathPrefix := gatewayv1beta1.PathMatchPathPrefix
+	path := "/login"
+	rules = append(rules, gatewayv1beta1.HTTPRouteRule{
+		Matches: []gatewayv1beta1.HTTPRouteMatch{
+			{
+				Path: &gatewayv1beta1.HTTPPathMatch{
+					Type:  &pathPrefix,
+					Value: &path,
+				},
+			},
+		},
+		BackendRefs: []gatewayv1beta1.HTTPBackendRef{
+			{
+				BackendRef: gatewayv1beta1.BackendRef{
+					BackendObjectReference: gatewayv1beta1.BackendObjectReference{
+						Kind: &serviceKind,
+						Name: "avisvc",
+						Port: &servicePort,
+					},
+				},
+			},
+		},
+	})
+	return rules
+}
+
 func (hr *HTTPRoute) Create(t *testing.T) {
 	_, err := GatewayClient.GatewayV1beta1().HTTPRoutes(hr.Namespace).Create(context.TODO(), hr.HTTPRoute, metav1.CreateOptions{})
 	if err != nil {

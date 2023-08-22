@@ -15,7 +15,12 @@
 package nodes
 
 import (
+	"sort"
+	"strconv"
+	"strings"
+
 	"k8s.io/apimachinery/pkg/api/errors"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	akogatewayapilib "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/lib"
 	akogatewayapiobjects "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/objects"
@@ -82,6 +87,7 @@ var (
 		Service,
 		Endpoint,
 		HTTPRoute,
+		Service,
 	}
 )
 
@@ -98,6 +104,32 @@ func GatewayGetGw(namespace, name, key string) ([]string, bool) {
 	}
 	gwClassName := string(gwObj.Spec.GatewayClassName)
 	akogatewayapiobjects.GatewayApiLister().UpdateGatewayToGatewayClass(namespace, name, gwClassName)
+	var listeners []string
+	hostnames := make(map[string]string, 0)
+	//var hostnames map[string]string
+	for _, l := range gwObj.Spec.Listeners {
+		s := string(l.Name) + "/" + strconv.Itoa(int(l.Port)) + "/" + string(l.Protocol)
+		if l.AllowedRoutes == nil {
+			s += "/" + string(gwObj.Namespace)
+		} else {
+			if l.AllowedRoutes.Namespaces != nil {
+				if l.AllowedRoutes.Namespaces.From != nil {
+					if string(*l.AllowedRoutes.Namespaces.From) == "Same" {
+						s += "/" + string(gwObj.Namespace)
+					} else if string(*l.AllowedRoutes.Namespaces.From) == "All" {
+						s += "/All"
+					}
+				}
+			}
+		}
+		listeners = append(listeners, s)
+		hostnames[string(l.Name)] = string(*l.Hostname)
+	}
+	sort.Strings(listeners)
+	akogatewayapiobjects.GatewayApiLister().UpdateGatewayToListener(namespace+"/"+name, listeners)
+	for listener, hostname := range hostnames {
+		akogatewayapiobjects.GatewayApiLister().UpdateGatewayListenerToHostname(namespace+"/"+name+"/"+listener, hostname)
+	}
 	return []string{gwNsName}, true
 }
 
@@ -108,7 +140,8 @@ func GatewayToRoutes(namespace, name, key string) ([]string, bool) {
 		utils.AviLog.Debugf("key: %s, No route objects mapped to this gateway", key)
 		return []string{}, true
 	}
-	return routeTypeNsNameList, found
+
+	return routeTypeNsNameList, true
 }
 
 func GatewayClassGetGw(namespace, name, key string) ([]string, bool) {
@@ -139,7 +172,7 @@ func GatewayClassGetGw(namespace, name, key string) ([]string, bool) {
 
 func HTTPRouteToGateway(namespace, name, key string) ([]string, bool) {
 	routeTypeNsName := lib.HTTPRoute + "/" + namespace + "/" + name
-	hrObj, err := akogatewayapilib.AKOControlConfig().GatewayApiInformers().HTTPRouteInformer.Lister().HTTPRoutes(namespace).Get(name)
+	httpRouteObj, err := akogatewayapilib.AKOControlConfig().GatewayApiInformers().HTTPRouteInformer.Lister().HTTPRoutes(namespace).Get(name)
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			utils.AviLog.Errorf("key: %s, got error while getting gateway: %v", key, err)
@@ -149,21 +182,72 @@ func HTTPRouteToGateway(namespace, name, key string) ([]string, bool) {
 		if !found {
 			return []string{}, true
 		}
+		akogatewayapiobjects.GatewayApiLister().DeleteGatewayListenerRouteMappings(routeTypeNsName)
 		akogatewayapiobjects.GatewayApiLister().DeleteRouteGatewayMappings(routeTypeNsName)
 		return gwNsNameList, true
 	}
-
+	var listenerList []string
 	var gwNsNameList []string
-	for _, parentRef := range hrObj.Spec.ParentRefs {
-		ns := namespace
-		if parentRef.Namespace != nil {
-			ns = string(*parentRef.Namespace)
-		}
-		gwNsName := ns + "/" + string(parentRef.Name)
-		akogatewayapiobjects.GatewayApiLister().UpdateGatewayRouteMappings(gwNsName, routeTypeNsName)
-		gwNsNameList = append(gwNsNameList, gwNsName)
-	}
+	var hostnameIntersection []string
+	for _, parent := range httpRouteObj.Spec.ParentRefs {
+		parentNsName := string(*parent.Namespace) + "/" + string(parent.Name)
+		//check gateway is present in store
 
+		if !akogatewayapiobjects.GatewayApiLister().IsGatewayInStore(parentNsName) {
+			continue
+		}
+		if *parent.Namespace != gatewayv1beta1.Namespace(httpRouteObj.Namespace) {
+			//check reference grant
+		}
+		var gatewayListenerList []string
+		listeners := akogatewayapiobjects.GatewayApiLister().GetGatewayToListeners(string(*parent.Namespace), string(parent.Name))
+		for _, listener := range listeners {
+			listenerSlice := strings.Split(listener, "/")
+			listenerName := listenerSlice[0]
+			listenerPort := listenerSlice[1]
+			listenerAllowedNS := listenerSlice[3]
+			//check if namespace is allowed
+			if listenerAllowedNS == "All" || listenerAllowedNS == httpRouteObj.Namespace {
+				//if provided, check if section name and port matches
+				if (parent.SectionName == nil || string(*parent.SectionName) == listenerName) &&
+					(parent.Port == nil || string(*parent.Port) == listenerPort) {
+					listenerHostname := akogatewayapiobjects.GatewayApiLister().GetGatewayListenerToHostname(string(*parent.Namespace), string(parent.Name), listenerName)
+					if strings.HasPrefix(listenerHostname, "*") {
+						listenerHostname = listenerHostname[1:]
+					}
+					hostnameMatched := false
+					for _, routeHostname := range httpRouteObj.Spec.Hostnames {
+						if strings.HasSuffix(string(routeHostname), listenerHostname) {
+							hostnameIntersection = append(hostnameIntersection, string(routeHostname))
+							hostnameMatched = true
+						}
+					}
+					if hostnameMatched && !utils.HasElem(listenerList, string(*parent.Namespace)+"/"+string(parent.Name)+"/"+listenerName) {
+						gatewayListenerList = append(listenerList, string(*parent.Namespace)+"/"+string(parent.Name)+"/"+listenerName)
+					}
+				}
+			}
+		}
+
+		if len(gatewayListenerList) > 0 {
+			if !utils.HasElem(gwNsNameList, string(*parent.Namespace)+"/"+string(parent.Name)) {
+				gwNsNameList = append(gwNsNameList, string(*parent.Namespace)+"/"+string(parent.Name))
+			}
+			gwNsName := string(*parent.Namespace) + "/" + string(parent.Name)
+			akogatewayapiobjects.GatewayApiLister().UpdateGatewayRouteMappings(gwNsName, routeTypeNsName)
+			for _, gwListener := range gatewayListenerList {
+				if !utils.HasElem(listenerList, gwListener) {
+					listenerList = append(listenerList, gwListener)
+				}
+			}
+		}
+
+		//update all gateways with route
+		for _, gwListener := range listenerList {
+			akogatewayapiobjects.GatewayApiLister().UpdateGatewayListenerRouteMappings(gwListener, routeTypeNsName)
+		}
+		akogatewayapiobjects.GatewayApiLister().UpdateGatewayRouteToHostname(string(*parent.Namespace), string(parent.Name), hostnameIntersection)
+	}
 	utils.AviLog.Debugf("key: %s, msg: Gateways retrieved %s", key, gwNsNameList)
 	return gwNsNameList, true
 }
@@ -193,6 +277,10 @@ func HTTPRouteChanges(namespace, name, key string) ([]string, bool) {
 	var svcNsNameList []string
 	for _, rule := range hrObj.Spec.Rules {
 		for _, backendRef := range rule.BackendRefs {
+			if backendRef.BackendObjectReference.Kind == nil ||
+				string(*backendRef.BackendObjectReference.Kind) != "Service" {
+				continue
+			}
 			ns := namespace
 			if backendRef.Namespace != nil {
 				ns = string(*backendRef.Namespace)
