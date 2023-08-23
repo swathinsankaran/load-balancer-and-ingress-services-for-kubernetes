@@ -110,9 +110,6 @@ type GWLister struct {
 }
 
 func (g *GWLister) GetGatewayToRoutes(gwNsName string) []string {
-	g.gwLock.RLock()
-	defer g.gwLock.RUnlock()
-
 	var routes []string
 	_, listeners := g.gatewayToListenerStore.Get(gwNsName)
 	for _, listener := range listeners.([]string) {
@@ -137,9 +134,6 @@ func (g *GWLister) UpdateGatewayRouteToHostname(ns, gw string, hostnames []strin
 
 }
 func (g *GWLister) GetGatewayRouteToHostname(ns, gw string) (bool, []string) {
-	g.gwLock.RLock()
-	defer g.gwLock.RUnlock()
-
 	key := getKeyForGateway(ns, gw)
 	found, hostnames := g.gatewayRouteToHostname.Get(key)
 	if found {
@@ -189,8 +183,6 @@ func (g *GWLister) IsGatewayInStore(gwNsName string) bool {
 }
 
 func (g *GWLister) GetGatewayClassToGateway(gwClass string) []string {
-	g.gwLock.RLock()
-	defer g.gwLock.RUnlock()
 
 	found, gatewayList := g.gatewayClassToGatewayStore.Get(gwClass)
 	if !found {
@@ -200,8 +192,6 @@ func (g *GWLister) GetGatewayClassToGateway(gwClass string) []string {
 }
 
 func (g *GWLister) GetGatewayToGatewayClass(ns, gw string) string {
-	g.gwLock.RLock()
-	defer g.gwLock.RUnlock()
 
 	key := getKeyForGateway(ns, gw)
 	_, gwClass := g.gatewayToGatewayClassStore.Get(key)
@@ -242,9 +232,6 @@ func (g *GWLister) UpdateGatewayToListener(gwNsName string, listeners []string) 
 	g.gatewayToListenerStore.AddOrUpdate(gwNsName, listeners)
 }
 func (g *GWLister) GetGatewayListenerToHostname(ns, gw, listner string) string {
-	g.gwLock.RLock()
-	defer g.gwLock.RUnlock()
-
 	key := getKeyForGateway(ns, gw) + "/" + listner
 	_, obj := g.gatewayListenerToHostname.Get(key)
 
@@ -258,9 +245,6 @@ func (g *GWLister) UpdateGatewayListenerToHostname(gwListenerNsName, hostname st
 }
 
 func (g *GWLister) GetGatewayToListeners(ns, gw string) []string {
-	g.gwLock.RLock()
-	defer g.gwLock.RUnlock()
-
 	key := getKeyForGateway(ns, gw)
 
 	_, listenerList := g.gatewayToListenerStore.Get(key)
@@ -611,9 +595,6 @@ func (g *GWLister) DeleteServiceRouteMappings(svcNsName string) {
 }
 
 func (g *GWLister) GetRouteToGatewayListener(routeType, routeNsName string) []string {
-	g.gwLock.RLock()
-	defer g.gwLock.RUnlock()
-
 	routeKey := routeType + "/" + routeNsName
 	_, obj := g.routeToGatewayListener.Get(routeKey)
 	return obj.([]string)

@@ -51,7 +51,11 @@ func DequeueStatus(objIntf interface{}) error {
 		utils.AviLog.Warnf("Object is not of type StatusOptions, %T", objIntf)
 		return nil
 	}
+	option.Key = "test"
 	obj := New(option.ObjType)
+	if obj == nil {
+		return nil
+	}
 	if option.Op == lib.UpdateStatus {
 		obj.Update(option.Key, option)
 	} else if option.Op == lib.DeleteStatus {

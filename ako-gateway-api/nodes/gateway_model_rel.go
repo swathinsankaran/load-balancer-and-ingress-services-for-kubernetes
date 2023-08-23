@@ -20,7 +20,6 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	akogatewayapilib "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/lib"
 	akogatewayapiobjects "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/objects"
@@ -190,17 +189,21 @@ func HTTPRouteToGateway(namespace, name, key string) ([]string, bool) {
 	var gwNsNameList []string
 	var hostnameIntersection []string
 	for _, parent := range httpRouteObj.Spec.ParentRefs {
-		parentNsName := string(*parent.Namespace) + "/" + string(parent.Name)
+		parentNs := namespace
+		if parent.Namespace != nil {
+			parentNs = string(*parent.Namespace)
+		}
+		parentNsName := parentNs + "/" + string(parent.Name)
 		//check gateway is present in store
 
 		if !akogatewayapiobjects.GatewayApiLister().IsGatewayInStore(parentNsName) {
 			continue
 		}
-		if *parent.Namespace != gatewayv1beta1.Namespace(httpRouteObj.Namespace) {
+		if parentNs != httpRouteObj.Namespace {
 			//check reference grant
 		}
 		var gatewayListenerList []string
-		listeners := akogatewayapiobjects.GatewayApiLister().GetGatewayToListeners(string(*parent.Namespace), string(parent.Name))
+		listeners := akogatewayapiobjects.GatewayApiLister().GetGatewayToListeners(string(parentNs), string(parent.Name))
 		for _, listener := range listeners {
 			listenerSlice := strings.Split(listener, "/")
 			listenerName := listenerSlice[0]
@@ -211,7 +214,7 @@ func HTTPRouteToGateway(namespace, name, key string) ([]string, bool) {
 				//if provided, check if section name and port matches
 				if (parent.SectionName == nil || string(*parent.SectionName) == listenerName) &&
 					(parent.Port == nil || string(*parent.Port) == listenerPort) {
-					listenerHostname := akogatewayapiobjects.GatewayApiLister().GetGatewayListenerToHostname(string(*parent.Namespace), string(parent.Name), listenerName)
+					listenerHostname := akogatewayapiobjects.GatewayApiLister().GetGatewayListenerToHostname(parentNs, string(parent.Name), listenerName)
 					if strings.HasPrefix(listenerHostname, "*") {
 						listenerHostname = listenerHostname[1:]
 					}
@@ -222,18 +225,18 @@ func HTTPRouteToGateway(namespace, name, key string) ([]string, bool) {
 							hostnameMatched = true
 						}
 					}
-					if hostnameMatched && !utils.HasElem(listenerList, string(*parent.Namespace)+"/"+string(parent.Name)+"/"+listenerName) {
-						gatewayListenerList = append(listenerList, string(*parent.Namespace)+"/"+string(parent.Name)+"/"+listenerName)
+					if hostnameMatched && !utils.HasElem(listenerList, string(parentNs)+"/"+string(parent.Name)+"/"+listenerName) {
+						gatewayListenerList = append(listenerList, string(parentNs)+"/"+string(parent.Name)+"/"+listenerName)
 					}
 				}
 			}
 		}
 
 		if len(gatewayListenerList) > 0 {
-			if !utils.HasElem(gwNsNameList, string(*parent.Namespace)+"/"+string(parent.Name)) {
-				gwNsNameList = append(gwNsNameList, string(*parent.Namespace)+"/"+string(parent.Name))
+			if !utils.HasElem(gwNsNameList, string(parentNs)+"/"+string(parent.Name)) {
+				gwNsNameList = append(gwNsNameList, parentNs+"/"+string(parent.Name))
 			}
-			gwNsName := string(*parent.Namespace) + "/" + string(parent.Name)
+			gwNsName := string(parentNs) + "/" + string(parent.Name)
 			akogatewayapiobjects.GatewayApiLister().UpdateGatewayRouteMappings(gwNsName, routeTypeNsName)
 			for _, gwListener := range gatewayListenerList {
 				if !utils.HasElem(listenerList, gwListener) {
@@ -246,7 +249,7 @@ func HTTPRouteToGateway(namespace, name, key string) ([]string, bool) {
 		for _, gwListener := range listenerList {
 			akogatewayapiobjects.GatewayApiLister().UpdateGatewayListenerRouteMappings(gwListener, routeTypeNsName)
 		}
-		akogatewayapiobjects.GatewayApiLister().UpdateGatewayRouteToHostname(string(*parent.Namespace), string(parent.Name), hostnameIntersection)
+		akogatewayapiobjects.GatewayApiLister().UpdateGatewayRouteToHostname(parentNs, string(parent.Name), hostnameIntersection)
 	}
 	utils.AviLog.Debugf("key: %s, msg: Gateways retrieved %s", key, gwNsNameList)
 	return gwNsNameList, true

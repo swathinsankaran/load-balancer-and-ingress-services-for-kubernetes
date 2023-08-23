@@ -113,7 +113,7 @@ func (o *AviObjectGraph) BuildPGPool(key string, childVsNode *nodes.AviEvhVsNode
 	PGName := akogatewayapilib.GetPoolGroupName(parentNs, parentName,
 		routeModel.GetNamespace(), routeModel.GetName(),
 		utils.Stringify(rule.Matches))
-	PG := nodes.AviPoolGroupNode{
+	PG := &nodes.AviPoolGroupNode{
 		Name:   PGName,
 		Tenant: lib.GetTenant(),
 	}
@@ -152,7 +152,8 @@ func (o *AviObjectGraph) BuildPGPool(key string, childVsNode *nodes.AviEvhVsNode
 		pool_ref := fmt.Sprintf("/api/pool?name=%s", poolNode.Name)
 		PG.Members = append(PG.Members, &avimodels.PoolGroupMember{PoolRef: &pool_ref, Ratio: &backend.Weight})
 	}
-	childVsNode.PoolGroupRefs = append(childVsNode.PoolGroupRefs, &PG)
+	childVsNode.PoolGroupRefs = []*nodes.AviPoolGroupNode{PG}
+	childVsNode.DefaultPoolGroup = PG.Name
 }
 
 func (o *AviObjectGraph) BuildVHMatch(key string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, rule *Rule) {

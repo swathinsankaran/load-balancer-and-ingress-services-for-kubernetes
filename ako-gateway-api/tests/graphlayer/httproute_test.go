@@ -493,9 +493,9 @@ func TestHTTPRouteFilterWithRequestRedirect(t *testing.T) {
 }
 
 func TestHTTPRouteWithValidConfig(t *testing.T) {
-	gatewayClassName := "gateway-class-hr-01"
-	gatewayName := "gateway-hr-01"
-	httpRouteName := "httproute-01"
+	gatewayClassName := "gateway-class-hr-02"
+	gatewayName := "gateway-hr-02"
+	httpRouteName := "httproute-02"
 	namespace := "default"
 	ports := []int32{8080, 8081}
 
