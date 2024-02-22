@@ -31,10 +31,12 @@ import (
 	avinodes "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/api"
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha2"
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 	crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned/fake"
 	v1alpha2crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha2/clientset/versioned/fake"
+	v1beta1crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/clientset/versioned/fake"
+
 	utils "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/tests/integrationtest"
 
@@ -47,6 +49,7 @@ import (
 var KubeClient *k8sfake.Clientset
 var CRDClient *crdfake.Clientset
 var v1alpha2CRDClient *v1alpha2crdfake.Clientset
+var v1beta1CRDClient *v1beta1crdfake.Clientset
 var ctrl *k8s.AviController
 var akoApiServer *api.FakeApiServer
 var keyChan chan string
@@ -83,15 +86,20 @@ func TestMain(m *testing.M) {
 	os.Setenv("POD_NAMESPACE", utils.AKO_DEFAULT_NS)
 	os.Setenv("SHARD_VS_SIZE", "LARGE")
 	os.Setenv("AUTO_L4_FQDN", "default")
+	os.Setenv("POD_NAME", "ako-0")
 
 	akoControlConfig := lib.AKOControlConfig()
 	KubeClient = k8sfake.NewSimpleClientset()
 	CRDClient = crdfake.NewSimpleClientset()
 	v1alpha2CRDClient = v1alpha2crdfake.NewSimpleClientset()
+	v1beta1CRDClient = v1beta1crdfake.NewSimpleClientset()
 	akoControlConfig.SetCRDClientset(CRDClient)
 	akoControlConfig.Setv1alpha2CRDClientset(v1alpha2CRDClient)
+	akoControlConfig.Setv1beta1CRDClientset(v1beta1CRDClient)
 	akoControlConfig.SetAKOInstanceFlag(true)
 	akoControlConfig.SetEventRecorder(lib.AKOEventComponent, KubeClient, true)
+	akoControlConfig.SetDefaultLBController(true)
+
 	data := map[string][]byte{
 		"username": []byte("admin"),
 		"password": []byte("admin"),
@@ -112,7 +120,7 @@ func TestMain(m *testing.M) {
 	}
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: KubeClient}, registeredInformers)
 	informers := k8s.K8sinformers{Cs: KubeClient}
-	k8s.NewCRDInformers(CRDClient)
+	k8s.NewCRDInformers()
 
 	mcache := cache.SharedAviObjCache()
 	cloudObj := &cache.AviCloudPropertyCache{Name: "Default-Cloud", VType: "mock"}
@@ -149,6 +157,8 @@ func TestMain(m *testing.M) {
 	integrationtest.AddDefaultIngressClass()
 	keyChan = make(chan string)
 	ctrl.SetSEGroupCloudNameFromNSAnnotations()
+	integrationtest.AddDefaultNamespace()
+	integrationtest.AddDefaultNamespace("red")
 	go ctrl.InitController(informers, registeredInformers, ctrlCh, stopCh, quickSyncCh, waitGroupMap)
 	os.Exit(m.Run())
 }
@@ -165,7 +175,7 @@ func SetUpTestForIngress(t *testing.T, modelNames ...string) {
 	for _, model := range modelNames {
 		objects.SharedAviGraphLister().Delete(model)
 	}
-	integrationtest.CreateSVC(t, "default", "avisvc", corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateSVC(t, "default", "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
 	integrationtest.CreateEP(t, "default", "avisvc", false, false, "1.1.1")
 }
 
@@ -222,7 +232,7 @@ func TestCreateUpdateDeleteHostRuleForEvh(t *testing.T) {
 	integrationtest.SetupHostRule(t, hrname, "foo.com", true)
 
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 20*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -236,8 +246,8 @@ func TestCreateUpdateDeleteHostRuleForEvh(t *testing.T) {
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
 	g.Expect(*nodes[0].EvhNodes[0].Enabled).To(gomega.Equal(true))
 	//At rest layer, sslref are switched to Parent
-	g.Expect(nodes[0].EvhNodes[0].SSLKeyCertAviRef).To(gomega.HaveLen(1))
-	g.Expect(nodes[0].EvhNodes[0].SSLKeyCertAviRef[0]).To(gomega.ContainSubstring("thisisaviref-sslkey"))
+	g.Expect(nodes[0].EvhNodes[0].SslKeyAndCertificateRefs).To(gomega.HaveLen(1))
+	g.Expect(nodes[0].EvhNodes[0].SslKeyAndCertificateRefs[0]).To(gomega.ContainSubstring("thisisaviref-sslkey"))
 	g.Expect(nodes[0].EvhNodes[0].ICAPProfileRefs).To(gomega.HaveLen(1))
 	g.Expect(nodes[0].EvhNodes[0].ICAPProfileRefs[0]).To(gomega.ContainSubstring("thisisaviref-icapprof"))
 	g.Expect(*nodes[0].EvhNodes[0].WafPolicyRef).To(gomega.ContainSubstring("thisisaviref-waf"))
@@ -254,6 +264,8 @@ func TestCreateUpdateDeleteHostRuleForEvh(t *testing.T) {
 	g.Expect(nodes[0].EvhNodes[0].VHDomainNames).To(gomega.ContainElement("bar.com"))
 	g.Expect(nodes[0].EvhNodes[0].HttpPolicyRefs[1].RedirectPorts[0].Hosts).To(gomega.ContainElement("bar.com"))
 	g.Expect(nodes[0].EvhNodes[0].HttpPolicyRefs[0].HppMap[0].Host).To(gomega.ContainElement("bar.com"))
+	// Hostrule with normal FQDN should not have reference to network security policy
+	g.Expect(nodes[0].NetworkSecurityPolicyRef).Should(gomega.BeNil())
 
 	//Update with another fqdn
 	hrUpdate := integrationtest.FakeHostRule{
@@ -266,12 +278,12 @@ func TestCreateUpdateDeleteHostRuleForEvh(t *testing.T) {
 	hrUpdate.Spec.VirtualHost.Gslb.Fqdn = "baz.com"
 	hrUpdate.Spec.VirtualHost.EnableVirtualHost = &enableVirtualHost
 	hrUpdate.ResourceVersion = "2"
-	_, err := CRDClient.AkoV1alpha1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	_, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("error in updating HostRule: %v", err)
 	}
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Accepted"))
 	g.Eventually(func() []string {
@@ -304,7 +316,7 @@ func TestCreateUpdateDeleteHostRuleForEvh(t *testing.T) {
 	enableVirtualHost = false
 	hrUpdate.Spec.VirtualHost.EnableVirtualHost = &enableVirtualHost
 	hrUpdate.ResourceVersion = "3"
-	_, err = CRDClient.AkoV1alpha1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	_, err = v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("error in updating HostRule: %v", err)
 	}
@@ -321,13 +333,13 @@ func TestCreateUpdateDeleteHostRuleForEvh(t *testing.T) {
 	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
 	g.Expect(nodes[0].EvhNodes[0].Enabled).To(gomega.BeNil())
 	g.Expect(nodes[0].EvhNodes[0].ICAPProfileRefs).To(gomega.HaveLen(0))
-	g.Expect(*nodes[0].EvhNodes[0].WafPolicyRef).To(gomega.Equal(""))
-	g.Expect(*nodes[0].EvhNodes[0].ApplicationProfileRef).To(gomega.Equal(""))
-	g.Expect(*nodes[0].EvhNodes[0].AnalyticsProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].EvhNodes[0].WafPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ApplicationProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].AnalyticsProfileRef).To(gomega.BeNil())
 	g.Expect(nodes[0].EvhNodes[0].ErrorPageProfileRef).To(gomega.Equal(""))
 	g.Expect(nodes[0].EvhNodes[0].HttpPolicySetRefs).To(gomega.HaveLen(0))
 	g.Expect(nodes[0].EvhNodes[0].VsDatascriptRefs).To(gomega.HaveLen(0))
-	g.Expect(*nodes[0].SslProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].SslProfileRef).To(gomega.BeNil())
 	TearDownIngressForCacheSyncCheck(t, modelName)
 }
 
@@ -343,29 +355,30 @@ func TestCreateDeleteSharedVSHostRuleForEvh(t *testing.T) {
 		fqdn = "cluster--Shared-L7-EVH-NS-default.admin.com"
 	}
 	hostrule := integrationtest.FakeHostRule{
-		Name:               hrname,
-		Namespace:          "default",
-		Fqdn:               fqdn,
-		WafPolicy:          "thisisaviref-waf",
-		ApplicationProfile: "thisisaviref-appprof",
-		ICAPProfile:        []string{"thisisaviref-icapprof"},
-		AnalyticsProfile:   "thisisaviref-analyticsprof",
-		ErrorPageProfile:   "thisisaviref-errorprof",
-		Datascripts:        []string{"thisisaviref-ds2", "thisisaviref-ds1"},
-		HttpPolicySets:     []string{"thisisaviref-httpps2", "thisisaviref-httpps1"},
+		Name:                  hrname,
+		Namespace:             "default",
+		Fqdn:                  fqdn,
+		WafPolicy:             "thisisaviref-waf",
+		ApplicationProfile:    "thisisaviref-appprof",
+		ICAPProfile:           []string{"thisisaviref-icapprof"},
+		AnalyticsProfile:      "thisisaviref-analyticsprof",
+		ErrorPageProfile:      "thisisaviref-errorprof",
+		Datascripts:           []string{"thisisaviref-ds2", "thisisaviref-ds1"},
+		HttpPolicySets:        []string{"thisisaviref-httpps2", "thisisaviref-httpps1"},
+		NetworkSecurityPolicy: "thisisaviref-networksecuritypolicyref",
 	}
 	hrCreate := hostrule.HostRule()
-	hrCreate.Spec.VirtualHost.TCPSettings = &v1alpha1.HostRuleTCPSettings{
-		Listeners: []v1alpha1.HostRuleTCPListeners{
+	hrCreate.Spec.VirtualHost.TCPSettings = &v1beta1.HostRuleTCPSettings{
+		Listeners: []v1beta1.HostRuleTCPListeners{
 			{Port: 8081}, {Port: 8082}, {Port: 8083, EnableSSL: true},
 		},
 	}
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().HostRules("default").Create(context.TODO(), hrCreate, metav1.CreateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules("default").Create(context.TODO(), hrCreate, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("error in adding HostRule: %v", err)
 	}
 
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -386,12 +399,13 @@ func TestCreateDeleteSharedVSHostRuleForEvh(t *testing.T) {
 	g.Expect(nodes[0].VsDatascriptRefs).To(gomega.HaveLen(2))
 	g.Expect(nodes[0].VsDatascriptRefs[0]).To(gomega.ContainSubstring("thisisaviref-ds2"))
 	g.Expect(nodes[0].VsDatascriptRefs[1]).To(gomega.ContainSubstring("thisisaviref-ds1"))
+	g.Expect(*nodes[0].NetworkSecurityPolicyRef).To(gomega.ContainSubstring("thisisaviref-networksecuritypolicyref"))
 	g.Expect(nodes[0].PortProto).To(gomega.HaveLen(3))
 	var ports []int
 	for _, port := range nodes[0].PortProto {
 		ports = append(ports, int(port.Port))
 		if port.EnableSSL {
-			g.Expect(int(port.Port)).To(gomega.Equal(8083))
+			g.Expect(int(port.Port)).Should(gomega.Equal(8083))
 		}
 	}
 	sort.Ints(ports)
@@ -403,15 +417,16 @@ func TestCreateDeleteSharedVSHostRuleForEvh(t *testing.T) {
 	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
 	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
 	g.Expect(nodes[0].Enabled).To(gomega.BeNil())
-	g.Expect(nodes[0].SSLKeyCertAviRef).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].SslKeyAndCertificateRefs).To(gomega.HaveLen(0))
 	g.Expect(nodes[0].ICAPProfileRefs).To(gomega.HaveLen(0))
-	g.Expect(*nodes[0].WafPolicyRef).To(gomega.Equal(""))
-	g.Expect(*nodes[0].ApplicationProfileRef).To(gomega.Equal(""))
-	g.Expect(*nodes[0].AnalyticsProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].WafPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].ApplicationProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].AnalyticsProfileRef).To(gomega.BeNil())
 	g.Expect(nodes[0].ErrorPageProfileRef).To(gomega.Equal(""))
 	g.Expect(nodes[0].HttpPolicySetRefs).To(gomega.HaveLen(0))
 	g.Expect(nodes[0].VsDatascriptRefs).To(gomega.HaveLen(0))
-	g.Expect(*nodes[0].SslProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].SslProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].NetworkSecurityPolicyRef).To(gomega.BeNil())
 	ports = []int{}
 	for _, port := range nodes[0].PortProto {
 		ports = append(ports, int(port.Port))
@@ -434,7 +449,7 @@ func TestCreateHostRuleBeforeIngressForEvh(t *testing.T) {
 	integrationtest.SetupHostRule(t, hrname, "foo.com", true)
 
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -443,8 +458,8 @@ func TestCreateHostRuleBeforeIngressForEvh(t *testing.T) {
 	g.Eventually(func() string {
 		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 		nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
-		if len(nodes[0].EvhNodes) == 1 && len(nodes[0].EvhNodes[0].SSLKeyCertAviRef) == 1 {
-			return nodes[0].EvhNodes[0].SSLKeyCertAviRef[0]
+		if len(nodes[0].EvhNodes) == 1 && len(nodes[0].EvhNodes[0].SslKeyAndCertificateRefs) == 1 {
+			return nodes[0].EvhNodes[0].SslKeyAndCertificateRefs[0]
 		}
 		return ""
 	}, 10*time.Second).Should(gomega.ContainSubstring("thisisaviref-sslkey"))
@@ -455,8 +470,8 @@ func TestCreateHostRuleBeforeIngressForEvh(t *testing.T) {
 	g.Eventually(func() string {
 		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 		nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
-		if len(nodes[0].EvhNodes) == 1 && len(nodes[0].EvhNodes[0].SSLKeyCertAviRef) == 1 {
-			return nodes[0].EvhNodes[0].SSLKeyCertAviRef[0]
+		if len(nodes[0].EvhNodes) == 1 && len(nodes[0].EvhNodes[0].SslKeyAndCertificateRefs) == 1 {
+			return nodes[0].EvhNodes[0].SslKeyAndCertificateRefs[0]
 		}
 		return ""
 	}, 10*time.Second).Should(gomega.Equal(""))
@@ -484,12 +499,12 @@ func TestGoodToBadHostRuleForEvh(t *testing.T) {
 		ApplicationProfile: "thisisaviref-appprof",
 	}.HostRule()
 	hrUpdate.ResourceVersion = "2"
-	if _, err := CRDClient.AkoV1alpha1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{}); err != nil {
+	if _, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("error in updating HostRule: %v", err)
 	}
 
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Rejected"))
 
@@ -498,8 +513,8 @@ func TestGoodToBadHostRuleForEvh(t *testing.T) {
 	g.Eventually(func() string {
 		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 		nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
-		if len(nodes[0].EvhNodes[0].SSLKeyCertAviRef) == 1 {
-			return nodes[0].EvhNodes[0].SSLKeyCertAviRef[0]
+		if len(nodes[0].EvhNodes[0].SslKeyAndCertificateRefs) == 1 {
+			return nodes[0].EvhNodes[0].SslKeyAndCertificateRefs[0]
 		}
 		return ""
 	}, 50*time.Second).Should(gomega.ContainSubstring("thisisaviref"))
@@ -548,12 +563,12 @@ func TestInsecureHostAndHostruleForEvh(t *testing.T) {
 	hrUpdate.Spec.VirtualHost.Gslb.Fqdn = "baz.com"
 	hrUpdate.Spec.VirtualHost.EnableVirtualHost = &enableVirtualHost
 	hrUpdate.ResourceVersion = "2"
-	_, err := CRDClient.AkoV1alpha1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	_, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("error in updating HostRule: %v", err)
 	}
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Accepted"))
 	g.Eventually(func() int {
@@ -602,8 +617,8 @@ func TestHostruleAnalyticsPolicyUpdateForEvh(t *testing.T) {
 		Fqdn:      "foo.com",
 	}.HostRule()
 	enabled := true
-	analyticsPolicy := &v1alpha1.HostRuleAnalyticsPolicy{
-		FullClientLogs: &v1alpha1.FullClientLogs{
+	analyticsPolicy := &v1beta1.HostRuleAnalyticsPolicy{
+		FullClientLogs: &v1beta1.FullClientLogs{
 			Enabled:  &enabled,
 			Throttle: "LOW",
 		},
@@ -611,12 +626,12 @@ func TestHostruleAnalyticsPolicyUpdateForEvh(t *testing.T) {
 	}
 	hrUpdate.Spec.VirtualHost.AnalyticsPolicy = analyticsPolicy
 	hrUpdate.ResourceVersion = "2"
-	_, err := CRDClient.AkoV1alpha1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	_, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("error in updating HostRule: %v", err)
 	}
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -639,12 +654,12 @@ func TestHostruleAnalyticsPolicyUpdateForEvh(t *testing.T) {
 	// Remove the analytics Policy and check whether it is removed from VS.
 	hrUpdate.Spec.VirtualHost.AnalyticsPolicy = nil
 	hrUpdate.ResourceVersion = "3"
-	_, err = CRDClient.AkoV1alpha1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	_, err = v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("error in updating HostRule: %v", err)
 	}
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -713,15 +728,15 @@ func TestHostruleFQDNAliasesForEvh(t *testing.T) {
 		Fqdn:      "foo.com",
 	}.HostRule()
 	aliases := []string{"alias1.com", "alias2.com"}
-	hrUpdate.Spec.VirtualHost.FqdnType = v1alpha1.Exact
+	hrUpdate.Spec.VirtualHost.FqdnType = v1beta1.Exact
 	hrUpdate.Spec.VirtualHost.Aliases = aliases
 	hrUpdate.ResourceVersion = "2"
-	_, err := CRDClient.AkoV1alpha1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	_, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("error in updating HostRule: %v", err)
 	}
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -741,12 +756,12 @@ func TestHostruleFQDNAliasesForEvh(t *testing.T) {
 	aliases = append(aliases, "alias3.com")
 	hrUpdate.Spec.VirtualHost.Aliases = aliases
 	hrUpdate.ResourceVersion = "3"
-	_, err = CRDClient.AkoV1alpha1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	_, err = v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("error in updating HostRule: %v", err)
 	}
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -766,12 +781,12 @@ func TestHostruleFQDNAliasesForEvh(t *testing.T) {
 	aliases = aliases[1:]
 	hrUpdate.Spec.VirtualHost.Aliases = aliases
 	hrUpdate.ResourceVersion = "4"
-	_, err = CRDClient.AkoV1alpha1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	_, err = v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("error in updating HostRule: %v", err)
 	}
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -828,15 +843,15 @@ func TestHostruleFQDNAliasesForMultiPathIngressEvh(t *testing.T) {
 		Fqdn:      "foo.com",
 	}.HostRule()
 	aliases := []string{"alias1.foo.com", "alias2.foo.com"}
-	hrUpdate.Spec.VirtualHost.FqdnType = v1alpha1.Exact
+	hrUpdate.Spec.VirtualHost.FqdnType = v1beta1.Exact
 	hrUpdate.Spec.VirtualHost.Aliases = aliases
 	hrUpdate.ResourceVersion = "2"
-	_, err := CRDClient.AkoV1alpha1().HostRules("default").Create(context.TODO(), hrUpdate, metav1.CreateOptions{})
+	_, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Create(context.TODO(), hrUpdate, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("error in updating HostRule: %v", err)
 	}
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 10*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -897,14 +912,14 @@ func TestApplyHostruleToParentVS(t *testing.T) {
 	}
 	hrObj := hostrule.HostRule()
 	hrObj.Spec.VirtualHost.Fqdn = "Shared-L7-EVH-"
-	hrObj.Spec.VirtualHost.FqdnType = v1alpha1.Contains
+	hrObj.Spec.VirtualHost.FqdnType = v1beta1.Contains
 
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().HostRules("default").Create(context.TODO(), hrObj, metav1.CreateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules("default").Create(context.TODO(), hrObj, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("error in adding HostRule: %v", err)
 	}
 
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 30*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -933,15 +948,136 @@ func TestApplyHostruleToParentVS(t *testing.T) {
 	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
 	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
 	g.Expect(nodes[0].Enabled).To(gomega.BeNil())
-	g.Expect(nodes[0].SSLKeyCertAviRef).To(gomega.HaveLen(0))
-	g.Expect(*nodes[0].WafPolicyRef).To(gomega.Equal(""))
-	g.Expect(*nodes[0].ApplicationProfileRef).To(gomega.Equal(""))
-	g.Expect(*nodes[0].AnalyticsProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].SslKeyAndCertificateRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].WafPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].ApplicationProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].AnalyticsProfileRef).To(gomega.BeNil())
 	g.Expect(nodes[0].ErrorPageProfileRef).To(gomega.Equal(""))
 	g.Expect(nodes[0].HttpPolicySetRefs).To(gomega.HaveLen(0))
 	g.Expect(nodes[0].VsDatascriptRefs).To(gomega.HaveLen(0))
-	g.Expect(*nodes[0].SslProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].SslProfileRef).To(gomega.BeNil())
 
+	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+
+func TestHostRuleWithEmptyConfig(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelName, _ := GetModelName("foo.com", "default")
+	hrname := "samplehr-foo"
+	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+
+	hostrule := integrationtest.FakeHostRule{
+		Name:      hrname,
+		Namespace: "default",
+		Fqdn:      "foo.com",
+	}
+	hrObj := hostrule.HostRule()
+	hrObj.ResourceVersion = "1"
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules("default").Create(context.TODO(), hrObj, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in creating HostRule: %v", err)
+	}
+
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+
+	sniVSKey := cache.NamespaceName{Namespace: "admin", Name: lib.Encode("cluster--foo.com", lib.EVHVS)}
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 25*time.Second).Should(gomega.Equal(true))
+
+	integrationtest.VerifyMetadataHostRule(t, g, sniVSKey, "default/samplehr-foo", true)
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(*nodes[0].EvhNodes[0].Enabled).To(gomega.Equal(true))
+	//At rest layer, sslref are switched to Parent
+	g.Expect(nodes[0].EvhNodes[0].SslKeyAndCertificateRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].ICAPProfileRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].WafPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ApplicationProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].AnalyticsProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ErrorPageProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].EvhNodes[0].HttpPolicySetRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].VsDatascriptRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].SslProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].VHDomainNames).To(gomega.ContainElement("foo.com"))
+	g.Expect(nodes[0].EvhNodes[0].HttpPolicyRefs[1].RedirectPorts[0].Hosts).To(gomega.ContainElement("foo.com"))
+	g.Expect(nodes[0].EvhNodes[0].HttpPolicyRefs[0].HppMap[0].Host).To(gomega.ContainElement("foo.com"))
+
+	integrationtest.TeardownHostRule(t, g, sniVSKey, hrname)
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(nodes[0].EvhNodes[0].Enabled).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ICAPProfileRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].WafPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ApplicationProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].AnalyticsProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ErrorPageProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].EvhNodes[0].HttpPolicySetRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].VsDatascriptRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].SslProfileRef).To(gomega.BeNil())
+	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+
+func TestSharedVSHostRuleNoListenerForEvh(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelName, _ := GetModelName("foo.com", "default")
+	hrname := "samplehr-foo"
+	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+
+	fqdn := "cluster--Shared-L7-EVH-0.admin.com"
+	if lib.VIPPerNamespace() {
+		fqdn = "cluster--Shared-L7-EVH-NS-default.admin.com"
+	}
+	hostrule := integrationtest.FakeHostRule{
+		Name:               hrname,
+		Namespace:          "default",
+		Fqdn:               fqdn,
+		WafPolicy:          "thisisaviref-waf",
+		ApplicationProfile: "thisisaviref-appprof",
+		ICAPProfile:        []string{"thisisaviref-icapprof"},
+		AnalyticsProfile:   "thisisaviref-analyticsprof",
+		ErrorPageProfile:   "thisisaviref-errorprof",
+		Datascripts:        []string{"thisisaviref-ds2", "thisisaviref-ds1"},
+		HttpPolicySets:     []string{"thisisaviref-httpps2", "thisisaviref-httpps1"},
+	}
+	hrCreate := hostrule.HostRule()
+	hrCreate.Spec.VirtualHost.TCPSettings = &v1beta1.HostRuleTCPSettings{
+		LoadBalancerIP: "80.80.80.80",
+	}
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules("default").Create(context.TODO(), hrCreate, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding HostRule: %v", err)
+	}
+
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 10*time.Second).Should(gomega.Equal("Accepted"))
+
+	vsKey := cache.NamespaceName{Namespace: "admin", Name: strings.Split(modelName, "/")[1]}
+	integrationtest.VerifyMetadataHostRule(t, g, vsKey, "default/samplehr-foo", true)
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(*nodes[0].Enabled).To(gomega.Equal(true))
+	g.Expect(nodes[0].PortProto).To(gomega.HaveLen(2))
+	var ports []int
+	for _, port := range nodes[0].PortProto {
+		ports = append(ports, int(port.Port))
+		if port.EnableSSL {
+			g.Expect(int(port.Port)).To(gomega.Equal(443))
+		}
+	}
+	sort.Ints(ports)
+	g.Expect(ports[0]).To(gomega.Equal(80))
+	g.Expect(ports[1]).To(gomega.Equal(443))
+	g.Expect(nodes[0].VSVIPRefs[0].IPAddress).To(gomega.Equal("80.80.80.80"))
+
+	integrationtest.TeardownHostRule(t, g, vsKey, hrname)
 	TearDownIngressForCacheSyncCheck(t, modelName)
 }
 
@@ -1054,7 +1190,7 @@ func TestHTTPRuleCreateDeleteWithPkiRefForEvh(t *testing.T) {
 	}
 
 	rrCreate := httprule.HTTPRule()
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().HTTPRules("default").Create(context.TODO(), rrCreate, metav1.CreateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HTTPRules("default").Create(context.TODO(), rrCreate, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("error in adding HTTPRule: %v", err)
 	}
 
@@ -1075,6 +1211,82 @@ func TestHTTPRuleCreateDeleteWithPkiRefForEvh(t *testing.T) {
 	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].LbAlgorithm).To(gomega.BeNil())
 	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].PkiProfileRef).To(gomega.BeNil())
 	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].PkiProfile).To(gomega.BeNil())
+
+	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+
+func TestHTTPRuleWithInvalidPath(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelName, _ := GetModelName("foo.com", "default")
+	rrname := "samplerr-foo"
+
+	SetupDomain()
+	SetUpTestForIngress(t, modelName)
+	integrationtest.AddSecret("my-secret", "default", "tlsCert", "tlsKey")
+	integrationtest.PollForCompletion(t, modelName, 5)
+	ingressObject := integrationtest.FakeIngress{
+		Name:        "foo-with-targets",
+		Namespace:   "default",
+		DnsNames:    []string{"foo.com"},
+		Ips:         []string{"8.8.8.8"},
+		HostNames:   []string{"v1"},
+		Paths:       []string{"/foo", "/bar"},
+		ServiceName: "avisvc",
+		TlsSecretDNS: map[string][]string{
+			"my-secret": {"foo.com"},
+		},
+	}
+
+	ingrFake := ingressObject.Ingress(true)
+	if _, err := KubeClient.NetworkingV1().Ingresses("default").Create(context.TODO(), ingrFake, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+	integrationtest.PollForCompletion(t, modelName, 5)
+
+	// create a httprule with a non-existing path
+	integrationtest.SetupHTTPRule(t, rrname, "foo.com", "/invalidPath")
+
+	time.Sleep(10 * time.Second)
+
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs).To(gomega.HaveLen(2))
+
+	// pool corresponding to the path "foo"
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].LbAlgorithm).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].LbAlgorithmHash).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].SslProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].PkiProfile).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].HealthMonitorRefs).To(gomega.HaveLen(0))
+
+	// pool corresponding to the path "bar"
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[1].LbAlgorithm).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[1].LbAlgorithmHash).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[1].SslProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[1].PkiProfile).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[1].HealthMonitorRefs).To(gomega.HaveLen(0))
+
+	// delete httprule must not change any configs
+	integrationtest.TeardownHTTPRule(t, rrname)
+
+	time.Sleep(10 * time.Second)
+
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs).To(gomega.HaveLen(2))
+
+	// pool corresponding to the path "foo"
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].LbAlgorithm).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].SslProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].PkiProfile).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[0].HealthMonitorRefs).To(gomega.HaveLen(0))
+
+	// pool corresponding to the path "bar"
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[1].LbAlgorithm).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[1].SslProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[1].PkiProfile).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].PoolRefs[1].HealthMonitorRefs).To(gomega.HaveLen(0))
 
 	TearDownIngressForCacheSyncCheck(t, modelName)
 }
@@ -1658,4 +1870,539 @@ func TestGoodToBadSSORuleForEvh(t *testing.T) {
 	g.Expect(nodes[0].EvhNodes[0].SamlSpConfig).To(gomega.BeNil())
 
 	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+
+func TestCreateUpdateDeleteL7RuleInHostRule(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modelName, _ := GetModelName("foo.com", "default")
+	hrname := "samplehr-foo"
+	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+	integrationtest.SetupHostRule(t, hrname, "foo.com", true)
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+	sniVSKey := cache.NamespaceName{Namespace: "admin", Name: lib.Encode("cluster--foo.com", lib.EVHVS)}
+	integrationtest.VerifyMetadataHostRule(t, g, sniVSKey, "default/samplehr-foo", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 25*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	l7ruleName := "samplel7rule"
+	integrationtest.SetupL7Rule(t, l7ruleName, g)
+
+	//Update hostrule with L7rule
+	hrUpdate := integrationtest.FakeHostRule{
+		Name:      hrname,
+		Namespace: "default",
+		Fqdn:      "foo.com",
+	}.HostRule()
+	hrUpdate.Spec.VirtualHost.L7Rule = l7ruleName
+	hrUpdate.ResourceVersion = "2"
+	_, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 10*time.Second).Should(gomega.Equal("Accepted"))
+	g.Eventually(func() *bool {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		if len(nodes) > 0 {
+			return nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		return nil
+	}, 25*time.Second).ShouldNot(gomega.BeNil())
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(*nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].AllowInvalidClientCert).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].IgnPoolNetReach).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].RemoveListeningPortOnVsDown).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].BotPolicyRef).To(gomega.ContainSubstring("thisisaviref-botpolicy"))
+	g.Expect(*nodes[0].EvhNodes[0].SslSessCacheAvgSize).To(gomega.Equal(uint32(2024)))
+	g.Expect(*nodes[0].EvhNodes[0].MinPoolsUp).To(gomega.Equal(uint32(0)))
+	g.Expect(nodes[0].EvhNodes[0].HostNameXlate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SecurityPolicyRef).To(gomega.BeNil())
+	//remove L7rule from hostrule
+	hrUpdate = integrationtest.FakeHostRule{
+		Name:      hrname,
+		Namespace: "default",
+		Fqdn:      "foo.com",
+	}.HostRule()
+	hrUpdate.ResourceVersion = "3"
+	_, err = v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating HostRule: %v", err)
+	}
+	g.Eventually(func() *bool {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found {
+			nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+			return nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		v := true
+		return &v
+	}, 25*time.Second).Should(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).Should(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].AllowInvalidClientCert).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].IgnPoolNetReach).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].RemoveListeningPortOnVsDown).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].BotPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SslSessCacheAvgSize).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].MinPoolsUp).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].HostNameXlate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SecurityPolicyRef).To(gomega.BeNil())
+
+	integrationtest.TeardownHostRule(t, g, sniVSKey, hrname)
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+
+	g.Expect(nodes[0].EvhNodes[0].Enabled).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ICAPProfileRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].WafPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ApplicationProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].AnalyticsProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ErrorPageProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].EvhNodes[0].HttpPolicySetRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].VsDatascriptRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].SslProfileRef).To(gomega.BeNil())
+
+	if err := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L7Rules("default").Delete(context.TODO(), l7ruleName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("error in deleting l7Rule: %v", err)
+	}
+	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+func TestDeleteL7RulePresentInHostRule(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modelName, _ := GetModelName("foo.com", "default")
+	hrname := "samplehr-foo"
+	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+	integrationtest.SetupHostRule(t, hrname, "foo.com", true)
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+	sniVSKey := cache.NamespaceName{Namespace: "admin", Name: lib.Encode("cluster--foo.com", lib.EVHVS)}
+	integrationtest.VerifyMetadataHostRule(t, g, sniVSKey, "default/samplehr-foo", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 25*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	l7ruleName := "samplel7rule"
+	integrationtest.SetupL7Rule(t, l7ruleName, g)
+	//Update hostrule with L7rule
+	hrUpdate := integrationtest.FakeHostRule{
+		Name:      hrname,
+		Namespace: "default",
+		Fqdn:      "foo.com",
+	}.HostRule()
+	hrUpdate.Spec.VirtualHost.L7Rule = l7ruleName
+	hrUpdate.ResourceVersion = "2"
+	_, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 10*time.Second).Should(gomega.Equal("Accepted"))
+	g.Eventually(func() *bool {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		if len(nodes) > 0 {
+			return nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		return nil
+	}, 25*time.Second).ShouldNot(gomega.BeNil())
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(*nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].AllowInvalidClientCert).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].IgnPoolNetReach).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].RemoveListeningPortOnVsDown).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].BotPolicyRef).To(gomega.ContainSubstring("thisisaviref-botpolicy"))
+	g.Expect(*nodes[0].EvhNodes[0].SslSessCacheAvgSize).To(gomega.Equal(uint32(2024)))
+	g.Expect(*nodes[0].EvhNodes[0].MinPoolsUp).To(gomega.Equal(uint32(0)))
+	g.Expect(nodes[0].EvhNodes[0].HostNameXlate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SecurityPolicyRef).To(gomega.BeNil())
+	//Delete L7 Rule
+	if err := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L7Rules("default").Delete(context.TODO(), l7ruleName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("error in deleting l7Rule: %v", err)
+	}
+	g.Eventually(func() *bool {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found {
+			nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+			return nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		v := true
+		return &v
+	}, 25*time.Second).Should(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].AllowInvalidClientCert).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].IgnPoolNetReach).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].RemoveListeningPortOnVsDown).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].BotPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SslSessCacheAvgSize).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].MinPoolsUp).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].HostNameXlate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SecurityPolicyRef).To(gomega.BeNil())
+
+	integrationtest.TeardownHostRule(t, g, sniVSKey, hrname)
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(nodes[0].EvhNodes[0].Enabled).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ICAPProfileRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].WafPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ApplicationProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].AnalyticsProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ErrorPageProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].EvhNodes[0].HttpPolicySetRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].VsDatascriptRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].SslProfileRef).To(gomega.BeNil())
+	TearDownIngressForCacheSyncCheck(t, modelName)
+
+}
+func TestChangeL7RuleInHostRule(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modelName, _ := GetModelName("foo.com", "default")
+	hrname := "samplehr-foo"
+	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+	integrationtest.SetupHostRule(t, hrname, "foo.com", true)
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+	sniVSKey := cache.NamespaceName{Namespace: "admin", Name: lib.Encode("cluster--foo.com", lib.EVHVS)}
+	integrationtest.VerifyMetadataHostRule(t, g, sniVSKey, "default/samplehr-foo", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 25*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	l7ruleName := "samplel7rule"
+	integrationtest.SetupL7Rule(t, l7ruleName, g)
+	//Update hostrule with L7rule
+	hrUpdate := integrationtest.FakeHostRule{
+		Name:      hrname,
+		Namespace: "default",
+		Fqdn:      "foo.com",
+	}.HostRule()
+	hrUpdate.Spec.VirtualHost.L7Rule = l7ruleName
+	hrUpdate.ResourceVersion = "2"
+	_, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 10*time.Second).Should(gomega.Equal("Accepted"))
+	g.Eventually(func() *bool {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		if len(nodes) > 0 {
+			return nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		return nil
+	}, 25*time.Second).ShouldNot(gomega.BeNil())
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(*nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].AllowInvalidClientCert).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].IgnPoolNetReach).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].RemoveListeningPortOnVsDown).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].BotPolicyRef).To(gomega.ContainSubstring("thisisaviref-botpolicy"))
+	g.Expect(*nodes[0].EvhNodes[0].SslSessCacheAvgSize).To(gomega.Equal(uint32(2024)))
+	g.Expect(*nodes[0].EvhNodes[0].MinPoolsUp).To(gomega.Equal(uint32(0)))
+	g.Expect(nodes[0].EvhNodes[0].HostNameXlate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SecurityPolicyRef).To(gomega.BeNil())
+	l7ruleName2 := "samplel7rule2"
+	integrationtest.SetupL7Rule(t, l7ruleName2, g)
+	l7rule2 := integrationtest.FakeL7Rule{Name: l7ruleName2,
+		Namespace:                     "default",
+		AllowInvalidClientCert:        false,
+		BotPolicyRef:                  "thisisaviref-botpolicy",
+		CloseClientConnOnConfigUpdate: true,
+		HostNameXlate:                 "hostname.com",
+		IgnPoolNetReach:               false,
+		MinPoolsUp:                    0,
+		SecurityPolicyRef:             "thisisaviref-secpolicy",
+		RemoveListeningPortOnVsDown:   true,
+		SslSessCacheAvgSize:           2024,
+	}.L7Rule()
+	l7rule2.ResourceVersion = "2"
+	_, err = v1alpha2CRDClient.AkoV1alpha2().L7Rules("default").Update(context.TODO(), l7rule2, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating L7Rule: %v", err)
+	}
+	g.Eventually(func() string {
+		l7Rule, _ := v1alpha2CRDClient.AkoV1alpha2().L7Rules("default").Get(context.TODO(), l7ruleName2, metav1.GetOptions{})
+		return l7Rule.Status.Status
+	}, 10*time.Second).Should(gomega.Equal("Accepted"))
+
+	//Update hostrule with L7rule2
+	hrUpdate = integrationtest.FakeHostRule{
+		Name:      hrname,
+		Namespace: "default",
+		Fqdn:      "foo.com",
+	}.HostRule()
+	hrUpdate.Spec.VirtualHost.L7Rule = l7ruleName2
+	hrUpdate.ResourceVersion = "3"
+	_, err = v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating HostRule: %v", err)
+	}
+
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 10*time.Second).Should(gomega.Equal("Accepted"))
+	g.Eventually(func() bool {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		if len(nodes) > 0 {
+			return *nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		return true
+	}, 25*time.Second).Should(gomega.Equal(false))
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(*nodes[0].EvhNodes[0].RemoveListeningPortOnVsDown).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].AllowInvalidClientCert).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].IgnPoolNetReach).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].BotPolicyRef).To(gomega.ContainSubstring("thisisaviref-botpolicy"))
+	g.Expect(*nodes[0].EvhNodes[0].SslSessCacheAvgSize).To(gomega.Equal(uint32(2024)))
+	g.Expect(*nodes[0].EvhNodes[0].MinPoolsUp).To(gomega.Equal(uint32(0)))
+	g.Expect(nodes[0].EvhNodes[0].HostNameXlate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SecurityPolicyRef).To(gomega.BeNil())
+	integrationtest.TeardownHostRule(t, g, sniVSKey, hrname)
+	if err := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L7Rules("default").Delete(context.TODO(), l7ruleName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("error in deleting l7Rule: %v", err)
+	}
+	if err := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L7Rules("default").Delete(context.TODO(), l7ruleName2, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("error in deleting l7Rule: %v", err)
+	}
+	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+
+func TestValidToInvalidL7rule(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modelName, _ := GetModelName("foo.com", "default")
+	hrname := "samplehr-foo"
+	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+	integrationtest.SetupHostRule(t, hrname, "foo.com", true)
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+	sniVSKey := cache.NamespaceName{Namespace: "admin", Name: lib.Encode("cluster--foo.com", lib.EVHVS)}
+	integrationtest.VerifyMetadataHostRule(t, g, sniVSKey, "default/samplehr-foo", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 25*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	l7ruleName := "samplel7rule"
+	integrationtest.SetupL7Rule(t, l7ruleName, g)
+	//Update hostrule with L7rule
+	hrUpdate := integrationtest.FakeHostRule{
+		Name:      hrname,
+		Namespace: "default",
+		Fqdn:      "foo.com",
+	}.HostRule()
+	hrUpdate.Spec.VirtualHost.L7Rule = l7ruleName
+	hrUpdate.ResourceVersion = "2"
+	_, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 10*time.Second).Should(gomega.Equal("Accepted"))
+	g.Eventually(func() *bool {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		if len(nodes) > 0 {
+			return nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		return nil
+	}, 25*time.Second).ShouldNot(gomega.BeNil())
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(*nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).To(gomega.Equal(true))
+	l7rule := integrationtest.FakeL7Rule{Name: l7ruleName,
+		Namespace:                     "default",
+		AllowInvalidClientCert:        false,
+		BotPolicyRef:                  "invalidbotpolicy",
+		CloseClientConnOnConfigUpdate: true,
+		HostNameXlate:                 "hostname.com",
+		IgnPoolNetReach:               false,
+		MinPoolsUp:                    0,
+		SecurityPolicyRef:             "thisisaviref-secpolicy",
+		RemoveListeningPortOnVsDown:   true,
+		SslSessCacheAvgSize:           2024,
+	}.L7Rule()
+	val := true
+	l7rule.Spec.RemoveListeningPortOnVsDown = &val
+	invalidBotPolicyRef := "invalidBotPolicy"
+	l7rule.Spec.BotPolicyRef = &invalidBotPolicyRef
+	l7rule.ResourceVersion = "2"
+
+	_, err = v1alpha2CRDClient.AkoV1alpha2().L7Rules("default").Update(context.TODO(), l7rule, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating L7Rule: %v", err)
+	}
+
+	g.Eventually(func() string {
+		l7Rule, _ := v1alpha2CRDClient.AkoV1alpha2().L7Rules("default").Get(context.TODO(), l7ruleName, metav1.GetOptions{})
+		return l7Rule.Status.Status
+	}, 10*time.Second).Should(gomega.Equal("Rejected"))
+	g.Eventually(func() bool {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		if len(nodes) > 0 {
+			return *nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		return false
+	}, 25*time.Second).Should(gomega.Equal(true))
+	botPolicy := "thisisaviref-bop"
+	l7rule.Spec.BotPolicyRef = &botPolicy
+	l7rule.ResourceVersion = "3"
+	_, err = v1alpha2CRDClient.AkoV1alpha2().L7Rules("default").Update(context.TODO(), l7rule, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating L7Rule: %v", err)
+	}
+
+	g.Eventually(func() string {
+		l7Rule, _ := v1alpha2CRDClient.AkoV1alpha2().L7Rules("default").Get(context.TODO(), l7ruleName, metav1.GetOptions{})
+		return l7Rule.Status.Status
+	}, 10*time.Second).Should(gomega.Equal("Accepted"))
+
+	g.Eventually(func() bool {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		if len(nodes) > 0 {
+			return *nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		return true
+	}, 25*time.Second).Should(gomega.Equal(false))
+
+	g.Expect(*nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].AllowInvalidClientCert).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].IgnPoolNetReach).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].RemoveListeningPortOnVsDown).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].BotPolicyRef).To(gomega.ContainSubstring("thisisaviref-bop"))
+	g.Expect(*nodes[0].EvhNodes[0].SslSessCacheAvgSize).To(gomega.Equal(uint32(2024)))
+	g.Expect(*nodes[0].EvhNodes[0].MinPoolsUp).To(gomega.Equal(uint32(0)))
+	g.Expect(nodes[0].EvhNodes[0].HostNameXlate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SecurityPolicyRef).To(gomega.BeNil())
+	integrationtest.TeardownHostRule(t, g, sniVSKey, hrname)
+	if err := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L7Rules("default").Delete(context.TODO(), l7ruleName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("error in deleting l7Rule: %v", err)
+	}
+	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+
+func TestDeleteHostRuleWithActiveL7Rule(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modelName, _ := GetModelName("foo.com", "default")
+	hrname := "samplehr-foo"
+	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+	integrationtest.SetupHostRule(t, hrname, "foo.com", true)
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+	sniVSKey := cache.NamespaceName{Namespace: "admin", Name: lib.Encode("cluster--foo.com", lib.EVHVS)}
+	integrationtest.VerifyMetadataHostRule(t, g, sniVSKey, "default/samplehr-foo", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 25*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	l7ruleName := "samplel7rule"
+	integrationtest.SetupL7Rule(t, l7ruleName, g)
+	//Update hostrule with L7rule
+	hrUpdate := integrationtest.FakeHostRule{
+		Name:      hrname,
+		Namespace: "default",
+		Fqdn:      "foo.com",
+	}.HostRule()
+	hrUpdate.Spec.VirtualHost.L7Rule = l7ruleName
+	hrUpdate.ResourceVersion = "2"
+	_, err := v1beta1CRDClient.AkoV1beta1().HostRules("default").Update(context.TODO(), hrUpdate, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 10*time.Second).Should(gomega.Equal("Accepted"))
+	g.Eventually(func() *bool {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		if len(nodes) > 0 {
+			return nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		return nil
+	}, 25*time.Second).ShouldNot(gomega.BeNil())
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(*nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].AllowInvalidClientCert).To(gomega.Equal(true))
+	g.Expect(*nodes[0].EvhNodes[0].IgnPoolNetReach).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].RemoveListeningPortOnVsDown).To(gomega.Equal(false))
+	g.Expect(*nodes[0].EvhNodes[0].BotPolicyRef).To(gomega.ContainSubstring("thisisaviref-botpolicy"))
+	g.Expect(*nodes[0].EvhNodes[0].SslSessCacheAvgSize).To(gomega.Equal(uint32(2024)))
+	g.Expect(*nodes[0].EvhNodes[0].MinPoolsUp).To(gomega.Equal(uint32(0)))
+	g.Expect(nodes[0].EvhNodes[0].HostNameXlate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SecurityPolicyRef).To(gomega.BeNil())
+	//Delete Hostrule
+	integrationtest.TeardownHostRule(t, g, sniVSKey, hrname)
+	g.Eventually(func() *bool {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found {
+			nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+			return nodes[0].EvhNodes[0].AllowInvalidClientCert
+		}
+		v := true
+		return &v
+	}, 25*time.Second).Should(gomega.BeNil())
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+	g.Expect(nodes[0].EvhNodes[0].Enabled).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ICAPProfileRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].WafPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ApplicationProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].AnalyticsProfileRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].ErrorPageProfileRef).To(gomega.Equal(""))
+	g.Expect(nodes[0].EvhNodes[0].HttpPolicySetRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].VsDatascriptRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].EvhNodes[0].CloseClientConnOnConfigUpdate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].AllowInvalidClientCert).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].IgnPoolNetReach).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].RemoveListeningPortOnVsDown).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].BotPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SslSessCacheAvgSize).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].MinPoolsUp).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].HostNameXlate).To(gomega.BeNil())
+	g.Expect(nodes[0].EvhNodes[0].SecurityPolicyRef).To(gomega.BeNil())
+	g.Expect(nodes[0].SslProfileRef).To(gomega.BeNil())
+	//Delete L7 Rule
+	if err := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L7Rules("default").Delete(context.TODO(), l7ruleName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("error in deleting l7Rule: %v", err)
+	}
+	TearDownIngressForCacheSyncCheck(t, modelName)
+
 }

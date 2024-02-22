@@ -47,11 +47,15 @@ The `apiServerPort` field is used to run the API server within the AKO pod. The 
 
 ### AKOSettings.cniPlugin
 
-Use this flag only if you are using `calico`/`openshift`/`ovn-kubernetes` as a CNI and you are looking to sync your static route configurations automatically.
-Once enabled, for `calico` this flag is used to read the `blockaffinity` CRD to determine the Pod CIDR to Node IP mappings. If you are
-on an older version of calico where `blockaffinity` is not present, then leave this field as blank. For `openshift` hostsubnet CRD is used to to determine the Pod CIDR to Node IP mappings. For `ovn-kubernetes` the `k8s.ovn.org/node-subnets` annotation in the Node metadata is used to determine the Pod CIDR to Node IP mappings.
+Use this flag only if you are using `calico`/`openshift`/`ovn-kubernetes`/`cilium` as a CNI and you are looking to sync your static route configurations automatically.  
+However, for `cilium` CNI, setting this flag is only required when using Cluster Scope mode for IPAM. With Cilium CNI, there are two ways to confugure the per-node PodCIDRs. In the **default** cluster scope mode, the podCIDRs range are made available via the `CiliumNode (cilium.io/v2.CiliumNode)` CRD and AKO reads this CRD to determine the Pod CIDR to Node IP mappings when the flag is set as `cilium`. In Kubernetes host scope mode, podCIDRs are allocated out of the PodCIDR range associated to each node by Kubernetes. Since AKO determines the Pod CIDR to Node IP mappings from Node Spec by default, the `cniPlugin` flag is not required to be set exclusively.
 
-AKO will then determine the static routes based on the Kubernetes Nodes object as done with other CNIs.
+Once enabled, for `calico` this flag is used to read the `blockaffinity` CRD to determine the Pod CIDR to Node IP mappings. If you are
+on an older version of calico where `blockaffinity` is not present, then leave this field as blank.  
+For `openshift` hostsubnet CRD is used to to determine the Pod CIDR to Node IP mappings.  
+For `ovn-kubernetes` the `k8s.ovn.org/node-subnets` annotation in the Node metadata is used to determine the Pod CIDR to Node IP mappings.
+
+AKO will then determine the static routes based on the Kubernetes Nodes object as done with other CNIs.  
 In case of `ncp` CNI, AKO automatically disables the configuration of static routes.
 
 There are certain scenarios where AKO cannot determine the Pod CIDRs being used in the Kubernetes Nodes, for instance, when deploying calico using `etcd` as the datastore. In such cases AKO provides it's own interface to feed in Pod CIDR to Node mappings, using an annotation in the Node object. While keeping the `cniPlugin` value to be empty, add the following annotation in the Node object to provide Pod CIDRs being used in the Node. Note that for multiple Pod CIDRs that are being used in the Node, simply provide the entries as a comma separated string.
@@ -108,7 +112,7 @@ Default value is `false`.
 
 ### NetworkSettings.nodeNetworkList
 
-The `nodeNetworkList` lists the Networks and Node CIDR's where the k8s Nodes are created. This is only used in the ClusterIP deployment of AKO and in vCenter cloud and only when disableStaticRouteSync is set to false.
+The `nodeNetworkList` lists the Networks (specified using either `networkName` or `networkUUID`) and Node CIDR's where the k8s Nodes are created. This is only used in the ClusterIP deployment of AKO and in vCenter cloud and only when disableStaticRouteSync is set to false.
 
 If two Kubernetes clusters have overlapping Pod CIDRs, the service engine needs to identify the right gateway for each of the overlapping CIDR groups. This is achieved by specifying the right placement network for the pools that helps the Service Engine place the pools appropriately.
 
@@ -118,15 +122,27 @@ AKO 1.5.1 deprecates `subnetIP` and `subnetPrefix`. See [Upgrade Notes](./upgrad
 
 ### NetworkSettings.vipNetworkList
 
-List of VIP Networks can be specified through vipNetworkList with key as networkName. Except AWS cloud, for all other cloud types, only one networkName is supported. For example in vipNetworkList:
+List of VIP Networks can be specified through vipNetworkList with key as `networkName` or `networkUUID`. Except AWS cloud, for all other cloud types, only one networkName is supported. For example in vipNetworkList:
 
     vipNetworkList:
       - networkName: net1
 
-In addition to the networkName, we can also provide CIDR information that allows us to specify the Virtual IP network details on which the user wants to place the Avi virtual services on.
+or
+
+    vipNetworkList:
+      - networkUUID: dvportgroup-4167-cloud-d4b24fc7-a435-408d-af9f-150229a6fea6f
+
+In addition to the `networkName` or `networkUUID`, we can also provide CIDR information that allows us to specify the Virtual IP network details on which the user wants to place the Avi virtual services on.
 
     vipNetworkLists:
       - networkName: net1
+        cidr: 10.1.1.0/24
+        v6cidr: 2002::1234:abcd:ffff:c0a8:101/64
+
+or
+
+    vipNetworkLists:
+      - networkUUID: dvportgroup-4167-cloud-d4b24fc7-a435-408d-af9f-150229a6fea6f
         cidr: 10.1.1.0/24
         v6cidr: 2002::1234:abcd:ffff:c0a8:101/64
 
@@ -227,6 +243,10 @@ The `tenantName` field  is used to specify the name of the tenant where all the
 
 This field is used to specify the name of the IaaS cloud in Avi controller. For example, if you have the VCenter cloud named as "Demo"
 then specify the `name` of the cloud name with this field. This helps AKO determine the IaaS cloud to create the service engines on.
+
+### ControllerSettings.vrfName
+
+The `vrfName` field  is used to specify the name of the VRFContext where all the AKO objects will be created. The VRFContext in AVI needs to be created by the AVI controller admin before the AKO bootsup. This is applicable in VCenter cloud only.
 <br>
 
 #### AWS and Azure Cloud in NodePort mode of AKO
@@ -282,6 +302,13 @@ One AKO runs in active mode, and the second in passive mode. The AKO, which is r
 If you are using a private container registry and you'd like to override the default dockerhub settings, then this field can be edited
 with the private registry name.
 
+### image.pullSecrets
+
+If you are setting the [image.repository](#imagerepository) field to use a secure private container image registry for ako image, then you must specify the pull secrets in this field. The pull secrets are a list of Kubernetes Secret objects that are created from the login credentials of a secure private image registry. The container runtime uses the pull secrets to authenticate with the registry in order to pull the ako image. The image pull secrets must be created in the `avi-system` namespace before deploying AKO.
+
+    pullSecrets:
+    - name: regcred
+
 ### L7Settings.serviceType
 
 This option specifies whether the AKO functions in ClusterIP mode or NodePort mode. By default it is set to `ClusterIP`. Allowed values are `ClusterIP`, `NodePort`. If CNI type for the cluster is `antrea`, then another serviceType named `NodePortLocal` is allowed.
@@ -301,3 +328,16 @@ SecurityContext holds security configuration that will be applied to the AKO pod
 ### podSecurityContext
 
 This can be used to set securityContext of AKO pod, if necessary. For example, in openshift environment, if a persistent storage with hostpath is used for logging, then securityContext must have privileged: true (Reference - https://docs.openshift.com/container-platform/4.11/storage/persistent_storage/persistent-storage-hostpath.html)
+
+
+### featureGates.GatewayAPI (Tech Preview)
+
+Use this flag if you want to enable Gateway API feature for AKO. It is disabled by default. Set the flag to `true` to enable the flag.
+
+### GatewayAPI
+
+Enable Gateway API in the featureGate to use this field.
+
+### GatewayAPI.image.repository
+
+If you are using a private container registry and you'd like to override the default dockerhub settings, then this field can be edited with the private registry name.

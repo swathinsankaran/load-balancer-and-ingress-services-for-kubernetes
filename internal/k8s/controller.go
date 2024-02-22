@@ -54,6 +54,7 @@ var ctrlonce sync.Once
 // +kubebuilder:rbac:groups=core,resources=endpoints,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=topology.tanzu.vmware.com,resources=availabilityzones,verbs=get;list;watch
 
 type AviController struct {
 	worker_id uint32
@@ -62,6 +63,7 @@ type AviController struct {
 	dynamicInformers *lib.DynamicInformers
 	workqueue        []workqueue.RateLimitingInterface
 	DisableSync      bool
+	State            *State
 }
 
 type K8sinformers struct {
@@ -78,6 +80,7 @@ func SharedAviController() *AviController {
 			informers:        utils.GetInformers(),
 			dynamicInformers: lib.GetDynamicInformers(),
 			DisableSync:      true,
+			State:            &State{},
 		}
 	})
 	return controllerInstance
@@ -166,10 +169,7 @@ func isNamespaceUpdated(oldNS, newNS *corev1.Namespace) bool {
 	}
 	oldLabelHash := utils.Hash(utils.Stringify(oldNS.Labels))
 	newLabelHash := utils.Hash(utils.Stringify(newNS.Labels))
-	if oldLabelHash != newLabelHash {
-		return true
-	}
-	return false
+	return oldLabelHash != newLabelHash
 }
 
 func AddIngressFromNSToIngestionQueue(numWorkers uint32, c *AviController, namespace string, msg string) {
@@ -182,6 +182,7 @@ func AddIngressFromNSToIngestionQueue(numWorkers uint32, c *AviController, names
 		key := utils.Ingress + "/" + utils.ObjKey(ingObj)
 		bkt := utils.Bkt(namespace, numWorkers)
 		c.workqueue[bkt].AddRateLimited(key)
+		lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
 	}
 }
@@ -196,6 +197,7 @@ func AddRoutesFromNSToIngestionQueue(numWorkers uint32, c *AviController, namesp
 		key := utils.OshiftRoute + "/" + utils.ObjKey(routeObj)
 		bkt := utils.Bkt(namespace, numWorkers)
 		c.workqueue[bkt].AddRateLimited(key)
+		lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
 	}
 }
@@ -220,6 +222,7 @@ func AddServicesFromNSToIngestionQueue(numWorkers uint32, c *AviController, name
 		}
 		bkt := utils.Bkt(namespace, numWorkers)
 		c.workqueue[bkt].AddRateLimited(key)
+		lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
 	}
 }
@@ -236,6 +239,7 @@ func AddGatewaysFromNSToIngestionQueue(numWorkers uint32, c *AviController, name
 		InformerStatusUpdatesForSvcApiGateway(key, gatewayObj)
 		bkt := utils.Bkt(namespace, numWorkers)
 		c.workqueue[bkt].AddRateLimited(key)
+		lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
 	}
 }
@@ -250,6 +254,7 @@ func AddMultiClusterIngressFromNSToIngestionQueue(numWorkers uint32, c *AviContr
 		key := lib.MultiClusterIngress + "/" + utils.ObjKey(mciObj)
 		bkt := utils.Bkt(namespace, numWorkers)
 		c.workqueue[bkt].AddRateLimited(key)
+		lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
 	}
 }
@@ -264,6 +269,7 @@ func AddServiceImportsFromNSToIngestionQueue(numWorkers uint32, c *AviController
 		key := lib.MultiClusterIngress + "/" + utils.ObjKey(siObj)
 		bkt := utils.Bkt(namespace, numWorkers)
 		c.workqueue[bkt].AddRateLimited(key)
+		lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
 	}
 }
@@ -312,7 +318,10 @@ func AddNamespaceEventHandler(numWorkers uint32, c *AviController) cache.Resourc
 				oldNSAccepted := utils.CheckIfNamespaceAccepted(nsOld.GetName(), nsOld.Labels, false)
 				newNSAccepted := utils.CheckIfNamespaceAccepted(nsCur.GetName(), nsCur.Labels, false)
 
-				if !oldNSAccepted && newNSAccepted {
+				infraSettingOld := nsOld.Annotations[lib.InfraSettingNameAnnotation]
+				infraSettingNew := nsCur.Annotations[lib.InfraSettingNameAnnotation]
+
+				if !oldNSAccepted && newNSAccepted || (infraSettingOld != infraSettingNew) {
 					//Case 1: Namespace updated with valid labels
 					//Call ingress/route and service add
 					utils.AddNamespaceToFilter(nsCur.GetName())
@@ -323,14 +332,6 @@ func AddNamespaceEventHandler(numWorkers uint32, c *AviController) cache.Resourc
 						utils.AviLog.Debugf("Adding routes for namespaces: %s", nsCur.GetName())
 						AddRoutesFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
 					}
-					if utils.GetInformers().MultiClusterIngressInformer != nil {
-						utils.AviLog.Debugf("Adding multi-cluster ingresses for namespaces: %s", nsCur.GetName())
-						AddMultiClusterIngressFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
-					}
-					if utils.GetInformers().ServiceImportInformer != nil {
-						utils.AviLog.Debugf("Adding service imports for namespaces: %s", nsCur.GetName())
-						AddServiceImportsFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
-					}
 					if utils.GetInformers().ServiceInformer != nil {
 						utils.AviLog.Debugf("Adding L4 services for namespaces: %s", nsCur.GetName())
 						AddServicesFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
@@ -338,6 +339,16 @@ func AddNamespaceEventHandler(numWorkers uint32, c *AviController) cache.Resourc
 					if lib.UseServicesAPI() {
 						utils.AviLog.Debugf("Adding Gatways for namespaces: %s", nsCur.GetName())
 						AddGatewaysFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
+					}
+					if !oldNSAccepted && newNSAccepted {
+						if utils.GetInformers().MultiClusterIngressInformer != nil {
+							utils.AviLog.Debugf("Adding multi-cluster ingresses for namespaces: %s", nsCur.GetName())
+							AddMultiClusterIngressFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
+						}
+						if utils.GetInformers().ServiceImportInformer != nil {
+							utils.AviLog.Debugf("Adding service imports for namespaces: %s", nsCur.GetName())
+							AddServiceImportsFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
+						}
 					}
 				} else if oldNSAccepted && !newNSAccepted {
 					//Case 2: Old valid namespace updated with invalid labels
@@ -373,6 +384,40 @@ func AddNamespaceEventHandler(numWorkers uint32, c *AviController) cache.Resourc
 	return namespaceEventHandler
 }
 
+func AddNamespaceAnnotationEventHandler(numWorkers uint32, c *AviController) cache.ResourceEventHandler {
+	nsEventHandler := cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(old, cur interface{}) {
+			if c.DisableSync {
+				return
+			}
+			nsOld := old.(*corev1.Namespace)
+			nsCur := cur.(*corev1.Namespace)
+			if isNamespaceUpdated(nsOld, nsCur) {
+				infraSettingOld := nsOld.Annotations[lib.InfraSettingNameAnnotation]
+				infraSettingNew := nsCur.Annotations[lib.InfraSettingNameAnnotation]
+				if infraSettingOld != infraSettingNew {
+					if utils.GetInformers().IngressInformer != nil {
+						utils.AviLog.Debugf("Adding ingresses for namespaces: %s", nsCur.GetName())
+						AddIngressFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
+					} else if utils.GetInformers().RouteInformer != nil {
+						utils.AviLog.Debugf("Adding routes for namespaces: %s", nsCur.GetName())
+						AddRoutesFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
+					}
+					if utils.GetInformers().ServiceInformer != nil {
+						utils.AviLog.Debugf("Adding L4 services for namespaces: %s", nsCur.GetName())
+						AddServicesFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
+					}
+					if lib.UseServicesAPI() {
+						utils.AviLog.Debugf("Adding Gatways for namespaces: %s", nsCur.GetName())
+						AddGatewaysFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
+					}
+				}
+			}
+		},
+	}
+	return nsEventHandler
+}
+
 func AddRouteEventHandler(numWorkers uint32, c *AviController) cache.ResourceEventHandler {
 	routeEventHandler := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -396,6 +441,7 @@ func AddRouteEventHandler(numWorkers uint32, c *AviController) cache.ResourceEve
 				status.UpdateRouteStatusWithErrMsg(key, route.Name, namespace, lib.DuplicateBackends)
 			}
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -423,6 +469,7 @@ func AddRouteEventHandler(numWorkers uint32, c *AviController) cache.ResourceEve
 			}
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			objects.SharedResourceVerInstanceLister().Delete(key)
 			utils.AviLog.Debugf("key: %s, msg: DELETE", key)
 		},
@@ -444,6 +491,7 @@ func AddRouteEventHandler(numWorkers uint32, c *AviController) cache.ResourceEve
 					status.UpdateRouteStatusWithErrMsg(key, newRoute.Name, namespace, lib.DuplicateBackends)
 				}
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 			}
 		},
@@ -475,6 +523,7 @@ func AddPodEventHandler(numWorkers uint32, c *AviController) cache.ResourceEvent
 			}
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -507,6 +556,7 @@ func AddPodEventHandler(numWorkers uint32, c *AviController) cache.ResourceEvent
 			bkt := utils.Bkt(namespace, numWorkers)
 			objects.SharedResourceVerInstanceLister().Delete(key)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: DELETE", key)
 		},
 		UpdateFunc: func(old, cur interface{}) {
@@ -515,21 +565,32 @@ func AddPodEventHandler(numWorkers uint32, c *AviController) cache.ResourceEvent
 			}
 			oldPod := old.(*corev1.Pod)
 			newPod := cur.(*corev1.Pod)
-			if !reflect.DeepEqual(newPod, oldPod) {
-				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(newPod))
-				key := utils.Pod + "/" + utils.ObjKey(oldPod)
-				if lib.IsNamespaceBlocked(namespace) {
-					utils.AviLog.Debugf("key: %s, msg: Pod Update event: Namespace: %s didn't qualify filter", key, namespace)
-					return
-				}
-				if _, ok := newPod.GetAnnotations()[lib.NPLPodAnnotation]; !ok {
-					utils.AviLog.Warnf("key : %s, msg: 'nodeportlocal.antrea.io' annotation not found, ignoring the pod", key)
-					return
-				}
-				bkt := utils.Bkt(namespace, numWorkers)
-				c.workqueue[bkt].AddRateLimited(key)
-				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
+			key := utils.Pod + "/" + utils.ObjKey(oldPod)
+			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(newPod))
+			if lib.IsNamespaceBlocked(namespace) {
+				utils.AviLog.Debugf("key: %s, msg: Pod Update event: Namespace: %s didn't qualify filter", key, namespace)
+				return
 			}
+			if _, ok := newPod.GetAnnotations()[lib.NPLPodAnnotation]; !ok {
+				utils.AviLog.Warnf("key : %s, msg: 'nodeportlocal.antrea.io' annotation not found, ignoring the pod", key)
+				return
+			}
+			for _, container := range newPod.Status.ContainerStatuses {
+				if !container.Ready {
+					if container.State.Terminated != nil {
+						utils.AviLog.Warnf("key : %s, msg: Container %s is in terminated state, ignoring pod update", key, container.Name)
+						return
+					}
+					if container.State.Waiting != nil && container.State.Waiting.Reason == "CrashLoopBackOff" {
+						utils.AviLog.Warnf("key : %s, msg: Container %s is in CrashLoopBackOff state, ignoring pod update", key, container.Name)
+						return
+					}
+				}
+			}
+			bkt := utils.Bkt(namespace, numWorkers)
+			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+			utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 		},
 	}
 	return podEventHandler
@@ -539,71 +600,75 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 	mcpQueue := utils.SharedWorkQueue().GetQueueByName(utils.ObjectIngestionLayer)
 	c.workqueue = mcpQueue.Workqueue
 	numWorkers := mcpQueue.NumWorkers
-
-	epEventHandler := cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			if c.DisableSync {
-				return
-			}
-			ep := obj.(*corev1.Endpoints)
-			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(ep))
-			key := utils.Endpoints + "/" + utils.ObjKey(ep)
-			if lib.IsNamespaceBlocked(namespace) {
-				utils.AviLog.Debugf("key: %s, msg: Endpoint Add event: Namespace: %s didn't qualify filter", key, namespace)
-				return
-			}
-			bkt := utils.Bkt(namespace, numWorkers)
-			c.workqueue[bkt].AddRateLimited(key)
-			utils.AviLog.Debugf("key: %s, msg: ADD", key)
-		},
-		DeleteFunc: func(obj interface{}) {
-			if c.DisableSync {
-				return
-			}
-			ep, ok := obj.(*corev1.Endpoints)
-			if !ok {
-				// endpoints was deleted but its final state is unrecorded.
-				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
-				if !ok {
-					utils.AviLog.Errorf("couldn't get object from tombstone %#v", obj)
+	var epEventHandler cache.ResourceEventHandlerFuncs
+	if lib.GetServiceType() != lib.NodePortLocal {
+		epEventHandler = cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				if c.DisableSync {
 					return
 				}
-				ep, ok = tombstone.Obj.(*corev1.Endpoints)
-				if !ok {
-					utils.AviLog.Errorf("Tombstone contained object that is not an Endpoints: %#v", obj)
+				ep := obj.(*corev1.Endpoints)
+				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(ep))
+				key := utils.Endpoints + "/" + utils.ObjKey(ep)
+				if lib.IsNamespaceBlocked(namespace) {
+					utils.AviLog.Debugf("key: %s, msg: Endpoint Add event: Namespace: %s didn't qualify filter", key, namespace)
 					return
 				}
-			}
-			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(ep))
-			key := utils.Endpoints + "/" + utils.ObjKey(ep)
-			if lib.IsNamespaceBlocked(namespace) {
-				utils.AviLog.Debugf("key: %s, msg: Endpoint Update event: Namespace: %s didn't qualify filter", key, namespace)
-				return
-			}
-			bkt := utils.Bkt(namespace, numWorkers)
-			c.workqueue[bkt].AddRateLimited(key)
-			utils.AviLog.Debugf("key: %s, msg: DELETE", key)
-		},
-		UpdateFunc: func(old, cur interface{}) {
-			if c.DisableSync {
-				return
-			}
-			oep := old.(*corev1.Endpoints)
-			cep := cur.(*corev1.Endpoints)
-			if !reflect.DeepEqual(cep.Subsets, oep.Subsets) {
-				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(cep))
-				key := utils.Endpoints + "/" + utils.ObjKey(cep)
+				bkt := utils.Bkt(namespace, numWorkers)
+				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+				utils.AviLog.Debugf("key: %s, msg: ADD", key)
+			},
+			DeleteFunc: func(obj interface{}) {
+				if c.DisableSync {
+					return
+				}
+				ep, ok := obj.(*corev1.Endpoints)
+				if !ok {
+					// endpoints was deleted but its final state is unrecorded.
+					tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+					if !ok {
+						utils.AviLog.Errorf("couldn't get object from tombstone %#v", obj)
+						return
+					}
+					ep, ok = tombstone.Obj.(*corev1.Endpoints)
+					if !ok {
+						utils.AviLog.Errorf("Tombstone contained object that is not an Endpoints: %#v", obj)
+						return
+					}
+				}
+				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(ep))
+				key := utils.Endpoints + "/" + utils.ObjKey(ep)
 				if lib.IsNamespaceBlocked(namespace) {
 					utils.AviLog.Debugf("key: %s, msg: Endpoint Update event: Namespace: %s didn't qualify filter", key, namespace)
 					return
 				}
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
-				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
-			}
-		},
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+				utils.AviLog.Debugf("key: %s, msg: DELETE", key)
+			},
+			UpdateFunc: func(old, cur interface{}) {
+				if c.DisableSync {
+					return
+				}
+				oep := old.(*corev1.Endpoints)
+				cep := cur.(*corev1.Endpoints)
+				if !reflect.DeepEqual(cep.Subsets, oep.Subsets) {
+					namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(cep))
+					key := utils.Endpoints + "/" + utils.ObjKey(cep)
+					if lib.IsNamespaceBlocked(namespace) {
+						utils.AviLog.Debugf("key: %s, msg: Endpoint Update event: Namespace: %s didn't qualify filter", key, namespace)
+						return
+					}
+					bkt := utils.Bkt(namespace, numWorkers)
+					c.workqueue[bkt].AddRateLimited(key)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
+				}
+			},
+		}
 	}
-
 	svcEventHandler := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if c.DisableSync {
@@ -616,6 +681,11 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			if isSvcLb && !lib.GetLayer7Only() {
 				//L4 Namespace sync not applicable for advance L4 and service API
 				key = utils.L4LBService + "/" + utils.ObjKey(svc)
+				if !lib.ValidateSvcforClass(key, svc) && svc.Annotations[lib.SharedVipSvcLBAnnotation] == "" {
+					// optimisation for regular LoadBalancer Services
+					// not checking for sharedvip as all sharedvip svcs need to be ingested for validation
+					return
+				}
 				if lib.IsNamespaceBlocked(namespace) || !utils.IsServiceNSValid(namespace) {
 					utils.AviLog.Debugf("key: %s, msg: L4 Service add event: Namespace: %s didn't qualify filter. Not adding service.", key, namespace)
 					return
@@ -644,6 +714,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			}
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -669,6 +740,9 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(svc))
 			if isSvcLb && !lib.GetLayer7Only() {
 				key = utils.L4LBService + "/" + utils.ObjKey(svc)
+				if !lib.ValidateSvcforClass(key, svc) && svc.Annotations[lib.SharedVipSvcLBAnnotation] == "" {
+					return
+				}
 				if lib.IsNamespaceBlocked(namespace) || !utils.IsServiceNSValid(namespace) {
 					utils.AviLog.Debugf("key: %s, msg: L4 Service delete event: Namespace: %s didn't qualify filter. Not deleting service.", key, namespace)
 					return
@@ -687,6 +761,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			}
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			objects.SharedResourceVerInstanceLister().Delete(key)
 			utils.AviLog.Debugf("key: %s, msg: DELETE", key)
 		},
@@ -703,6 +778,9 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				var key string
 				if isSvcLb && !lib.GetLayer7Only() {
 					key = utils.L4LBService + "/" + utils.ObjKey(svc)
+					if !lib.ValidateSvcforClass(key, svc) && svc.Annotations[lib.SharedVipSvcLBAnnotation] == "" {
+						return
+					}
 					if lib.IsNamespaceBlocked(namespace) || !utils.IsServiceNSValid(namespace) {
 						utils.AviLog.Debugf("key: %s, msg: L4 Service update event: Namespace: %s didn't qualify filter. Not updating service.", key, namespace)
 						return
@@ -737,17 +815,20 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 					}
 				}
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 				if oldKey != "" && key != oldKey {
 					c.workqueue[bkt].AddRateLimited(oldKey)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 					utils.AviLog.Debugf("key: %s, msg: UPDATE", oldKey)
 				}
 			}
 		},
 	}
 
-	c.informers.EpInformer.Informer().AddEventHandler(epEventHandler)
-
+	if lib.GetServiceType() != lib.NodePortLocal {
+		c.informers.EpInformer.Informer().AddEventHandler(epEventHandler)
+	}
 	c.informers.ServiceInformer.Informer().AddEventHandler(svcEventHandler)
 
 	if lib.GetCNIPlugin() == lib.CALICO_CNI {
@@ -766,6 +847,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				key := utils.NodeObj + "/" + specJSON["node"]
 				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 			DeleteFunc: func(obj interface{}) {
 				utils.AviLog.Debugf("calico blockaffinity DELETE Event")
@@ -781,6 +863,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				key := utils.NodeObj + "/" + specJSON["node"]
 				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 		}
 
@@ -804,6 +887,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				key := utils.NodeObj + "/" + host
 				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 			DeleteFunc: func(obj interface{}) {
 				utils.AviLog.Debugf("hostsubnets DELETE Event")
@@ -819,48 +903,85 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				key := utils.NodeObj + "/" + host
 				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 		}
 
 		c.dynamicInformers.HostSubnetInformer.Informer().AddEventHandler(hostSubnetHandler)
 	}
 
+	if lib.GetCNIPlugin() == lib.CILIUM_CNI {
+		ciliumNodeHandler := cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				utils.AviLog.Debugf("ciliumnode ADD Event")
+				if c.DisableSync {
+					return
+				}
+				crd := obj.(*unstructured.Unstructured)
+				nodename := crd.GetName()
+				key := utils.NodeObj + "/" + nodename
+				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
+				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+			},
+			UpdateFunc: func(oldObj interface{}, newObj interface{}) {
+				utils.AviLog.Debugf("ciliumnode UPDATE Event")
+				if c.DisableSync {
+					return
+				}
+				crd := newObj.(*unstructured.Unstructured)
+				nodename := crd.GetName()
+				key := utils.NodeObj + "/" + nodename
+				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
+				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+			},
+			DeleteFunc: func(obj interface{}) {
+				utils.AviLog.Debugf("ciliumnode DELETE Event")
+				if c.DisableSync {
+					return
+				}
+				crd := obj.(*unstructured.Unstructured)
+				nodename := crd.GetName()
+				key := utils.NodeObj + "/" + nodename
+				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
+				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+			},
+		}
+
+		c.dynamicInformers.CiliumNodeInformer.Informer().AddEventHandler(ciliumNodeHandler)
+	}
+
 	secretEventHandler := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			if lib.IsIstioEnabled() {
-				secret := obj.(*corev1.Secret)
-				if secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.IstioSecret {
-					key := utils.Secret + "/" + utils.GetAKONamespace() + "/" + lib.IstioSecret
-					bkt := utils.Bkt(utils.GetAKONamespace(), numWorkers)
-					c.workqueue[bkt].AddRateLimited(key)
-					utils.AviLog.Debugf("key: %s, msg: ADD", key)
-				}
-			}
 			if c.DisableSync {
 				return
 			}
 			secret := obj.(*corev1.Secret)
 			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(secret))
 			key := "Secret" + "/" + utils.ObjKey(secret)
+			if lib.IsIstioEnabled() && secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.IstioSecret {
+				key = utils.Secret + "/" + utils.GetAKONamespace() + "/" + lib.IstioSecret
+				utils.AviLog.Infof("key: %s, msg: Istio Secret ADD", key)
+			}
 			if lib.IsNamespaceBlocked(namespace) {
 				utils.AviLog.Debugf("key: %s, msg: secret add event. namespace: %s didn't qualify filter", key, namespace)
 				return
 			}
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 		},
 		DeleteFunc: func(obj interface{}) {
-			if lib.IsIstioEnabled() {
-				secret := obj.(*corev1.Secret)
-				if secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.IstioSecret {
-					utils.AviLog.Warnf("Istio secret deleted")
-				}
-			}
 			if c.DisableSync {
 				return
 			}
 			secret, ok := obj.(*corev1.Secret)
+			if lib.IsIstioEnabled() && secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.IstioSecret {
+				utils.AviLog.Warnf("Istio secret deleted")
+			}
 			if !ok {
 				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 				if !ok {
@@ -882,19 +1003,11 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				}
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				utils.AviLog.Debugf("key: %s, msg: DELETE", key)
 			}
 		},
 		UpdateFunc: func(old, cur interface{}) {
-			if lib.IsIstioEnabled() {
-				secret := cur.(*corev1.Secret)
-				if secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.IstioSecret {
-					key := utils.Secret + "/" + utils.GetAKONamespace() + "/" + lib.IstioSecret
-					bkt := utils.Bkt(utils.GetAKONamespace(), numWorkers)
-					c.workqueue[bkt].AddRateLimited(key)
-					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
-				}
-			}
 			if c.DisableSync {
 				return
 			}
@@ -905,12 +1018,17 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 					// Only add the key if the resource versions have changed.
 					namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(secret))
 					key := "Secret" + "/" + utils.ObjKey(secret)
+					if lib.IsIstioEnabled() && secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.IstioSecret {
+						key = utils.Secret + "/" + utils.GetAKONamespace() + "/" + lib.IstioSecret
+						utils.AviLog.Infof("key: %s, msg: Istio Secret UPDATE", key)
+					}
 					if lib.IsNamespaceBlocked(namespace) {
 						utils.AviLog.Debugf("key: %s, msg: secret update event. namespace: %s didn't qualify filter", key, namespace)
 						return
 					}
 					bkt := utils.Bkt(namespace, numWorkers)
 					c.workqueue[bkt].AddRateLimited(key)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 				}
 			}
@@ -921,10 +1039,18 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 		c.informers.SecretInformer.Informer().AddEventHandler(secretEventHandler)
 	}
 
+	// Add CRD handlers HostRule/HTTPRule/AviInfraSettings/SSORule
+	c.SetupAKOCRDEventHandlers(numWorkers)
+
+	if c.informers.NSInformer != nil {
+		nsEventHandler := AddNamespaceAnnotationEventHandler(numWorkers, c)
+		c.informers.NSInformer.Informer().AddEventHandler(nsEventHandler)
+	}
+
 	if lib.IsWCP() {
 		// servicesAPI handlers GW/GWClass
 		c.SetupAdvL4EventHandlers(numWorkers)
-		c.SetupNamespaceDeletionEventHandler(numWorkers)
+		c.SetupNamespaceEventHandler(numWorkers)
 		if lib.GetAdvancedL4() {
 			return
 		}
@@ -958,6 +1084,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			}
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -992,6 +1119,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			objects.SharedResourceVerInstanceLister().Delete(key)
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: DELETE", key)
 		},
 		UpdateFunc: func(old, cur interface{}) {
@@ -1009,6 +1137,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				}
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 			}
 		},
@@ -1035,6 +1164,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				return
 			}
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -1064,6 +1194,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			bkt := utils.Bkt(lib.GetTenant(), numWorkers)
 			objects.SharedResourceVerInstanceLister().Delete(key)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: DELETE", key)
 		},
 		UpdateFunc: func(old, cur interface{}) {
@@ -1082,6 +1213,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			if isNodeUpdated(oldobj, node) {
 				bkt := utils.Bkt(lib.GetTenant(), numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 			} else {
 				utils.AviLog.Debugf("key: %s, msg: node object did not change", key)
@@ -1109,6 +1241,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				}
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				utils.AviLog.Debugf("key: %s, msg: ADD", key)
 			},
 			DeleteFunc: func(obj interface{}) {
@@ -1133,6 +1266,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				bkt := utils.Bkt(namespace, numWorkers)
 				objects.SharedResourceVerInstanceLister().Delete(key)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				utils.AviLog.Debugf("key: %s, msg: DELETE", key)
 			},
 			UpdateFunc: func(old, cur interface{}) {
@@ -1147,6 +1281,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 					key := utils.IngressClass + "/" + utils.ObjKey(ingClass)
 					bkt := utils.Bkt(namespace, numWorkers)
 					c.workqueue[bkt].AddRateLimited(key)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 				}
 			},
@@ -1167,9 +1302,6 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 		routeEventHandler := AddRouteEventHandler(numWorkers, c)
 		c.informers.RouteInformer.Informer().AddEventHandler(routeEventHandler)
 	}
-
-	// Add CRD handlers HostRule/HTTPRule/AviInfraSettings/SSORule
-	c.SetupAKOCRDEventHandlers(numWorkers)
 
 	// Add MultiClusterIngress and ServiceImport CRD event handlers
 	if utils.IsMultiClusterIngressEnabled() {
@@ -1242,6 +1374,10 @@ func (c *AviController) Start(stopCh <-chan struct{}) {
 		go c.dynamicInformers.HostSubnetInformer.Informer().Run(stopCh)
 		informersList = append(informersList, c.dynamicInformers.HostSubnetInformer.Informer().HasSynced)
 	}
+	if lib.GetCNIPlugin() == lib.CILIUM_CNI {
+		go c.dynamicInformers.CiliumNodeInformer.Informer().Run(stopCh)
+		informersList = append(informersList, c.dynamicInformers.CiliumNodeInformer.Informer().HasSynced)
+	}
 
 	if utils.IsVCFCluster() {
 		if c.informers.IngressClassInformer != nil {
@@ -1253,6 +1389,8 @@ func (c *AviController) Start(stopCh <-chan struct{}) {
 			go c.informers.IngressInformer.Informer().Run(stopCh)
 			informersList = append(informersList, c.informers.IngressInformer.Informer().HasSynced)
 		}
+		go c.dynamicInformers.VCFNetworkInfoInformer.Informer().Run(stopCh)
+		informersList = append(informersList, c.dynamicInformers.VCFNetworkInfoInformer.Informer().HasSynced)
 	}
 
 	// Disable all informers if we are in advancedL4 mode. We expect to only provide L4 load balancing capability for this feature.
@@ -1261,6 +1399,8 @@ func (c *AviController) Start(stopCh <-chan struct{}) {
 		informersList = append(informersList, lib.AKOControlConfig().AdvL4Informers().GatewayClassInformer.Informer().HasSynced)
 		go lib.AKOControlConfig().AdvL4Informers().GatewayInformer.Informer().Run(stopCh)
 		informersList = append(informersList, lib.AKOControlConfig().AdvL4Informers().GatewayInformer.Informer().HasSynced)
+		go lib.AKOControlConfig().CRDInformers().AviInfraSettingInformer.Informer().Run(stopCh)
+		informersList = append(informersList, lib.AKOControlConfig().CRDInformers().AviInfraSettingInformer.Informer().HasSynced)
 	} else {
 		if lib.UseServicesAPI() {
 			go lib.AKOControlConfig().SvcAPIInformers().GatewayClassInformer.Informer().Run(stopCh)
@@ -1290,10 +1430,17 @@ func (c *AviController) Start(stopCh <-chan struct{}) {
 		if lib.AKOControlConfig().AviInfraSettingEnabled() {
 			go lib.AKOControlConfig().CRDInformers().AviInfraSettingInformer.Informer().Run(stopCh)
 			informersList = append(informersList, lib.AKOControlConfig().CRDInformers().AviInfraSettingInformer.Informer().HasSynced)
+
 		}
 
 		// separate wait steps to try getting hostrules synced first,
 		// since httprule has a key relation to hostrules.
+
+		if lib.AKOControlConfig().L7RuleEnabled() {
+			go lib.AKOControlConfig().CRDInformers().L7RuleInformer.Informer().Run(stopCh)
+			informersList = append(informersList, lib.AKOControlConfig().CRDInformers().L7RuleInformer.Informer().HasSynced)
+		}
+
 		if lib.AKOControlConfig().HostRuleEnabled() {
 			go lib.AKOControlConfig().CRDInformers().HostRuleInformer.Informer().Run(stopCh)
 			informersList = append(informersList, lib.AKOControlConfig().CRDInformers().HostRuleInformer.Informer().HasSynced)
@@ -1325,7 +1472,7 @@ func (c *AviController) Start(stopCh <-chan struct{}) {
 	if !cache.WaitForCacheSync(stopCh, informersList...) {
 		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 	} else {
-		utils.AviLog.Info("Caches synced")
+		utils.AviLog.Infof("Caches synced")
 	}
 }
 
@@ -1344,9 +1491,9 @@ func isServiceLBType(svcObj *corev1.Service) bool {
 func (c *AviController) Run(stopCh <-chan struct{}) error {
 	defer runtime.HandleCrash()
 
-	utils.AviLog.Info("Started the Kubernetes Controller")
+	utils.AviLog.Infof("Started the Kubernetes Controller")
 	<-stopCh
-	utils.AviLog.Info("Shutting down the Kubernetes Controller")
+	utils.AviLog.Infof("Shutting down the Kubernetes Controller")
 
 	return nil
 }

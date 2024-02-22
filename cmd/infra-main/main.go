@@ -52,7 +52,7 @@ func InitializeAKOInfra() {
 	if err != nil {
 		utils.AviLog.Warnf("We are not running inside kubernetes cluster. %s", err.Error())
 	} else {
-		utils.AviLog.Info("We are running inside kubernetes cluster. Won't use kubeconfig files.")
+		utils.AviLog.Infof("We are running inside kubernetes cluster. Won't use kubeconfig files.")
 		kubeCluster = true
 	}
 	if kubeCluster == false {
@@ -108,12 +108,13 @@ func InitializeAKOInfra() {
 		}
 	}
 
+	c.AddSecretEventHandler(stopCh)
 	a.SetupSEGroup(transportZone)
+	c.AddAvailabilityZoneCREventHandler(stopCh)
 	avirest.SyncLSLRNetwork()
 	a.AnnotateSystemNamespace(lib.GetClusterID(), utils.CloudName)
 	c.AddNetworkInfoEventHandler(stopCh)
 	c.AddNamespaceEventHandler(stopCh)
-	c.AddSecretEventHandler(stopCh)
 
 	worker := avirest.NewLRLSFullSyncWorker()
 	go worker.Run()

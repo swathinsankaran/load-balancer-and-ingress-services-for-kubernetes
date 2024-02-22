@@ -25,8 +25,8 @@ import (
 	avicache "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
-	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
 	akov1alpha2 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha2"
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
@@ -34,8 +34,10 @@ import (
 	"github.com/vmware/alb-sdk/go/models"
 	avimodels "github.com/vmware/alb-sdk/go/models"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
+	k8net "k8s.io/utils/net"
 )
 
 func (o *AviObjectGraph) ConstructAviL4VsNode(svcObj *corev1.Service, key string) *AviVsNode {
@@ -47,6 +49,7 @@ func (o *AviObjectGraph) ConstructAviL4VsNode(svcObj *corev1.Service, key string
 	}
 
 	if extDNS, ok := svcObj.Annotations[lib.ExternalDNSAnnotation]; ok && autoFQDN {
+		autoFQDN = false
 		fqdns = append(fqdns, extDNS)
 	}
 
@@ -69,15 +72,26 @@ func (o *AviObjectGraph) ConstructAviL4VsNode(svcObj *corev1.Service, key string
 		EnableRhi:          proto.Bool(lib.GetEnableRHI()),
 	}
 
+	infraSetting, err := getL4InfraSetting(key, svcObj.Namespace, svcObj, nil)
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Service %s", key, err.Error())
+			return nil
+		}
+	}
+
 	vrfcontext := lib.GetVrf()
-	t1lr := objects.SharedWCPLister().GetT1LrForNamespace(svcObj.Namespace)
+	t1lr := lib.GetT1LRPath()
+	if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
+		t1lr = *infraSetting.Spec.NSXSettings.T1LR
+	}
 	if t1lr != "" {
 		vrfcontext = ""
 	} else {
 		avi_vs_meta.VrfContext = vrfcontext
 	}
 	avi_vs_meta.AviMarkers = lib.PopulateL4VSNodeMarkers(svcObj.ObjectMeta.Namespace, svcObj.ObjectMeta.Name)
-	isTCP, isSCTP := false, false
+	isTCP, isSCTP, isUDP := false, false, false
 	var portProtocols []AviPortHostProtocol
 	for _, port := range svcObj.Spec.Ports {
 		pp := AviPortHostProtocol{Port: int32(port.Port), Protocol: fmt.Sprint(port.Protocol), Name: port.Name, TargetPort: port.TargetPort}
@@ -90,6 +104,8 @@ func (o *AviObjectGraph) ConstructAviL4VsNode(svcObj *corev1.Service, key string
 				return nil
 			}
 			isSCTP = true
+		} else if port.Protocol == utils.UDP {
+			isUDP = true
 		}
 	}
 	avi_vs_meta.PortProto = portProtocols
@@ -100,22 +116,8 @@ func (o *AviObjectGraph) ConstructAviL4VsNode(svcObj *corev1.Service, key string
 		// Default case
 		avi_vs_meta.ApplicationProfile = utils.DEFAULT_L4_APP_PROFILE
 	}
-	if !isTCP {
-		if isSCTP {
-			avi_vs_meta.NetworkProfile = utils.SYSTEM_SCTP_PROXY
-		} else {
-			avi_vs_meta.NetworkProfile = utils.SYSTEM_UDP_FAST_PATH
-		}
 
-	} else {
-		license := lib.AKOControlConfig().GetLicenseType()
-
-		if license == lib.LicenseTypeEnterprise {
-			avi_vs_meta.NetworkProfile = utils.DEFAULT_TCP_NW_PROFILE
-		} else {
-			avi_vs_meta.NetworkProfile = utils.TCP_NW_FAST_PATH
-		}
-	}
+	avi_vs_meta.NetworkProfile = getNetworkProfile(isSCTP, isTCP, isUDP)
 
 	vsVipName := lib.GetL4VSVipName(svcObj.ObjectMeta.Name, svcObj.ObjectMeta.Namespace)
 	vsVipNode := &AviVSVIPNode{
@@ -123,7 +125,7 @@ func (o *AviObjectGraph) ConstructAviL4VsNode(svcObj *corev1.Service, key string
 		Tenant:      lib.GetTenant(),
 		FQDNs:       fqdns,
 		VrfContext:  vrfcontext,
-		VipNetworks: lib.GetVipNetworkList(),
+		VipNetworks: utils.GetVipNetworkList(),
 	}
 	if t1lr != "" {
 		vsVipNode.T1Lr = t1lr
@@ -134,9 +136,7 @@ func (o *AviObjectGraph) ConstructAviL4VsNode(svcObj *corev1.Service, key string
 	}
 
 	// configures VS and VsVip nodes using infraSetting object (via CRD).
-	if infraSetting, err := getL4InfraSetting(key, svcObj, nil); err == nil {
-		buildWithInfraSetting(key, avi_vs_meta, vsVipNode, infraSetting)
-	}
+	buildWithInfraSetting(key, svcObj.Namespace, avi_vs_meta, vsVipNode, infraSetting)
 
 	// Copy the VS properties from L4Rule object
 	if l4Rule, err := getL4Rule(key, svcObj); err == nil {
@@ -159,15 +159,16 @@ func (o *AviObjectGraph) ConstructAviL4PolPoolNodes(svcObj *corev1.Service, vsNo
 	var l4Policies []*AviL4PolicyNode
 	var portPoolSet []AviHostPathPortPoolPG
 
-	infraSetting, err := getL4InfraSetting(key, svcObj, nil)
-	if err != nil {
-		utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
-		return
-	}
-
 	l4Rule, err := getL4Rule(key, svcObj)
 	if err != nil {
 		utils.AviLog.Warnf("key: %s, msg: Error while fetching L4Rule. Err: %s", key, err.Error())
+	}
+
+	isSSLEnabled := false
+	for _, aviSvc := range vsNode.Services {
+		if *aviSvc.EnableSsl {
+			isSSLEnabled = true
+		}
 	}
 
 	protocolSet := sets.NewString()
@@ -189,8 +190,19 @@ func (o *AviObjectGraph) ConstructAviL4PolPoolNodes(svcObj *corev1.Service, vsNo
 			poolNode.UpdatePoolNodeForIstio()
 		}
 		protocolSet.Insert(portProto.Protocol)
-		poolNode.NetworkPlacementSettings, _ = lib.GetNodeNetworkMap()
-		t1lr := objects.SharedWCPLister().GetT1LrForNamespace(svcObj.Namespace)
+		poolNode.NetworkPlacementSettings = lib.GetNodeNetworkMap()
+
+		infraSetting, err := getL4InfraSetting(key, svcObj.Namespace, svcObj, nil)
+		if err != nil {
+			if !k8serrors.IsNotFound(err) {
+				utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Service %s", key, err.Error())
+				return
+			}
+		}
+		t1lr := lib.GetT1LRPath()
+		if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
+			t1lr = *infraSetting.Spec.NSXSettings.T1LR
+		}
 		if t1lr != "" {
 			poolNode.T1Lr = t1lr
 			// Unset the poolnode's vrfcontext.
@@ -228,23 +240,29 @@ func (o *AviObjectGraph) ConstructAviL4PolPoolNodes(svcObj *corev1.Service, vsNo
 
 		buildPoolWithInfraSetting(key, poolNode, infraSetting)
 
+		if isSSLEnabled {
+			vsNode.DefaultPool = poolNode.Name
+		}
 		vsNode.PoolRefs = append(vsNode.PoolRefs, poolNode)
 		utils.AviLog.Infof("key: %s, msg: evaluated L4 pool values :%v", key, utils.Stringify(poolNode))
 	}
 
-	l4policyNode := &AviL4PolicyNode{Name: vsNode.Name, Tenant: lib.GetTenant(), PortPool: portPoolSet}
-	sort.Strings(protocolSet.List())
-	protocols := strings.Join(protocolSet.List(), ",")
-	l4policyNode.AviMarkers = lib.PopulateL4PolicysetMarkers(svcObj.ObjectMeta.Namespace, svcObj.ObjectMeta.Name, protocols)
-	l4Policies = append(l4Policies, l4policyNode)
-	vsNode.L4PolicyRefs = l4Policies
+	if !isSSLEnabled {
+		l4policyNode := &AviL4PolicyNode{Name: vsNode.Name, Tenant: lib.GetTenant(), PortPool: portPoolSet}
+		sort.Strings(protocolSet.List())
+		protocols := strings.Join(protocolSet.List(), ",")
+		l4policyNode.AviMarkers = lib.PopulateL4PolicysetMarkers(svcObj.ObjectMeta.Namespace, svcObj.ObjectMeta.Name, protocols)
+		l4Policies = append(l4Policies, l4policyNode)
+		vsNode.L4PolicyRefs = l4Policies
+	}
 	//As pool naming covention changed for L4 pools marking flag, so that cksum will be changed
 	vsNode.IsL4VS = true
-	utils.AviLog.Infof("key: %s, msg: evaluated L4 pool policies :%v", key, utils.Stringify(vsNode.L4PolicyRefs))
+	if len(vsNode.L4PolicyRefs) != 0 {
+		utils.AviLog.Infof("key: %s, msg: evaluated L4 pool policies :%v", key, utils.Stringify(vsNode.L4PolicyRefs))
+	}
 }
 
 func PopulateServersForNPL(poolNode *AviPoolNode, ns string, serviceName string, ingress bool, key string) []AviPoolMetaServer {
-	ipFamily := lib.GetIPFamily()
 	if ingress {
 		found, _ := objects.SharedClusterIpLister().Get(ns + "/" + serviceName)
 		if !found {
@@ -257,7 +275,22 @@ func PopulateServersForNPL(poolNode *AviPoolNode, ns string, serviceName string,
 		utils.AviLog.Infof("key: %s, msg: got no Pod for Service %s", key, serviceName)
 		return make([]AviPoolMetaServer, 0)
 	}
-
+	ipFamily := lib.GetIPFamily()
+	v4enabled := ipFamily == "V4" || ipFamily == "V4_V6"
+	v6enabled := ipFamily == "V6" || ipFamily == "V4_V6"
+	v4Family := false
+	v6Family := false
+	svcObj, _ := utils.GetInformers().ServiceInformer.Lister().Services(ns).Get(serviceName)
+	if len(svcObj.Spec.IPFamilies) == 2 {
+		v4Family = true
+		v6Family = true
+	} else if svcObj.Spec.IPFamilies[0] == "IPv6" {
+		v6Family = true
+	} else {
+		v4Family = true
+	}
+	v4ServerCount := 0
+	v6ServerCount := 0
 	var poolMeta []AviPoolMetaServer
 
 	for _, pod := range pods {
@@ -269,18 +302,14 @@ func PopulateServersForNPL(poolNode *AviPoolNode, ns string, serviceName string,
 		annotations = obj.([]lib.NPLAnnotation)
 		for _, a := range annotations {
 			var atype string
-			if utils.IsV4(a.NodeIP) {
-				if ipFamily != "V4" {
-					utils.AviLog.Infof("Skipping server %s, ipFamily is %s", a.NodeIP, ipFamily)
-					continue
-				}
+			if v4enabled && v4Family && utils.IsV4(a.NodeIP) {
+				v4ServerCount++
 				atype = "V4"
-			} else {
-				if ipFamily != "V6" {
-					utils.AviLog.Infof("Skipping server %s, ipFamily is %s", a.NodeIP, ipFamily)
-					continue
-				}
+			} else if v6enabled && v6Family && k8net.IsIPv6String(a.NodeIP) {
+				v6ServerCount++
 				atype = "V6"
+			} else {
+				continue
 			}
 			if (poolNode.TargetPort.Type == intstr.Int && a.PodPort == poolNode.TargetPort.IntValue()) ||
 				a.PodPort == int(targetPort) {
@@ -294,13 +323,30 @@ func PopulateServersForNPL(poolNode *AviPoolNode, ns string, serviceName string,
 			}
 		}
 	}
-	utils.AviLog.Infof("key: %s, msg: servers for port: %v (%v), are: %v", key, poolNode.Port, poolNode.PortName, utils.Stringify(poolMeta))
+	if len(poolMeta) == 0 {
+		utils.AviLog.Warnf("key: %s, msg: no servers for port: %v (%v)", key, poolNode.Port, poolNode.PortName)
+	} else {
+		if v4Family && v4ServerCount == 0 {
+			utils.AviLog.Warnf("key: %s, msg: expected IPv4 servers but found none for port %v (%v)", key, poolNode.Port, poolNode.PortName)
+		}
+		if v6Family && v6ServerCount == 0 {
+			utils.AviLog.Warnf("key: %s, msg: expected IPv6 servers but found none for port %v (%v)", key, poolNode.Port, poolNode.PortName)
+		}
+		utils.AviLog.Infof("key: %s, msg: servers for port: %v (%v), are: %v", key, poolNode.Port, poolNode.PortName, utils.Stringify(poolMeta))
+	}
+
 	return poolMeta
 }
 
 func PopulateServersForNodePort(poolNode *AviPoolNode, ns string, serviceName string, ingress bool, key string) []AviPoolMetaServer {
 
 	ipFamily := lib.GetIPFamily()
+	v4enabled := ipFamily == "V4" || ipFamily == "V4_V6"
+	v6enabled := ipFamily == "V6" || ipFamily == "V4_V6"
+	v4Family := false
+	v6Family := false
+	v4ServerCount := 0
+	v6ServerCount := 0
 	// Get all nodes which match nodePortSelector
 	nodePortSelector := lib.GetNodePortsSelector()
 	nodePortFilter := map[string]string{}
@@ -316,6 +362,14 @@ func PopulateServersForNodePort(poolNode *AviPoolNode, ns string, serviceName st
 	if err != nil {
 		utils.AviLog.Warnf("key: %s, msg: error in obtaining the object for service: %s", key, serviceName)
 		return poolMeta
+	}
+	if len(svcObj.Spec.IPFamilies) == 2 {
+		v4Family = true
+		v6Family = true
+	} else if svcObj.Spec.IPFamilies[0] == "IPv6" {
+		v6Family = true
+	} else {
+		v4Family = true
 	}
 	// Populate pool servers
 	if lib.IsServiceClusterIPType(svcObj) {
@@ -333,7 +387,7 @@ func PopulateServersForNodePort(poolNode *AviPoolNode, ns string, serviceName st
 			node, ok := nodeIntf.(*corev1.Node)
 			if !ok {
 				utils.AviLog.Warnf("key: %s,msg: error in fetching node from node cache", key)
-				return nil
+				continue
 			}
 			if nodePortFilter != nil {
 				// skip the node if node does not have node port selector labels
@@ -349,22 +403,16 @@ func PopulateServersForNodePort(poolNode *AviPoolNode, ns string, serviceName st
 			nodeIP, nodeIP6 := lib.GetIPFromNode(node)
 			var atype string
 			var serverIP avimodels.IPAddr
-			if ipFamily == "V4" {
-				if nodeIP == "" {
-					utils.AviLog.Warnf("key: %s,msg: NodeIP not found for node: %s", key, node.Name)
-					return nil
-				} else {
-					atype = "V4"
-					serverIP = avimodels.IPAddr{Type: &atype, Addr: &nodeIP}
-				}
+			if v4enabled && v4Family && nodeIP != "" {
+				v4ServerCount++
+				atype = "V4"
+				serverIP = avimodels.IPAddr{Type: &atype, Addr: &nodeIP}
+			} else if v6enabled && v6Family && nodeIP6 != "" {
+				v6ServerCount++
+				atype = "V6"
+				serverIP = avimodels.IPAddr{Type: &atype, Addr: &nodeIP6}
 			} else {
-				if nodeIP6 == "" {
-					utils.AviLog.Warnf("key: %s,msg: NodeIP6 not found for node: %s", key, node.Name)
-					return nil
-				} else {
-					atype = "V6"
-					serverIP = avimodels.IPAddr{Type: &atype, Addr: &nodeIP6}
-				}
+				continue
 			}
 
 			server := AviPoolMetaServer{Ip: serverIP}
@@ -372,12 +420,23 @@ func PopulateServersForNodePort(poolNode *AviPoolNode, ns string, serviceName st
 		}
 	}
 
+	if len(poolMeta) == 0 {
+		utils.AviLog.Warnf("key: %s, msg: no servers for port: %v (%v)", key, poolNode.Port, poolNode.PortName)
+	} else {
+		if v4Family && v4ServerCount == 0 {
+			utils.AviLog.Warnf("key: %s, msg: expected IPv4 servers but found none for port %v (%v)", key, poolNode.Port, poolNode.PortName)
+		}
+		if v6Family && v6ServerCount == 0 {
+			utils.AviLog.Warnf("key: %s, msg: expected IPv6 servers but found none for port %v (%v)", key, poolNode.Port, poolNode.PortName)
+		}
+		utils.AviLog.Infof("key: %s, msg: servers for port: %v (%v), are: %v", key, poolNode.Port, poolNode.PortName, utils.Stringify(poolMeta))
+	}
+
 	return poolMeta
 }
 
 func PopulateServers(poolNode *AviPoolNode, ns string, serviceName string, ingress bool, key string) []AviPoolMetaServer {
 
-	ipFamily := lib.GetIPFamily()
 	// Find the servers that match the port.
 	if ingress {
 		// If it's an ingress case, check if the service of type clusterIP or not.
@@ -386,6 +445,26 @@ func PopulateServers(poolNode *AviPoolNode, ns string, serviceName string, ingre
 			utils.AviLog.Warnf("key: %s, msg: service pointed by the ingress object is not found in ClusterIP store", key)
 			return nil
 		}
+	}
+	svcObj, err := utils.GetInformers().ServiceInformer.Lister().Services(ns).Get(serviceName)
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: error while retrieving service: %s", key, err)
+		return nil
+	}
+	ipFamily := lib.GetIPFamily()
+	v4enabled := ipFamily == "V4" || ipFamily == "V4_V6"
+	v6enabled := ipFamily == "V6" || ipFamily == "V4_V6"
+	v4Family := false
+	v6Family := false
+	v4ServerCount := 0
+	v6ServerCount := 0
+	if len(svcObj.Spec.IPFamilies) == 2 {
+		v4Family = true
+		v6Family = true
+	} else if svcObj.Spec.IPFamilies[0] == "IPv6" {
+		v6Family = true
+	} else {
+		v4Family = true
 	}
 	epObj, err := utils.GetInformers().EpInformer.Lister().Endpoints(ns).Get(serviceName)
 	if err != nil {
@@ -411,20 +490,15 @@ func PopulateServers(poolNode *AviPoolNode, ns string, serviceName string, ingre
 			var atype string
 			utils.AviLog.Infof("key: %s, msg: found port match for port %v", key, poolNode.Port)
 			for _, addr := range ss.Addresses {
-
 				ip := addr.IP
-				if utils.IsV4(addr.IP) {
-					if ipFamily != "V4" {
-						utils.AviLog.Infof("Skipping server %s, ipFamily is %s", addr.IP, ipFamily)
-						continue
-					}
+				if v4enabled && v4Family && utils.IsV4(addr.IP) {
+					v4ServerCount++
 					atype = "V4"
-				} else {
-					if ipFamily != "V6" {
-						utils.AviLog.Infof("Skipping server %s, ipFamily is %s", addr.IP, ipFamily)
-						continue
-					}
+				} else if v6enabled && v6Family && k8net.IsIPv6String(addr.IP) {
+					v6ServerCount++
 					atype = "V6"
+				} else {
+					continue
 				}
 				a := avimodels.IPAddr{Type: &atype, Addr: &ip}
 				server := AviPoolMetaServer{Ip: a}
@@ -435,13 +509,22 @@ func PopulateServers(poolNode *AviPoolNode, ns string, serviceName string, ingre
 			}
 		}
 	}
-	utils.AviLog.Infof("key: %s, msg: servers for port: %v, are: %v", key, poolNode.Port, utils.Stringify(pool_meta))
+	if len(pool_meta) == 0 {
+		utils.AviLog.Warnf("key: %s, msg: no servers for port: %v", key, poolNode.Port)
+	} else {
+		if v4Family && v4ServerCount == 0 {
+			utils.AviLog.Warnf("key: %s, msg: expected IPv4 servers but found none for port %v", key, poolNode.Port)
+		}
+		if v6Family && v6ServerCount == 0 {
+			utils.AviLog.Warnf("key: %s, msg: expected IPv6 servers but found none for port %v", key, poolNode.Port)
+		}
+		utils.AviLog.Infof("key: %s, msg: servers for port: %v , are: %v", key, poolNode.Port, utils.Stringify(pool_meta))
+	}
 	return pool_meta
 }
 
 func PopulateServersForMultiClusterIngress(poolNode *AviPoolNode, ns, cluster, serviceNamespace, serviceName string, key string) []AviPoolMetaServer {
 
-	ipFamily := lib.GetIPFamily()
 	var servers []AviPoolMetaServer
 	svcName := generateMultiClusterKey(cluster, serviceNamespace, serviceName)
 	success, siNames := objects.SharedMultiClusterIngressSvcLister().MultiClusterIngressMappings(ns).GetSvcToSI(svcName)
@@ -461,17 +544,7 @@ func PopulateServersForMultiClusterIngress(poolNode *AviPoolNode, ns, cluster, s
 				addr := ep.IP
 				var addrType string
 				if utils.IsV4(addr) {
-					if ipFamily != "V4" {
-						utils.AviLog.Infof("Skipping server %s, ipFamily is %s", addr, ipFamily)
-						continue
-					}
 					addrType = "V4"
-				} else {
-					if ipFamily != "V6" {
-						utils.AviLog.Infof("Skipping server %s, ipFamily is %s", addr, ipFamily)
-						continue
-					}
-					addrType = "V6"
 				}
 				Ip := avimodels.IPAddr{
 					Addr: &addr,
@@ -537,6 +610,10 @@ func getAutoFQDNForService(svcNamespace, svcName string) string {
 		fqdn = svcName + "." + svcNamespace + "." + subdomain
 
 	} else if lib.GetL4FqdnFormat() == lib.AutoFQDNFlat {
+
+		// check and shorten the length of name and namespace to follow RFC 1035.
+		svcName, svcNamespace := lib.CheckAndShortenLabelToFollowRFC1035(svcName, svcNamespace)
+
 		// Generate the FQDN based on the logic: <svc_name>-<namespace>.<sub-domain>
 		fqdn = svcName + "-" + svcNamespace + "." + subdomain
 	}
@@ -565,38 +642,44 @@ func GetDefaultSubDomain() []string {
 	return cloudProperty.NSIpamDNS
 }
 
-func getL4InfraSetting(key string, svc *corev1.Service, advl4GWClassName *string) (*akov1alpha1.AviInfraSetting, error) {
+func getL4InfraSetting(key, namespace string, svc *corev1.Service, advl4GWClassName *string) (*akov1beta1.AviInfraSetting, error) {
 	var err error
-	var infraSetting *akov1alpha1.AviInfraSetting
+	var infraSetting *akov1beta1.AviInfraSetting
 
 	if lib.UseServicesAPI() && advl4GWClassName != nil {
 		gwClass, err := lib.AKOControlConfig().SvcAPIInformers().GatewayClassInformer.Lister().Get(*advl4GWClassName)
 		if err != nil {
 			utils.AviLog.Warnf("key: %s, msg: Unable to get corresponding GatewayClass %s", key, err.Error())
 			return nil, err
-		} else {
-			if gwClass.Spec.ParametersRef != nil && gwClass.Spec.ParametersRef.Group == lib.AkoGroup && gwClass.Spec.ParametersRef.Kind == lib.AviInfraSetting {
-				infraSetting, err = lib.AKOControlConfig().CRDInformers().AviInfraSettingInformer.Lister().Get(gwClass.Spec.ParametersRef.Name)
-				if err != nil {
-					utils.AviLog.Warnf("key: %s, msg: Unable to get corresponding AviInfraSetting via GatewayClass %s", key, err.Error())
-					return nil, err
-				}
+		}
+		if gwClass.Spec.ParametersRef != nil && gwClass.Spec.ParametersRef.Group == lib.AkoGroup && gwClass.Spec.ParametersRef.Kind == lib.AviInfraSetting {
+			infraSetting, err = lib.AKOControlConfig().CRDInformers().AviInfraSettingInformer.Lister().Get(gwClass.Spec.ParametersRef.Name)
+			if err != nil {
+				utils.AviLog.Warnf("key: %s, msg: Unable to get corresponding AviInfraSetting via GatewayClass %s", key, err.Error())
+				return nil, err
+			}
+
+		}
+	} else if svc != nil {
+		if infraSettingAnnotation, ok := svc.GetAnnotations()[lib.InfraSettingNameAnnotation]; ok && infraSettingAnnotation != "" {
+			infraSetting, err = lib.AKOControlConfig().CRDInformers().AviInfraSettingInformer.Lister().Get(infraSettingAnnotation)
+			if err != nil {
+				utils.AviLog.Warnf("key: %s, msg: Unable to get corresponding AviInfraSetting via annotation %s", key, err.Error())
+				return nil, err
 			}
 		}
-	} else if infraSettingAnnotation, ok := svc.GetAnnotations()[lib.InfraSettingNameAnnotation]; ok && infraSettingAnnotation != "" {
-		infraSetting, err = lib.AKOControlConfig().CRDInformers().AviInfraSettingInformer.Lister().Get(infraSettingAnnotation)
-		if err != nil {
-			utils.AviLog.Warnf("key: %s, msg: Unable to get corresponding AviInfraSetting via annotation %s", key, err.Error())
-			return nil, err
+	}
+
+	if infraSetting != nil {
+		if infraSetting.Status.Status != lib.StatusAccepted {
+			utils.AviLog.Warnf("key: %s, msg: Referred AviInfraSetting %s is invalid", key, infraSetting.Name)
+			return nil, fmt.Errorf("referred AviInfraSetting %s is invalid", infraSetting.Name)
 		}
+		return infraSetting, nil
 	}
 
-	if infraSetting != nil && infraSetting.Status.Status != lib.StatusAccepted {
-		utils.AviLog.Warnf("key: %s, msg: Referred AviInfraSetting %s is invalid", key, infraSetting.Name)
-		return nil, fmt.Errorf("Referred AviInfraSetting %s is invalid", infraSetting.Name)
-	}
-
-	return infraSetting, nil
+	//return namespace InfraSetting if global infraSetting is not present
+	return getNamespaceAviInfraSetting(key, namespace)
 }
 
 func getL4Rule(key string, svc *corev1.Service) (*akov1alpha2.L4Rule, error) {
@@ -608,8 +691,13 @@ func getL4Rule(key string, svc *corev1.Service) (*akov1alpha2.L4Rule, error) {
 		// Annotation not present. Return error as nil in that case.
 		return nil, nil
 	}
+	// fetch namespace and name from l4 annotation
+	namespace, _, name := lib.ExtractTypeNameNamespace(l4RuleName)
 
-	l4Rule, err = lib.AKOControlConfig().CRDInformers().L4RuleInformer.Lister().L4Rules(svc.GetNamespace()).Get(l4RuleName)
+	if namespace == "" {
+		namespace = svc.GetNamespace()
+	}
+	l4Rule, err = lib.AKOControlConfig().CRDInformers().L4RuleInformer.Lister().L4Rules(namespace).Get(name)
 	if err != nil {
 		utils.AviLog.Warnf("key: %s, msg: Unable to get corresponding L4Rule via annotation. Err: %s", key, err.Error())
 		return nil, err
@@ -617,6 +705,33 @@ func getL4Rule(key string, svc *corev1.Service) (*akov1alpha2.L4Rule, error) {
 
 	if l4Rule != nil && l4Rule.Status.Status != lib.StatusAccepted {
 		return nil, fmt.Errorf("referred L4Rule %s is invalid", l4Rule.Name)
+	}
+	svcPortsLen := len(svc.Spec.Ports)
+	listenerPortProtoMap := make(map[string]bool)
+	if len(l4Rule.Spec.Services) != 0 {
+		if len(l4Rule.Spec.Services) != svcPortsLen {
+			err := fmt.Errorf("Number of port definitions in %s l4rule listener spec does not match with the port definitons in %s service", l4RuleName, svc.Name)
+			utils.AviLog.Warnf("key: %s, msg: %s", key, err.Error())
+			return nil, err
+		}
+		for _, l4Svc := range l4Rule.Spec.Services {
+			if *l4Svc.EnableSsl && svcPortsLen > 1 {
+				err := fmt.Errorf("Port %d requires enabling SSL for L4 but there are multiple ports defined in %s service definition", int(*l4Svc.Port), svc.Name)
+				utils.AviLog.Warnf("key: %s, msg: %s", key, err.Error())
+				return nil, err
+			}
+			key := strconv.Itoa(int(*l4Svc.Port)) + *l4Svc.Protocol
+			listenerPortProtoMap[key] = *l4Svc.EnableSsl
+		}
+
+		for _, port := range svc.Spec.Ports {
+			portProtocol := strconv.Itoa(int(port.Port)) + fmt.Sprint(port.Protocol)
+			if _, ok := listenerPortProtoMap[portProtocol]; !ok {
+				err := fmt.Errorf("Port %d defined in %s service definition is not present in %s l4rule listener spec", int(port.Port), svc.Name, l4RuleName)
+				utils.AviLog.Warnf("key: %s, msg: %s", key, err.Error())
+				return nil, err
+			}
+		}
 	}
 
 	utils.AviLog.Debugf("key: %s, Got L4Rule %v", key, l4Rule)
@@ -628,9 +743,21 @@ func buildWithL4Rule(key string, vs *AviVsNode, l4Rule *akov1alpha2.L4Rule) {
 	if l4Rule == nil {
 		return
 	}
-
+	isSSLEnabled := false
+	for _, svc := range l4Rule.Spec.Services {
+		if *svc.EnableSsl {
+			isSSLEnabled = true
+		}
+	}
+	if isSSLEnabled && vs.NetworkProfile != utils.DEFAULT_TCP_NW_PROFILE {
+		utils.AviLog.Warnf("key: %s, msg: L4Rule %s cannot be applied to the service as network profile is not equal to %s", key, l4Rule.Name, utils.DEFAULT_TCP_NW_PROFILE)
+		return
+	}
 	copier.Copy(vs, &l4Rule.Spec)
-
+	if isSSLEnabled && *l4Rule.Spec.ApplicationProfileRef == utils.DEFAULT_L4_APP_PROFILE {
+		defaultAppProfile := utils.DEFAULT_L4_SSL_APP_PROFILE
+		vs.ApplicationProfileRef = &defaultAppProfile
+	}
 	vs.AviVsNodeCommonFields.ConvertToRef()
 	vs.AviVsNodeGeneratedFields.ConvertToRef()
 
@@ -661,4 +788,26 @@ func buildPoolWithL4Rule(key string, pool *AviPoolNode, l4Rule *akov1alpha2.L4Ru
 	pool.AviPoolGeneratedFields.ConvertToRef()
 
 	utils.AviLog.Debugf("key: %s, msg: Applied L4Rule %s configuration over Pool %s", key, l4Rule.Name, pool.Name)
+}
+
+// In case the VS has services that are a mix of TCP and UDP/SCTP sockets,
+// we create the VS with global network profile TCP Proxy or Fast Path based on license,
+// and override required services with UDP Fast Path or SCTP proxy. Having a separate
+// internally used network profile (MIXED_NET_PROFILE) helps ensure PUT calls
+// on existing VSes.
+func getNetworkProfile(isSCTP, isTCP, isUDP bool) string {
+	if isSCTP && !isTCP && !isUDP {
+		return utils.SYSTEM_SCTP_PROXY
+	}
+	if isTCP && !isUDP && !isSCTP {
+		license := lib.AKOControlConfig().GetLicenseType()
+		if license == lib.LicenseTypeEnterprise {
+			return utils.DEFAULT_TCP_NW_PROFILE
+		}
+		return utils.TCP_NW_FAST_PATH
+	}
+	if isUDP && !isTCP && !isSCTP {
+		return utils.SYSTEM_UDP_FAST_PATH
+	}
+	return utils.MIXED_NET_PROFILE
 }

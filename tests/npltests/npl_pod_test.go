@@ -28,6 +28,8 @@ import (
 	avinodes "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
 	crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned/fake"
+	v1beta1crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/clientset/versioned/fake"
+
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/tests/integrationtest"
 
 	utils "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
@@ -42,6 +44,7 @@ import (
 
 var KubeClient *k8sfake.Clientset
 var CRDClient *crdfake.Clientset
+var V1beta1CRDClient *v1beta1crdfake.Clientset
 var ctrl *k8s.AviController
 
 const (
@@ -89,7 +92,7 @@ func setUpTestForSvcLB(t *testing.T) {
 	objects.SharedAviGraphLister().Delete(integrationtest.SINGLEPORTMODEL)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	svcExample := integrationtest.ConstructService(defaultNS, integrationtest.SINGLEPORTSVC, corev1.ServiceTypeLoadBalancer, false, selectors)
+	svcExample := integrationtest.ConstructService(defaultNS, integrationtest.SINGLEPORTSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, selectors, "")
 	svcExample.Annotations = make(map[string]string)
 	svcExample.Annotations[lib.NPLSvcAnnotation] = "true"
 	_, err := KubeClient.CoreV1().Services(defaultNS).Create(context.TODO(), svcExample, metav1.CreateOptions{})
@@ -169,12 +172,16 @@ func TestMain(m *testing.M) {
 	os.Setenv("CNI_PLUGIN", "antrea")
 	os.Setenv("POD_NAMESPACE", utils.AKO_DEFAULT_NS)
 	os.Setenv("SHARD_VS_SIZE", "LARGE")
+	os.Setenv("POD_NAME", "ako-0")
 
 	akoControlConfig := lib.AKOControlConfig()
 	KubeClient = k8sfake.NewSimpleClientset()
 	CRDClient = crdfake.NewSimpleClientset()
+	V1beta1CRDClient = v1beta1crdfake.NewSimpleClientset()
 	akoControlConfig.SetCRDClientset(CRDClient)
+	akoControlConfig.Setv1beta1CRDClientset(V1beta1CRDClient)
 	akoControlConfig.SetEventRecorder(lib.AKOEventComponent, KubeClient, true)
+	akoControlConfig.SetDefaultLBController(true)
 	akoControlConfig.SetAKOInstanceFlag(true)
 	data := map[string][]byte{
 		"username": []byte("admin"),
@@ -197,7 +204,7 @@ func TestMain(m *testing.M) {
 	}
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: KubeClient}, registeredInformers)
 	informers := k8s.K8sinformers{Cs: KubeClient}
-	k8s.NewCRDInformers(CRDClient)
+	k8s.NewCRDInformers()
 
 	mcache := cache.SharedAviObjCache()
 	cloudObj := &cache.AviCloudPropertyCache{Name: "Default-Cloud", VType: "mock"}
@@ -235,6 +242,7 @@ func TestMain(m *testing.M) {
 	ctrl.HandleConfigMap(informers, ctrlCh, stopCh, quickSyncCh)
 	integrationtest.KubeClient = KubeClient
 	integrationtest.AddDefaultIngressClass()
+	integrationtest.AddDefaultNamespace()
 
 	go ctrl.InitController(informers, registeredInformers, ctrlCh, stopCh, quickSyncCh, waitGroupMap)
 	os.Exit(m.Run())
@@ -247,7 +255,7 @@ func TestIngressAddPod(t *testing.T) {
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	integrationtest.PollForCompletion(t, defaultL7Model, 10)
@@ -304,7 +312,7 @@ func TestIngressDelPod(t *testing.T) {
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	integrationtest.PollForCompletion(t, defaultL7Model, 10)
@@ -370,7 +378,7 @@ func TestIngressAddPodWithoutLabel(t *testing.T) {
 
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	integrationtest.PollForCompletion(t, defaultL7Model, 10)
@@ -419,7 +427,7 @@ func TestIngressUpdatePodWithLabel(t *testing.T) {
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	labels := make(map[string]string)
 	createPodWithNPLAnnotation(labels)
 
@@ -482,7 +490,7 @@ func TestIngressUpdatePodWithoutLabel(t *testing.T) {
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	integrationtest.PollForCompletion(t, defaultL7Model, 5)
@@ -547,7 +555,7 @@ func TestIngressDelSvc(t *testing.T) {
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	integrationtest.PollForCompletion(t, defaultL7Model, 10)
@@ -729,7 +737,7 @@ func TestNPLLBSvcNoLabel(t *testing.T) {
 
 	objects.SharedAviGraphLister().Delete(integrationtest.SINGLEPORTMODEL)
 	selectors := make(map[string]string)
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, integrationtest.SINGLEPORTSVC, corev1.ServiceTypeLoadBalancer, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, integrationtest.SINGLEPORTSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, selectors)
 	integrationtest.PollForCompletion(t, defaultLBModel, 5)
 
 	g.Eventually(func() bool {
@@ -765,11 +773,11 @@ func TestNPLUpdateLBSvcCorrectSelector(t *testing.T) {
 
 	objects.SharedAviGraphLister().Delete(integrationtest.SINGLEPORTMODEL)
 	selectors := make(map[string]string)
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, integrationtest.SINGLEPORTSVC, corev1.ServiceTypeLoadBalancer, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, integrationtest.SINGLEPORTSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, selectors)
 	integrationtest.PollForCompletion(t, defaultLBModel, 10)
 
 	selectors["app"] = "npl"
-	integrationtest.UpdateServiceWithSelectors(t, defaultNS, integrationtest.SINGLEPORTSVC, corev1.ServiceTypeLoadBalancer, false, selectors)
+	integrationtest.UpdateServiceWithSelectors(t, defaultNS, integrationtest.SINGLEPORTSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, selectors)
 
 	g.Eventually(func() bool {
 		found, _ := objects.SharedAviGraphLister().Get(defaultLBModel)
@@ -803,7 +811,7 @@ func TestNPLSvcIngressAddDel(t *testing.T) {
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	found, _ := objects.SharedAviGraphLister().Get(defaultL7Model)
@@ -858,7 +866,7 @@ func TestNPLSvcIngressUpdate(t *testing.T) {
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	ingrFake := (integrationtest.FakeIngress{
@@ -924,7 +932,7 @@ func TestNPLSvcIngressUpdateWrongSvc(t *testing.T) {
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	found, _ := objects.SharedAviGraphLister().Get(defaultL7Model)
@@ -994,7 +1002,7 @@ func TestNPLSvcIngressUpdateClass(t *testing.T) {
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	found, _ := objects.SharedAviGraphLister().Get(defaultL7Model)
@@ -1071,7 +1079,7 @@ func TestNPLSvcIngressRemoveAddClass(t *testing.T) {
 	SetUpTestForIngress(t, defaultL7Model)
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	found, _ := objects.SharedAviGraphLister().Get(defaultL7Model)
@@ -1136,7 +1144,7 @@ func TestNPLAutoAnnotationLBSvc(t *testing.T) {
 
 	objects.SharedAviGraphLister().Delete(integrationtest.SINGLEPORTMODEL)
 	selectors := make(map[string]string)
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, integrationtest.SINGLEPORTSVC, corev1.ServiceTypeLoadBalancer, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, integrationtest.SINGLEPORTSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, selectors)
 	g.Eventually(func() bool {
 		svc, _ := KubeClient.CoreV1().Services(defaultNS).Get(context.TODO(), integrationtest.SINGLEPORTSVC, metav1.GetOptions{})
 		ann := svc.GetAnnotations()
@@ -1161,7 +1169,7 @@ func TestNPLSvcNodePort(t *testing.T) {
 	}()
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, false, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false, selectors)
 	createPodWithNPLAnnotation(selectors)
 
 	found, _ := objects.SharedAviGraphLister().Get(defaultL7Model)
@@ -1191,7 +1199,7 @@ func TestNPLSvcNodePort(t *testing.T) {
 		return false
 	}, 20*time.Second).Should(gomega.Equal(true))
 
-	svc := integrationtest.ConstructService(defaultNS, "avisvc", corev1.ServiceTypeNodePort, false, selectors)
+	svc := integrationtest.ConstructService(defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeNodePort, false, selectors, "")
 	ann := make(map[string]string)
 	ann[lib.NPLSvcAnnotation] = "true"
 	svc.Annotations = ann
@@ -1227,7 +1235,7 @@ func TestIngressAddPodWithMultiportSvc(t *testing.T) {
 	}()
 	selectors := make(map[string]string)
 	selectors["app"] = "npl"
-	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ServiceTypeClusterIP, true, selectors)
+	integrationtest.CreateServiceWithSelectors(t, defaultNS, "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, true, selectors)
 	createPodWithMultipleNPLAnnotations(selectors)
 
 	g.Eventually(func() bool {

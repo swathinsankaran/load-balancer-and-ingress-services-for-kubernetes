@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	istiov1alpha3 "istio.io/client-go/pkg/apis/networking/v1alpha3"
@@ -30,34 +31,47 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
 	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
 	akov1alpha2 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha2"
-	akocrd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned"
-	akoinformers "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/informers/externalversions"
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
+
 	v1alpha2akoinformers "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha2/informers/externalversions"
+	v1beta1akoinformers "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/informers/externalversions"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 )
 
-func NewCRDInformers(cs akocrd.Interface) {
-	var akoInformerFactory akoinformers.SharedInformerFactory
-
-	akoInformerFactory = akoinformers.NewSharedInformerFactoryWithOptions(cs, time.Second*30)
-	hostRuleInformer := akoInformerFactory.Ako().V1alpha1().HostRules()
-	httpRuleInformer := akoInformerFactory.Ako().V1alpha1().HTTPRules()
-	aviSettingsInformer := akoInformerFactory.Ako().V1alpha1().AviInfraSettings()
-
+func NewCRDInformers() {
 	v1alpha2akoInformerFactory := v1alpha2akoinformers.NewSharedInformerFactoryWithOptions(
 		lib.AKOControlConfig().V1alpha2CRDClientset(), time.Second*30)
 	ssoRuleInformer := v1alpha2akoInformerFactory.Ako().V1alpha2().SSORules()
 	l4RuleInformer := v1alpha2akoInformerFactory.Ako().V1alpha2().L4Rules()
+	l7RuleInformer := v1alpha2akoInformerFactory.Ako().V1alpha2().L7Rules()
+
+	//v1beta1 informer initialization
+	v1beta1akoInformerFactory := v1beta1akoinformers.NewSharedInformerFactoryWithOptions(
+		lib.AKOControlConfig().V1beta1CRDClientset(), time.Second*30)
+	aviInfraSettingInformer := v1beta1akoInformerFactory.Ako().V1beta1().AviInfraSettings()
+	hostRuleInformer := v1beta1akoInformerFactory.Ako().V1beta1().HostRules()
+	httpRuleInformer := v1beta1akoInformerFactory.Ako().V1beta1().HTTPRules()
 
 	lib.AKOControlConfig().SetCRDInformers(&lib.AKOCrdInformers{
 		HostRuleInformer:        hostRuleInformer,
 		HTTPRuleInformer:        httpRuleInformer,
-		AviInfraSettingInformer: aviSettingsInformer,
 		SSORuleInformer:         ssoRuleInformer,
 		L4RuleInformer:          l4RuleInformer,
+		L7RuleInformer:          l7RuleInformer,
+		AviInfraSettingInformer: aviInfraSettingInformer,
+	})
+}
+
+func NewInfraSettingCRDInformer() {
+	akoInformerFactory := v1beta1akoinformers.NewSharedInformerFactoryWithOptions(lib.AKOControlConfig().V1beta1CRDClientset(), time.Second*30)
+	aviSettingsInformer := akoInformerFactory.Ako().V1beta1().AviInfraSettings()
+	lib.AKOControlConfig().SetCRDInformers(&lib.AKOCrdInformers{
+		AviInfraSettingInformer: aviSettingsInformer,
 	})
 }
 
@@ -76,7 +90,7 @@ func NewIstioCRDInformers(cs istiocrd.Interface) {
 	})
 }
 
-func isHostRuleUpdated(oldHostRule, newHostRule *akov1alpha1.HostRule) bool {
+func isHostRuleUpdated(oldHostRule, newHostRule *akov1beta1.HostRule) bool {
 	if oldHostRule.ResourceVersion == newHostRule.ResourceVersion {
 		return false
 	}
@@ -87,7 +101,7 @@ func isHostRuleUpdated(oldHostRule, newHostRule *akov1alpha1.HostRule) bool {
 	return oldSpecHash != newSpecHash
 }
 
-func isHTTPRuleUpdated(oldHTTPRule, newHTTPRule *akov1alpha1.HTTPRule) bool {
+func isHTTPRuleUpdated(oldHTTPRule, newHTTPRule *akov1beta1.HTTPRule) bool {
 	if oldHTTPRule.ResourceVersion == newHTTPRule.ResourceVersion {
 		return false
 	}
@@ -98,7 +112,7 @@ func isHTTPRuleUpdated(oldHTTPRule, newHTTPRule *akov1alpha1.HTTPRule) bool {
 	return oldSpecHash != newSpecHash
 }
 
-func isAviInfraUpdated(oldAviInfra, newAviInfra *akov1alpha1.AviInfraSetting) bool {
+func isAviInfraUpdated(oldAviInfra, newAviInfra *akov1beta1.AviInfraSetting) bool {
 	if oldAviInfra.ResourceVersion == newAviInfra.ResourceVersion {
 		return false
 	}
@@ -131,6 +145,17 @@ func isL4RuleUpdated(oldL4Rule, newL4Rule *akov1alpha2.L4Rule) bool {
 	return oldSpecHash != newSpecHash
 }
 
+func isL7RuleUpdated(oldL7Rule, newL7Rule *akov1alpha2.L7Rule) bool {
+	if oldL7Rule.ResourceVersion == newL7Rule.ResourceVersion {
+		return false
+	}
+
+	oldSpecHash := utils.Hash(utils.Stringify(oldL7Rule.Spec) + oldL7Rule.Status.Status)
+	newSpecHash := utils.Hash(utils.Stringify(newL7Rule.Spec) + newL7Rule.Status.Status)
+
+	return oldSpecHash != newSpecHash
+}
+
 // SetupAKOCRDEventHandlers handles setting up of AKO CRD event handlers
 // TODO: The CRD are getting re-enqueued for the same resourceVersion via fullsync as well as via these handlers.
 // We can leverage the resourceVersion checks to optimize this code. However the CRDs would need a check on
@@ -146,7 +171,7 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				if c.DisableSync {
 					return
 				}
-				hostrule := obj.(*akov1alpha1.HostRule)
+				hostrule := obj.(*akov1beta1.HostRule)
 				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(hostrule))
 				key := lib.HostRule + "/" + utils.ObjKey(hostrule)
 				if err := c.GetValidator().ValidateHostRuleObj(key, hostrule); err != nil {
@@ -155,36 +180,41 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				utils.AviLog.Debugf("key: %s, msg: ADD", key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 			UpdateFunc: func(old, new interface{}) {
 				if c.DisableSync {
 					return
 				}
-				oldObj := old.(*akov1alpha1.HostRule)
-				hostrule := new.(*akov1alpha1.HostRule)
+				oldObj := old.(*akov1beta1.HostRule)
+				hostrule := new.(*akov1beta1.HostRule)
 				if isHostRuleUpdated(oldObj, hostrule) {
 					namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(hostrule))
 					key := lib.HostRule + "/" + utils.ObjKey(hostrule)
 					if err := c.GetValidator().ValidateHostRuleObj(key, hostrule); err != nil {
 						utils.AviLog.Warnf("key: %s, Error retrieved during validation of HostRule: %v", key, err)
 					}
+					if oldObj.Spec.VirtualHost.L7Rule != "" && oldObj.Spec.VirtualHost.L7Rule != hostrule.Spec.VirtualHost.L7Rule {
+						objects.SharedCRDLister().DeleteL7RuleToHostRuleMapping(namespace+"/"+oldObj.Spec.VirtualHost.L7Rule, oldObj.Name)
+					}
 					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 					bkt := utils.Bkt(namespace, numWorkers)
 					c.workqueue[bkt].AddRateLimited(key)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				}
 			},
 			DeleteFunc: func(obj interface{}) {
 				if c.DisableSync {
 					return
 				}
-				hostrule, ok := obj.(*akov1alpha1.HostRule)
+				hostrule, ok := obj.(*akov1beta1.HostRule)
 				if !ok {
 					tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 					if !ok {
 						utils.AviLog.Errorf("couldn't get object from tombstone %#v", obj)
 						return
 					}
-					hostrule, ok = tombstone.Obj.(*akov1alpha1.HostRule)
+					hostrule, ok = tombstone.Obj.(*akov1beta1.HostRule)
 					if !ok {
 						utils.AviLog.Errorf("Tombstone contained object that is not an HostRule: %#v", obj)
 						return
@@ -196,6 +226,7 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				objects.SharedResourceVerInstanceLister().Delete(key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 		}
 
@@ -208,7 +239,7 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				if c.DisableSync {
 					return
 				}
-				httprule := obj.(*akov1alpha1.HTTPRule)
+				httprule := obj.(*akov1beta1.HTTPRule)
 				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(httprule))
 				key := lib.HTTPRule + "/" + utils.ObjKey(httprule)
 				if err := c.GetValidator().ValidateHTTPRuleObj(key, httprule); err != nil {
@@ -217,13 +248,14 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				utils.AviLog.Debugf("key: %s, msg: ADD", key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 			UpdateFunc: func(old, new interface{}) {
 				if c.DisableSync {
 					return
 				}
-				oldObj := old.(*akov1alpha1.HTTPRule)
-				httprule := new.(*akov1alpha1.HTTPRule)
+				oldObj := old.(*akov1beta1.HTTPRule)
+				httprule := new.(*akov1beta1.HTTPRule)
 				// reflect.DeepEqual does not work on type []byte,
 				// unable to capture edits in destinationCA
 				if isHTTPRuleUpdated(oldObj, httprule) {
@@ -235,20 +267,21 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 					bkt := utils.Bkt(namespace, numWorkers)
 					c.workqueue[bkt].AddRateLimited(key)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				}
 			},
 			DeleteFunc: func(obj interface{}) {
 				if c.DisableSync {
 					return
 				}
-				httprule, ok := obj.(*akov1alpha1.HTTPRule)
+				httprule, ok := obj.(*akov1beta1.HTTPRule)
 				if !ok {
 					tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 					if !ok {
 						utils.AviLog.Errorf("couldn't get object from tombstone %#v", obj)
 						return
 					}
-					httprule, ok = tombstone.Obj.(*akov1alpha1.HTTPRule)
+					httprule, ok = tombstone.Obj.(*akov1beta1.HTTPRule)
 					if !ok {
 						utils.AviLog.Errorf("Tombstone contained object that is not an HTTPRule: %#v", obj)
 						return
@@ -261,6 +294,7 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				bkt := utils.Bkt(namespace, numWorkers)
 				objects.SharedResourceVerInstanceLister().Delete(key)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 		}
 
@@ -273,7 +307,7 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				if c.DisableSync {
 					return
 				}
-				aviinfra := obj.(*akov1alpha1.AviInfraSetting)
+				aviinfra := obj.(*akov1beta1.AviInfraSetting)
 				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(aviinfra))
 				key := lib.AviInfraSetting + "/" + utils.ObjKey(aviinfra)
 				if err := c.GetValidator().ValidateAviInfraSetting(key, aviinfra); err != nil {
@@ -282,13 +316,14 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				utils.AviLog.Debugf("key: %s, msg: ADD", key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 			UpdateFunc: func(old, new interface{}) {
 				if c.DisableSync {
 					return
 				}
-				oldObj := old.(*akov1alpha1.AviInfraSetting)
-				aviInfra := new.(*akov1alpha1.AviInfraSetting)
+				oldObj := old.(*akov1beta1.AviInfraSetting)
+				aviInfra := new.(*akov1beta1.AviInfraSetting)
 				if isAviInfraUpdated(oldObj, aviInfra) {
 					namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(aviInfra))
 					key := lib.AviInfraSetting + "/" + utils.ObjKey(aviInfra)
@@ -298,20 +333,21 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 					bkt := utils.Bkt(namespace, numWorkers)
 					c.workqueue[bkt].AddRateLimited(key)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				}
 			},
 			DeleteFunc: func(obj interface{}) {
 				if c.DisableSync {
 					return
 				}
-				aviinfra, ok := obj.(*akov1alpha1.AviInfraSetting)
+				aviinfra, ok := obj.(*akov1beta1.AviInfraSetting)
 				if !ok {
 					tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 					if !ok {
 						utils.AviLog.Errorf("couldn't get object from tombstone %#v", obj)
 						return
 					}
-					aviinfra, ok = tombstone.Obj.(*akov1alpha1.AviInfraSetting)
+					aviinfra, ok = tombstone.Obj.(*akov1beta1.AviInfraSetting)
 					if !ok {
 						utils.AviLog.Errorf("Tombstone contained object that is not an AviInfraSetting: %#v", obj)
 						return
@@ -324,6 +360,7 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				// no need to validate for delete handler
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 		}
 
@@ -361,6 +398,7 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 					bkt := utils.Bkt(namespace, numWorkers)
 					c.workqueue[bkt].AddRateLimited(key)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				}
 			},
 			DeleteFunc: func(obj interface{}) {
@@ -386,6 +424,7 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				objects.SharedResourceVerInstanceLister().Delete(key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 		}
 		informer.SSORuleInformer.Informer().AddEventHandler(ssoRuleEventHandler)
@@ -406,6 +445,7 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				utils.AviLog.Debugf("key: %s, msg: ADD", key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 			UpdateFunc: func(old, new interface{}) {
 				if c.DisableSync {
@@ -422,6 +462,7 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 					bkt := utils.Bkt(namespace, numWorkers)
 					c.workqueue[bkt].AddRateLimited(key)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				}
 			},
 			DeleteFunc: func(obj interface{}) {
@@ -447,9 +488,112 @@ func (c *AviController) SetupAKOCRDEventHandlers(numWorkers uint32) {
 				bkt := utils.Bkt(namespace, numWorkers)
 				objects.SharedResourceVerInstanceLister().Delete(key)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			},
 		}
 		informer.L4RuleInformer.Informer().AddEventHandler(l4RuleEventHandler)
+	}
+
+	if lib.AKOControlConfig().L7RuleEnabled() {
+		l7RuleEventHandler := cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				if c.DisableSync {
+					return
+				}
+				l7Rule := obj.(*akov1alpha2.L7Rule)
+				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(l7Rule))
+				key := lib.L7Rule + "/" + utils.ObjKey(l7Rule)
+				if err := c.GetValidator().ValidateL7RuleObj(key, l7Rule); err != nil {
+					utils.AviLog.Warnf("Error retrieved during validation of L7Rule: %v", err)
+					return
+				}
+				utils.AviLog.Debugf("key: %s, msg: Add", key)
+				found, hostRules := objects.SharedCRDLister().GetL7RuleToHostRuleMapping(namespace + "/" + l7Rule.Name)
+				if found {
+					for hr := range hostRules {
+						hostrule, err := lib.AKOControlConfig().CRDInformers().HostRuleInformer.Lister().HostRules(namespace).Get(hr)
+						if err != nil {
+							utils.AviLog.Warnf("key: %s, msg: HostRule %s not found for L7Rule msg: %v", key, hr, err)
+							continue
+						}
+						key := lib.HostRule + "/" + utils.ObjKey(hostrule)
+						utils.AviLog.Debugf("key: %s, msg: Update", key)
+						bkt := utils.Bkt(namespace, numWorkers)
+						c.workqueue[bkt].AddRateLimited(key)
+						lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+					}
+				}
+			},
+			UpdateFunc: func(old, new interface{}) {
+				if c.DisableSync {
+					return
+				}
+				oldObj := old.(*akov1alpha2.L7Rule)
+				l7Rule := new.(*akov1alpha2.L7Rule)
+				if isL7RuleUpdated(oldObj, l7Rule) {
+					namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(l7Rule))
+					key := lib.L7Rule + "/" + utils.ObjKey(l7Rule)
+					if err := c.GetValidator().ValidateL7RuleObj(key, l7Rule); err != nil {
+						utils.AviLog.Warnf("Error retrieved during validation of L7Rule: %v", err)
+						return
+					}
+					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
+					found, hostRules := objects.SharedCRDLister().GetL7RuleToHostRuleMapping(namespace + "/" + l7Rule.Name)
+					if found {
+						for hr := range hostRules {
+							hostrule, err := lib.AKOControlConfig().CRDInformers().HostRuleInformer.Lister().HostRules(namespace).Get(hr)
+							if err != nil {
+								utils.AviLog.Warnf("key: %s, msg: HostRule %s not found for L7Rule msg: %v", key, hr, err)
+								continue
+							}
+							key := lib.HostRule + "/" + utils.ObjKey(hostrule)
+							utils.AviLog.Debugf("key: %s, msg: Update", key)
+							bkt := utils.Bkt(namespace, numWorkers)
+							c.workqueue[bkt].AddRateLimited(key)
+							lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+						}
+					}
+				}
+			},
+			DeleteFunc: func(obj interface{}) {
+				if c.DisableSync {
+					return
+				}
+				l7Rule, ok := obj.(*akov1alpha2.L7Rule)
+				if !ok {
+					tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+					if !ok {
+						utils.AviLog.Errorf("couldn't get object from tombstone %#v", obj)
+						return
+					}
+					l7Rule, ok = tombstone.Obj.(*akov1alpha2.L7Rule)
+					if !ok {
+						utils.AviLog.Errorf("Tombstone contained object that is not an L7Rule: %#v", obj)
+						return
+					}
+				}
+				key := lib.L7Rule + "/" + utils.ObjKey(l7Rule)
+				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(l7Rule))
+				utils.AviLog.Debugf("key: %s, msg: DELETE", key)
+				objects.SharedResourceVerInstanceLister().Delete(key)
+				found, hostRules := objects.SharedCRDLister().GetL7RuleToHostRuleMapping(namespace + "/" + l7Rule.Name)
+				if found {
+					for hr := range hostRules {
+						hostrule, err := lib.AKOControlConfig().CRDInformers().HostRuleInformer.Lister().HostRules(namespace).Get(hr)
+						if err != nil {
+							utils.AviLog.Warnf("key: %s, msg: HostRule %s not found for L7Rule msg: %v", key, hr, err)
+							continue
+						}
+						key := lib.HostRule + "/" + utils.ObjKey(hostrule)
+						utils.AviLog.Debugf("key: %s, msg: Update", key)
+						bkt := utils.Bkt(namespace, numWorkers)
+						c.workqueue[bkt].AddRateLimited(key)
+						lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+					}
+				}
+			},
+		}
+		informer.L7RuleInformer.Informer().AddEventHandler(l7RuleEventHandler)
 	}
 	return
 }
@@ -475,6 +619,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			}
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		},
 		UpdateFunc: func(old, new interface{}) {
 			if c.DisableSync {
@@ -488,6 +633,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -513,6 +659,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			bkt := utils.Bkt(namespace, numWorkers)
 			objects.SharedResourceVerInstanceLister().Delete(key)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		},
 	}
 
@@ -534,6 +681,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 				return
 			}
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		},
 		UpdateFunc: func(old, new interface{}) {
 			if c.DisableSync {
@@ -547,6 +695,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -572,6 +721,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			bkt := utils.Bkt(namespace, numWorkers)
 			objects.SharedResourceVerInstanceLister().Delete(key)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		},
 	}
 
@@ -593,6 +743,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			}
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		},
 		UpdateFunc: func(old, new interface{}) {
 			if c.DisableSync {
@@ -606,6 +757,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -631,6 +783,7 @@ func (c *AviController) SetupIstioCRDEventHandlers(numWorkers uint32) {
 			bkt := utils.Bkt(namespace, numWorkers)
 			objects.SharedResourceVerInstanceLister().Delete(key)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		},
 	}
 
@@ -661,6 +814,7 @@ func (c *AviController) SetupMultiClusterIngressEventHandlers(numWorkers uint32)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		},
 		UpdateFunc: func(old, new interface{}) {
 			if c.DisableSync {
@@ -682,6 +836,7 @@ func (c *AviController) SetupMultiClusterIngressEventHandlers(numWorkers uint32)
 				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -711,6 +866,7 @@ func (c *AviController) SetupMultiClusterIngressEventHandlers(numWorkers uint32)
 			bkt := utils.Bkt(namespace, numWorkers)
 			objects.SharedResourceVerInstanceLister().Delete(key)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		},
 	}
 	c.informers.MultiClusterIngressInformer.Informer().AddEventHandler(multiClusterIngressEventHandler)
@@ -739,6 +895,7 @@ func (c *AviController) SetupServiceImportEventHandlers(numWorkers uint32) {
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		},
 		UpdateFunc: func(old, new interface{}) {
 			if c.DisableSync {
@@ -760,6 +917,7 @@ func (c *AviController) SetupServiceImportEventHandlers(numWorkers uint32) {
 				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
 				bkt := utils.Bkt(namespace, numWorkers)
 				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -789,6 +947,7 @@ func (c *AviController) SetupServiceImportEventHandlers(numWorkers uint32) {
 			bkt := utils.Bkt(namespace, numWorkers)
 			objects.SharedResourceVerInstanceLister().Delete(key)
 			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 		},
 	}
 	c.informers.ServiceImportInformer.Informer().AddEventHandler(serviceImportEventHandler)
@@ -821,12 +980,15 @@ var refModelMap = map[string]string{
 	"PKIProfile":             "pkiprofile",
 	"ServiceEngineGroup":     "serviceenginegroup",
 	"Network":                "network",
+	"NetworkUUID":            "network",
 	"SSOPolicy":              "ssopolicy",
 	"AuthProfile":            "authprofile",
 	"ICAPProfile":            "icapprofile",
 	"NetworkProfile":         "networkprofile",
 	"SecurityPolicy":         "securitypolicy",
 	"NetworkSecurityPolicy":  "networksecuritypolicy",
+	"BotPolicy":              "botdetectionpolicy",
+	"TrafficCloneProfile":    "trafficcloneprofile",
 }
 
 // checkRefOnController checks whether a provided ref on the controller
@@ -837,8 +999,9 @@ func checkRefOnController(key, refKey, refValue string) error {
 	uri := fmt.Sprintf("/api/%s?name=%s&fields=name,type,labels,created_by", refModelMap[refKey], refValue)
 
 	// For public clouds, check using network UUID in AWS, normal network API for GCP, skip altogether for Azure.
-	if lib.IsPublicCloud() && refModelMap[refKey] == "network" {
-		if lib.UsesNetworkRef() {
+	// If reference key is network uuid , then check using UUID.
+	if (lib.IsPublicCloud() && refModelMap[refKey] == "network") || refKey == "NetworkUUID" {
+		if lib.UsesNetworkRef() || refKey == "NetworkUUID" {
 			var rest_response interface{}
 			utils.AviLog.Infof("Cloud is  %s, checking network ref using uuid", lib.GetCloudType())
 			uri := fmt.Sprintf("/api/%s/%s?cloud_uuid=%s", refModelMap[refKey], refValue, lib.GetCloudUUID())
@@ -923,6 +1086,97 @@ func checkRefOnController(key, refKey, refValue string) error {
 	return nil
 }
 
+// checkForL4SSLAppProfile checks if the app profile specified in l4rule is of type L4 or L4 SSL.
+// If app profile is of type L4 SSL it returns true and nil.
+// If app profile is of type L4 it returns false and nil.
+// Otherwise false and specific error is returned.
+func checkForL4SSLAppProfile(key, refValue string) (bool, error) {
+	// assign the last avi client for ref checks
+	refKey := "AppProfile"
+	aviClientLen := lib.GetshardSize()
+	clients := avicache.SharedAVIClients()
+	uri := fmt.Sprintf("/api/%s?name=%s&fields=name,type,labels,created_by", refModelMap[refKey], refValue)
+
+	result, err := lib.AviGetCollectionRaw(clients.AviClient[aviClientLen], uri)
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: Get uri %v returned err %v", key, uri, err)
+		return false, fmt.Errorf("%s \"%s\" not found on controller", refModelMap[refKey], refValue)
+	}
+
+	if result.Count == 0 {
+		utils.AviLog.Warnf("key: %s, msg: No Objects found for refName: %s/%s", key, refModelMap[refKey], refValue)
+		return false, fmt.Errorf("%s \"%s\" not found on controller", refModelMap[refKey], refValue)
+	}
+
+	items := make([]json.RawMessage, result.Count)
+	err = json.Unmarshal(result.Results, &items)
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: Failed to unmarshal results, err: %v", key, err)
+		return false, fmt.Errorf("%s \"%s\" not found on controller", refModelMap[refKey], refValue)
+	}
+	item := make(map[string]interface{})
+	err = json.Unmarshal(items[0], &item)
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: Failed to unmarshal item, err: %v", key, err)
+		return false, fmt.Errorf("%s \"%s\" found on controller is invalid", refModelMap[refKey], refValue)
+	}
+	if appProfType, ok := item["type"].(string); ok {
+		if appProfType == lib.AllowedL4SSLApplicationProfile {
+			return true, nil
+		}
+		if appProfType == lib.AllowedL4ApplicationProfile {
+			return false, nil
+		}
+	}
+	utils.AviLog.Warnf("key: %s, msg: L4 applicationProfile: %s must be of type %s or %s", key, refValue, lib.AllowedL4ApplicationProfile, lib.AllowedL4SSLApplicationProfile)
+	return false, fmt.Errorf("%s \"%s\" found on controller is invalid, must be of type: %s or %s",
+		refModelMap[refKey], refValue, lib.AllowedL4ApplicationProfile, lib.AllowedL4SSLApplicationProfile)
+}
+
+// checkForNetworkProfileTypeTCP checks if the network profile specified in l4rule is of type TCP proxy.
+// If network profile is of type TCP proxy it returns true and nil.
+// Otherwise false and specific error is returned.
+func checkForNetworkProfileTypeTCP(key, refValue string) (bool, error) {
+	// assign the last avi client for ref checks
+	refKey := "NetworkProfile"
+	aviClientLen := lib.GetshardSize()
+	clients := avicache.SharedAVIClients()
+	uri := fmt.Sprintf("/api/%s?name=%s&fields=name,profile,labels,created_by", refModelMap[refKey], refValue)
+
+	result, err := lib.AviGetCollectionRaw(clients.AviClient[aviClientLen], uri)
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: Get uri %v returned err %v", key, uri, err)
+		return false, fmt.Errorf("%s \"%s\" not found on controller", refModelMap[refKey], refValue)
+	}
+
+	if result.Count == 0 {
+		utils.AviLog.Warnf("key: %s, msg: No Objects found for refName: %s/%s", key, refModelMap[refKey], refValue)
+		return false, fmt.Errorf("%s \"%s\" not found on controller", refModelMap[refKey], refValue)
+	}
+
+	items := make([]json.RawMessage, result.Count)
+	err = json.Unmarshal(result.Results, &items)
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: Failed to unmarshal results, err: %v", key, err)
+		return false, fmt.Errorf("%s \"%s\" not found on controller", refModelMap[refKey], refValue)
+	}
+
+	item := make(map[string]interface{})
+	err = json.Unmarshal(items[0], &item)
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: Failed to unmarshal item, err: %v", key, err)
+		return false, fmt.Errorf("%s \"%s\" found on controller is invalid", refModelMap[refKey], refValue)
+	}
+	if profile, ok := item["profile"].(map[string]interface{}); ok {
+		if networkProfType, ok := profile["type"].(string); ok && networkProfType == lib.AllowedTCPProxyNetworkProfileType {
+			return true, nil
+		}
+	}
+	utils.AviLog.Warnf("key: %s, msg: Network profile : %s must be of type %s for L4 SSL support", key, refValue, lib.AllowedTCPProxyNetworkProfileType)
+	return false, fmt.Errorf("%s \"%s\" found on controller is invalid, must be of type: %s for L4 SSL support",
+		refModelMap[refKey], refValue, lib.AllowedTCPProxyNetworkProfileType)
+}
+
 // addSeGroupLabel configures SEGroup with appropriate labels, during AviInfraSetting
 // creation/updates after ingestion
 func addSeGroupLabel(key, segName string) {
@@ -944,4 +1198,155 @@ func addSeGroupLabel(key, segName string) {
 	}
 
 	avicache.ConfigureSeGroupLabels(clients.AviClient[aviClientLen], seGroup)
+}
+
+func SetAviInfrasettingVIPNetworks(name, segMgmtNetwork, infraSEGName string, netAviInfra []akov1beta1.AviInfraSettingVipNetwork) {
+	// assign the last avi client for ref checks
+	clients := avicache.SharedAVIClients()
+	aviClientLen := lib.GetshardSize()
+	network := netAviInfra
+	var err error
+	if lib.GetCloudType() == lib.CLOUD_VCENTER {
+		if infraSEGName == "" && segMgmtNetwork == "" {
+			segMgmtNetwork = avicache.GetCMSEGManagementNetwork(clients.AviClient[aviClientLen])
+		}
+		network, err = avicache.PopulateVipNetworkwithUUID(segMgmtNetwork, clients.AviClient[aviClientLen], netAviInfra)
+		if len(network) == 0 {
+			utils.AviLog.Errorf("Infrasetting: %s not applied, Error occurred while populating vip network list. Err: %s", name, err.Error())
+			// Need to check this return
+			return
+		}
+	}
+	utils.AviLog.Debugf("Infrasetting: %s, VIP Network Obtained in AviInfrasetting: %v", name, utils.Stringify(network))
+	//set infrasetting name specific vip network
+	lib.SetVipInfraNetworkList(name, network)
+}
+
+func SetAviInfrasettingNodeNetworks(name, segMgmtNetwork, infraSEGName string, netAviInfra []akov1beta1.AviInfraSettingNodeNetwork) {
+	// assign the last avi client for ref checks
+	clients := avicache.SharedAVIClients()
+	aviClientLen := lib.GetshardSize()
+	nodeNetorkList := make(map[string]lib.NodeNetworkMap)
+	var err error
+
+	for _, net := range netAviInfra {
+		nwMap := lib.NodeNetworkMap{
+			Cidrs: net.Cidrs,
+		}
+		// Give preference to networkUUID
+		if net.NetworkUUID != "" {
+			nwMap.NetworkUUID = net.NetworkUUID
+			nodeNetorkList[net.NetworkUUID] = nwMap
+		} else if net.NetworkName != "" {
+			nodeNetorkList[net.NetworkName] = nwMap
+		}
+	}
+
+	if lib.GetCloudType() == lib.CLOUD_VCENTER {
+		if infraSEGName == "" && segMgmtNetwork == "" {
+			segMgmtNetwork = avicache.GetCMSEGManagementNetwork(clients.AviClient[aviClientLen])
+		}
+		ret := avicache.FetchNodeNetworks(segMgmtNetwork, clients.AviClient[aviClientLen], &err, nodeNetorkList)
+		if !ret {
+			utils.AviLog.Infof("Infrasetting: %s is not applied, Error occurred: %s", name, err.Error())
+			return
+		}
+	}
+	utils.AviLog.Debugf("Infrasetting: %s Node Network Obtained in AviInfrasetting: %v", name, utils.Stringify(nodeNetorkList))
+	//set infrasetting name specific node network
+	lib.SetNodeInfraNetworkList(name, nodeNetorkList)
+}
+
+// Fetch SEG mgmt network
+func GetSEGManagementNetwork(name string) string {
+	mgmtNetwork := ""
+	// assign the last avi client for ref checks
+	clients := avicache.SharedAVIClients()
+	aviClientLen := lib.GetshardSize()
+	seg, err := avicache.GetAviSeGroup(clients.AviClient[aviClientLen], name)
+	if err == nil {
+		// seg MgmtNetwork ref contains network-uuid based url.
+		if seg.MgmtNetworkRef != nil {
+			parts := strings.Split(*seg.MgmtNetworkRef, "/")
+			mgmtNetwork = parts[len(parts)-1]
+		}
+	}
+	return mgmtNetwork
+}
+
+func (c *AviController) SyncCRDObjects() {
+	utils.AviLog.Debugf("Starting syncing all CRD objects")
+
+	l7RuleObjs, err := lib.AKOControlConfig().CRDInformers().L7RuleInformer.Lister().List(labels.Set(nil).AsSelector())
+	if err != nil {
+		utils.AviLog.Errorf("Unable to retrieve the L7Rules during full sync: %s", err)
+	} else {
+		for _, l7Rule := range l7RuleObjs {
+			key := lib.L7Rule + "/" + utils.ObjKey(l7Rule)
+			if err := c.GetValidator().ValidateL7RuleObj(key, l7Rule); err != nil {
+				utils.AviLog.Warnf("key: %s, Error during validation of L7Rule: %v", key, err)
+			}
+		}
+	}
+
+	hostRuleObjs, err := lib.AKOControlConfig().CRDInformers().HostRuleInformer.Lister().HostRules(metav1.NamespaceAll).List(labels.Set(nil).AsSelector())
+	if err != nil {
+		utils.AviLog.Errorf("Unable to retrieve the hostrules during full sync: %s", err)
+	} else {
+		for _, hostRuleObj := range hostRuleObjs {
+			key := lib.HostRule + "/" + utils.ObjKey(hostRuleObj)
+			if err := c.GetValidator().ValidateHostRuleObj(key, hostRuleObj); err != nil {
+				utils.AviLog.Warnf("key: %s, Error during validation of HostRule: %v", key, err)
+			}
+		}
+	}
+
+	httpRuleObjs, err := lib.AKOControlConfig().CRDInformers().HTTPRuleInformer.Lister().HTTPRules(metav1.NamespaceAll).List(labels.Set(nil).AsSelector())
+	if err != nil {
+		utils.AviLog.Errorf("Unable to retrieve the httprules during full sync: %s", err)
+	} else {
+		for _, httpRuleObj := range httpRuleObjs {
+			key := lib.HTTPRule + "/" + utils.ObjKey(httpRuleObj)
+			if err := c.GetValidator().ValidateHTTPRuleObj(key, httpRuleObj); err != nil {
+				utils.AviLog.Warnf("key: %s, Error during validation of HTTPRule: %v", key, err)
+			}
+		}
+	}
+
+	aviInfraObjs, err := lib.AKOControlConfig().CRDInformers().AviInfraSettingInformer.Lister().List(labels.Set(nil).AsSelector())
+	if err != nil {
+		utils.AviLog.Errorf("Unable to retrieve the avinfrasettings during full sync: %s", err)
+	} else {
+		for _, aviInfraObj := range aviInfraObjs {
+			key := lib.AviInfraSetting + "/" + utils.ObjKey(aviInfraObj)
+			if err := c.GetValidator().ValidateAviInfraSetting(key, aviInfraObj); err != nil {
+				utils.AviLog.Warnf("key: %s, Error during validation of AviInfraSetting: %v", key, err)
+			}
+		}
+	}
+
+	ssoRuleObjs, err := lib.AKOControlConfig().CRDInformers().SSORuleInformer.Lister().SSORules(metav1.NamespaceAll).List(labels.Set(nil).AsSelector())
+	if err != nil {
+		utils.AviLog.Errorf("Unable to retrieve the SsoRules during full sync: %s", err)
+	} else {
+		for _, ssoRuleObj := range ssoRuleObjs {
+			key := lib.SSORule + "/" + utils.ObjKey(ssoRuleObj)
+			if err := c.GetValidator().ValidateSSORuleObj(key, ssoRuleObj); err != nil {
+				utils.AviLog.Warnf("key: %s, Error during validation of SSORule : %v", key, err)
+			}
+		}
+	}
+
+	l4RuleObjs, err := lib.AKOControlConfig().CRDInformers().L4RuleInformer.Lister().List(labels.Set(nil).AsSelector())
+	if err != nil {
+		utils.AviLog.Errorf("Unable to retrieve the L4Rules during full sync: %s", err)
+	} else {
+		for _, l4Rule := range l4RuleObjs {
+			key := lib.L4Rule + "/" + utils.ObjKey(l4Rule)
+			if err := c.GetValidator().ValidateL4RuleObj(key, l4Rule); err != nil {
+				utils.AviLog.Warnf("key: %s, Error during validation of L4Rule: %v", key, err)
+			}
+		}
+	}
+	utils.AviLog.Debugf("Successfully synced all CRD objects")
 }

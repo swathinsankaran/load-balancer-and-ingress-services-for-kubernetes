@@ -478,7 +478,7 @@ func TestMultiPortServiceIngressForEvh(t *testing.T) {
 
 	modelName, _ := GetModelName("foo.com", "default")
 	objects.SharedAviGraphLister().Delete(modelName)
-	integrationtest.CreateSVC(t, "default", "avisvc", corev1.ServiceTypeClusterIP, true)
+	integrationtest.CreateSVC(t, "default", "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, true)
 	integrationtest.CreateEP(t, "default", "avisvc", true, true, "1.1.1")
 	ingrFake := (integrationtest.FakeIngress{
 		Name:        "ingress-multipath",
@@ -764,7 +764,7 @@ func TestUpdateBackendServiceForEvh(t *testing.T) {
 	}, 15*time.Second).Should(gomega.Equal("1.1.1.1"))
 
 	// Update the service
-	integrationtest.CreateSVC(t, "default", "avisvc2", corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateSVC(t, "default", "avisvc2", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
 	integrationtest.CreateEP(t, "default", "avisvc2", false, false, "2.2.2")
 
 	_, err = (integrationtest.FakeIngress{
@@ -854,7 +854,7 @@ func TestL2ChecksumsUpdateForEvh(t *testing.T) {
 
 	g.Expect(len(nodes[0].HttpPolicyRefs)).To(gomega.Equal(0))
 
-	integrationtest.CreateSVC(t, "default", "avisvc2", corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateSVC(t, "default", "avisvc2", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
 	integrationtest.CreateEP(t, "default", "avisvc2", false, false, "2.2.2")
 	integrationtest.AddSecret("my-secret-new", "default", "tlsCert-new", "tlsKey")
 
@@ -1932,5 +1932,100 @@ func TestL7WrongSubDomainMultiSNIForEvh(t *testing.T) {
 	KubeClient.CoreV1().Secrets("default").Delete(context.TODO(), "my-secret", metav1.DeleteOptions{})
 	VerifyEvhIngressDeletion(t, g, aviModel, 0)
 	VerifyEvhVsCacheChildDeletion(t, g, cache.NamespaceName{Namespace: "admin", Name: modelName})
+	TearDownTestForIngress(t, modelName)
+}
+
+func TestFQDNCountInL7Model(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modelName, _ := GetModelName("foo.com", "default")
+	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+	g.Eventually(func() int {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		if aviModel == nil {
+			return 0
+		}
+		nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		return len(nodes)
+	}, 10*time.Second).Should(gomega.Equal(1))
+
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	node := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()[0]
+
+	g.Expect(node.VSVIPRefs).To(gomega.HaveLen(1))
+	g.Expect(node.VSVIPRefs[0].FQDNs).To(gomega.HaveLen(2))
+	for _, fqdn := range node.VSVIPRefs[0].FQDNs {
+		if fqdn == "foo.com" {
+			continue
+		}
+		g.Expect(fqdn).Should(gomega.ContainSubstring("Shared-L7"))
+	}
+
+	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+
+func TestPortsForInsecureAndSecureEVH(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modelName, _ := GetModelName("foo.com", "default")
+	SetUpTestForIngress(t, modelName)
+
+	// Insecure
+	integrationtest.PollForCompletion(t, modelName, 5)
+	ingrFake := (integrationtest.FakeIngress{
+		Name:        "foo-no-secret",
+		Namespace:   "default",
+		DnsNames:    []string{"foo.com"},
+		Ips:         []string{"8.8.8.8"},
+		HostNames:   []string{"v1"},
+		ServiceName: "avisvc",
+		TlsSecretDNS: map[string][]string{
+			"my-secret": {"foo.com"},
+		},
+	}).Ingress()
+	_, err := KubeClient.NetworkingV1().Ingresses("default").Create(context.TODO(), ingrFake, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+	integrationtest.PollForCompletion(t, modelName, 5)
+	found, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	if found {
+		nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		g.Expect(len(nodes[0].PortProto)).To(gomega.Equal(2))
+		var ports []int
+		for _, port := range nodes[0].PortProto {
+			ports = append(ports, int(port.Port))
+			if port.EnableSSL {
+				g.Expect(int(port.Port)).To(gomega.Equal(443))
+			}
+		}
+		sort.Ints(ports)
+		g.Expect(ports[0]).To(gomega.Equal(80))
+		g.Expect(ports[1]).To(gomega.Equal(443))
+	}
+
+	// Secure
+	integrationtest.AddSecret("my-secret", "default", "tlsCert", "tlsKey")
+	found, aviModel = objects.SharedAviGraphLister().Get(modelName)
+	if found {
+		nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+		g.Expect(len(nodes[0].PortProto)).To(gomega.Equal(2))
+		var ports []int
+		for _, port := range nodes[0].PortProto {
+			ports = append(ports, int(port.Port))
+			if port.EnableSSL {
+				g.Expect(int(port.Port)).To(gomega.Equal(443))
+			}
+		}
+		sort.Ints(ports)
+		g.Expect(ports[0]).To(gomega.Equal(80))
+		g.Expect(ports[1]).To(gomega.Equal(443))
+	} else {
+		t.Fatalf("Could not find model: %s", modelName)
+	}
+
+	err = KubeClient.NetworkingV1().Ingresses("default").Delete(context.TODO(), "foo-no-secret", metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("Couldn't DELETE the Ingress %v", err)
+	}
+	KubeClient.CoreV1().Secrets("default").Delete(context.TODO(), "my-secret", metav1.DeleteOptions{})
 	TearDownTestForIngress(t, modelName)
 }

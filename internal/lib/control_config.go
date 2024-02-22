@@ -33,9 +33,12 @@ import (
 	"github.com/vmware/alb-sdk/go/models"
 
 	akocrd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned"
-	akoinformer "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/informers/externalversions/ako/v1alpha1"
+
 	v1alpha2akocrd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha2/clientset/versioned"
 	v1alpha2akoinformer "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha2/informers/externalversions/ako/v1alpha2"
+	v1beta1akocrd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/clientset/versioned"
+	v1beta1akoinformer "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/informers/externalversions/ako/v1beta1"
+
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/clients"
 
@@ -54,11 +57,12 @@ type ServicesAPIInformers struct {
 }
 
 type AKOCrdInformers struct {
-	HostRuleInformer        akoinformer.HostRuleInformer
-	HTTPRuleInformer        akoinformer.HTTPRuleInformer
-	AviInfraSettingInformer akoinformer.AviInfraSettingInformer
+	HostRuleInformer        v1beta1akoinformer.HostRuleInformer
+	HTTPRuleInformer        v1beta1akoinformer.HTTPRuleInformer
+	AviInfraSettingInformer v1beta1akoinformer.AviInfraSettingInformer
 	SSORuleInformer         v1alpha2akoinformer.SSORuleInformer
 	L4RuleInformer          v1alpha2akoinformer.L4RuleInformer
+	L7RuleInformer          v1alpha2akoinformer.L7RuleInformer
 }
 
 type IstioCRDInformers struct {
@@ -87,6 +91,7 @@ type akoControlConfig struct {
 	svcAPIInformers *ServicesAPIInformers
 
 	// client-set and informer for v1alpha1 AKO CRDs.
+	// can't remove it as MCI and serviceimport uses it.
 	crdClientset akocrd.Interface
 	crdInformers *AKOCrdInformers
 
@@ -114,6 +119,9 @@ type akoControlConfig struct {
 	// client-set and informer for v1alpha2 of AKO CRD.
 	v1alpha2crdClientset v1alpha2akocrd.Interface
 
+	//client set and informer for v1beta1
+	v1beta1crdClientset v1beta1akocrd.Interface
+
 	// ssoRuleEnabled is set to true if the cluster has
 	// SSORule CRD installed.
 	ssoRuleEnabled bool
@@ -121,6 +129,10 @@ type akoControlConfig struct {
 	// l4RuleEnabled is set to true if the cluster has
 	// L4Rule CRD installed.
 	l4RuleEnabled bool
+
+	// l7RuleEnabled is set to true if the cluster has
+	// L7Rule CRD installed.
+	l7RuleEnabled bool
 
 	// licenseType holds the default license tier which would be used by new Clouds. Enum options - ENTERPRISE_16, ENTERPRISE, ENTERPRISE_18, BASIC, ESSENTIALS.
 	licenseType string
@@ -139,6 +151,12 @@ type akoControlConfig struct {
 	// controllerVersion stores the version of the controller to
 	// which AKO is communicating with
 	controllerVersion string
+
+	// defaultLBController is set to true/false as per defaultLBController value in values.yaml
+	defaultLBController bool
+
+	//Controller VRF Context is stored
+	controllerVRFContext string
 }
 
 var akoControlConfigInstance *akoControlConfig
@@ -156,6 +174,10 @@ func (c *akoControlConfig) SetIsLeaderFlag(flag bool) {
 	c.isLeaderLock.Lock()
 	defer c.isLeaderLock.Unlock()
 	c.isLeader = flag
+}
+
+func (c *akoControlConfig) SetDefaultLBController(flag bool) {
+	c.defaultLBController = flag
 }
 
 func (c *akoControlConfig) IsLeader() bool {
@@ -224,6 +246,11 @@ func (c *akoControlConfig) SetCRDClientset(cs akocrd.Interface) {
 	c.SetCRDEnabledParams(cs)
 }
 
+func (c *akoControlConfig) SetCRDClientsetAndEnableInfraSettingParam(cs v1beta1akocrd.Interface) {
+	c.v1beta1crdClientset = cs
+	c.aviInfraSettingEnabled = true
+}
+
 func (c *akoControlConfig) CRDClientset() akocrd.Interface {
 	return c.crdClientset
 }
@@ -237,8 +264,21 @@ func (c *akoControlConfig) V1alpha2CRDClientset() v1alpha2akocrd.Interface {
 	return c.v1alpha2crdClientset
 }
 
+func (c *akoControlConfig) Setv1beta1CRDClientset(cs v1beta1akocrd.Interface) {
+	c.v1beta1crdClientset = cs
+	c.Setv1beta1CRDEnabledParams(cs)
+}
+
+func (c *akoControlConfig) V1beta1CRDClientset() v1beta1akocrd.Interface {
+	return c.v1beta1crdClientset
+}
+func (c *akoControlConfig) Setv1beta1CRDEnabledParams(cs v1beta1akocrd.Interface) {
+	c.aviInfraSettingEnabled = true
+	c.hostRuleEnabled = true
+	c.httpRuleEnabled = true
+}
+
 // CRDs are by default installed on all AKO deployments. So always enable CRD parameters.
-// TODO: Optimise
 func (c *akoControlConfig) SetCRDEnabledParams(cs akocrd.Interface) {
 	c.aviInfraSettingEnabled = true
 	c.hostRuleEnabled = true
@@ -248,6 +288,7 @@ func (c *akoControlConfig) SetCRDEnabledParams(cs akocrd.Interface) {
 func (c *akoControlConfig) Setv1alpha2CRDEnabledParams(cs v1alpha2akocrd.Interface) {
 	c.ssoRuleEnabled = true
 	c.l4RuleEnabled = true
+	c.l7RuleEnabled = true
 }
 
 func (c *akoControlConfig) AviInfraSettingEnabled() bool {
@@ -269,6 +310,9 @@ func (c *akoControlConfig) SsoRuleEnabled() bool {
 func (c *akoControlConfig) L4RuleEnabled() bool {
 	return c.l4RuleEnabled
 }
+func (c *akoControlConfig) L7RuleEnabled() bool {
+	return c.l7RuleEnabled
+}
 
 func (c *akoControlConfig) ControllerVersion() string {
 	return c.controllerVersion
@@ -276,6 +320,18 @@ func (c *akoControlConfig) ControllerVersion() string {
 
 func (c *akoControlConfig) SetControllerVersion(v string) {
 	c.controllerVersion = v
+}
+
+func (c *akoControlConfig) IsAviDefaultLBController() bool {
+	return c.defaultLBController
+}
+
+func (c *akoControlConfig) ControllerVRFContext() string {
+	return c.controllerVRFContext
+}
+
+func (c *akoControlConfig) SetControllerVRFContext(v string) {
+	c.controllerVRFContext = v
 }
 
 func initControllerVersion() string {

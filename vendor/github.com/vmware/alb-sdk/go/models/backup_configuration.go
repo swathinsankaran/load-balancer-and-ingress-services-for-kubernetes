@@ -34,7 +34,7 @@ type BackupConfiguration struct {
 	ConfigpbAttributes *ConfigPbAttributes `json:"configpb_attributes,omitempty"`
 
 	// Rotate the backup files based on this count. Allowed values are 1-20. Allowed in Enterprise edition with any value, Essentials, Basic, Enterprise with Cloud Services edition.
-	MaximumBackupsStored *int32 `json:"maximum_backups_stored,omitempty"`
+	MaximumBackupsStored *uint32 `json:"maximum_backups_stored,omitempty"`
 
 	// Name of backup configuration. Allowed in Enterprise edition with any value, Essentials, Basic, Enterprise with Cloud Services edition.
 	// Required: true
@@ -48,6 +48,9 @@ type BackupConfiguration struct {
 
 	// Remote Destination. Allowed in Enterprise edition with any value, Essentials, Basic, Enterprise with Cloud Services edition.
 	RemoteHostname *string `json:"remote_hostname,omitempty"`
+
+	// The folder name in s3 bucket where backup will be stored. Field introduced in 30.1.1. Allowed in Enterprise edition with any value, Enterprise with Cloud Services edition.
+	S3BucketFolder *string `json:"s3_bucket_folder,omitempty"`
 
 	// Local Backup. Allowed in Enterprise edition with any value, Essentials, Basic, Enterprise with Cloud Services edition.
 	SaveLocal *bool `json:"save_local,omitempty"`

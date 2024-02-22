@@ -24,7 +24,6 @@ import (
 	v1alpha2 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha2"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
@@ -36,9 +35,9 @@ type FakeSSORules struct {
 	ns   string
 }
 
-var ssorulesResource = schema.GroupVersionResource{Group: "ako.vmware.com", Version: "v1alpha2", Resource: "ssorules"}
+var ssorulesResource = v1alpha2.SchemeGroupVersion.WithResource("ssorules")
 
-var ssorulesKind = schema.GroupVersionKind{Group: "ako.vmware.com", Version: "v1alpha2", Kind: "SSORule"}
+var ssorulesKind = v1alpha2.SchemeGroupVersion.WithKind("SSORule")
 
 // Get takes name of the sSORule, and returns the corresponding sSORule object, and an error if there is any.
 func (c *FakeSSORules) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha2.SSORule, err error) {
@@ -117,7 +116,7 @@ func (c *FakeSSORules) UpdateStatus(ctx context.Context, sSORule *v1alpha2.SSORu
 // Delete takes name of the sSORule and deletes it. Returns an error if one occurs.
 func (c *FakeSSORules) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
 	_, err := c.Fake.
-		Invokes(testing.NewDeleteAction(ssorulesResource, c.ns, name), &v1alpha2.SSORule{})
+		Invokes(testing.NewDeleteActionWithOptions(ssorulesResource, c.ns, name, opts), &v1alpha2.SSORule{})
 
 	return err
 }

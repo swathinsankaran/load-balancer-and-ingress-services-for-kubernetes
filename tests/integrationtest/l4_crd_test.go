@@ -17,10 +17,12 @@ package integrationtest
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	avinodes "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
@@ -54,9 +56,18 @@ func validateCRDValues(t *testing.T, g *gomega.GomegaWithT, expectedValues inter
 		if strings.HasSuffix(field, "Ref") {
 			ref1 := valueFromGraphLayer.(*string)
 			ref2 := valuefromCRD.(*string)
-			g.Expect(ref1).NotTo(gomega.BeNil())
-			g.Expect(ref2).NotTo(gomega.BeNil())
-			g.Expect(*ref1).To(gomega.HaveSuffix(*ref2))
+			if ref2 == nil {
+				g.Expect(ref1).To(gomega.BeNil())
+				g.Expect(ref2).To(gomega.BeNil())
+			} else {
+				g.Expect(ref1).NotTo(gomega.BeNil())
+				g.Expect(ref2).NotTo(gomega.BeNil())
+				if *ref2 == "System-L4-Application" {
+					g.Expect(*ref1).To(gomega.HaveSuffix("System-SSL-Application"))
+				} else {
+					g.Expect(*ref1).To(gomega.HaveSuffix(*ref2))
+				}
+			}
 		} else if strings.HasSuffix(field, "Refs") {
 			refs1 := valueFromGraphLayer.([]string)
 			refs2 := valuefromCRD.([]string)
@@ -82,6 +93,112 @@ func validateCRDValues(t *testing.T, g *gomega.GomegaWithT, expectedValues inter
 	}
 }
 
+func TestCreateDeleteL4RuleInvalidLBClass(t *testing.T) {
+	// this test checks the following scenario:
+	// adding a valid l4rule crd annotation to an invalid LBSvc should not cause the VS to come up
+	g := gomega.NewGomegaWithT(t)
+	L4RuleName := "test-l4rule"
+	ports := []int{8080}
+	lib.AKOControlConfig().SetDefaultLBController(true)
+	// test invalid service spec.LoadBalancerClass != ako.vmware.com/avi-lb for DefaultLBContoller == true
+	SetUpTestForSvcLBWithLBClass(t, INVALID_LB_CLASS)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(false))
+
+	SetupL4Rule(t, L4RuleName, NAMESPACE, ports)
+	g.Eventually(func() string {
+		l4Rule, _ := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(NAMESPACE).Get(context.TODO(), L4RuleName, metav1.GetOptions{})
+		return l4Rule.Status.Status
+	}, 30*time.Second).Should(gomega.Equal("Accepted"))
+
+	svcObj := (FakeService{
+		Name:         SINGLEPORTSVC,
+		Namespace:    NAMESPACE,
+		Type:         corev1.ServiceTypeLoadBalancer,
+		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
+	}).Service()
+	svcObj.Annotations = map[string]string{lib.L4RuleAnnotation: L4RuleName}
+	svcObj.ResourceVersion = "2"
+	_, err := KubeClient.CoreV1().Services(NAMESPACE).Update(context.TODO(), svcObj, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating Service: %v", err)
+	}
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(false))
+	TearDownTestForSvcLB(t, g)
+	TeardownL4Rule(t, L4RuleName, NAMESPACE)
+
+	// test invalid service spec.LoadBalancerClass != ako.vmware.com/avi-lb for DefaultLBContoller == false
+	lib.AKOControlConfig().SetDefaultLBController(false)
+	SetUpTestForSvcLBWithLBClass(t, INVALID_LB_CLASS)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(false))
+
+	SetupL4Rule(t, L4RuleName, NAMESPACE, ports)
+	g.Eventually(func() string {
+		l4Rule, _ := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(NAMESPACE).Get(context.TODO(), L4RuleName, metav1.GetOptions{})
+		return l4Rule.Status.Status
+	}, 30*time.Second).Should(gomega.Equal("Accepted"))
+
+	svcObj = (FakeService{
+		Name:         SINGLEPORTSVC,
+		Namespace:    NAMESPACE,
+		Type:         corev1.ServiceTypeLoadBalancer,
+		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
+	}).Service()
+	svcObj.Annotations = map[string]string{lib.L4RuleAnnotation: L4RuleName}
+	svcObj.ResourceVersion = "2"
+	_, err = KubeClient.CoreV1().Services(NAMESPACE).Update(context.TODO(), svcObj, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating Service: %v", err)
+	}
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(false))
+	TearDownTestForSvcLB(t, g)
+	TeardownL4Rule(t, L4RuleName, NAMESPACE)
+
+	// test invalid service with spec.LoadBalancerClass empty for defaultLBController == false
+	SetUpTestForSvcLB(t)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(false))
+
+	SetupL4Rule(t, L4RuleName, NAMESPACE, ports)
+	g.Eventually(func() string {
+		l4Rule, _ := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(NAMESPACE).Get(context.TODO(), L4RuleName, metav1.GetOptions{})
+		return l4Rule.Status.Status
+	}, 30*time.Second).Should(gomega.Equal("Accepted"))
+
+	svcObj = (FakeService{
+		Name:         SINGLEPORTSVC,
+		Namespace:    NAMESPACE,
+		Type:         corev1.ServiceTypeLoadBalancer,
+		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
+	}).Service()
+	svcObj.Annotations = map[string]string{lib.L4RuleAnnotation: L4RuleName}
+	svcObj.ResourceVersion = "2"
+	_, err = KubeClient.CoreV1().Services(NAMESPACE).Update(context.TODO(), svcObj, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating Service: %v", err)
+	}
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(false))
+	TearDownTestForSvcLB(t, g)
+	TeardownL4Rule(t, L4RuleName, NAMESPACE)
+
+	lib.AKOControlConfig().SetDefaultLBController(true)
+}
 func TestCreateDeleteL4Rule(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
@@ -256,7 +373,7 @@ func TestUpdateDeleteL4Rule(t *testing.T) {
 	obj.Spec.PerformanceLimits.MaxConcurrentConnections = proto.Int32(100)
 	obj.Spec.PerformanceLimits.MaxThroughput = proto.Int32(30)
 	obj.Spec.VsDatascriptRefs = []string{"thisisaviref--new-ds1", "thisisaviref-new-ds2"}
-	obj.Spec.BackendProperties[0].MinServersUp = proto.Int32(2)
+	obj.Spec.BackendProperties[0].MinServersUp = proto.Uint32(2)
 	obj.Spec.BackendProperties[0].HealthMonitorRefs = []string{"thisisaviref-new-hm1", "thisisaviref-new-hm2"}
 	obj.Spec.BackendProperties[0].Enabled = proto.Bool(false)
 	obj.ResourceVersion = "2"
@@ -1017,7 +1134,7 @@ func TestSharedVIPSvcWithL4Rule(t *testing.T) {
 	ports := []int{8080}
 	modelName := "admin/cluster--red-ns-" + SHAREDVIPKEY
 
-	SetUpTestForSharedVIPSvcLB(t)
+	SetUpTestForSharedVIPSvcLB(t, corev1.ProtocolTCP, corev1.ProtocolTCP)
 
 	g.Eventually(func() bool {
 		found, _ := objects.SharedAviGraphLister().Get(modelName)
@@ -1107,4 +1224,517 @@ func TestSharedVIPSvcWithL4Rule(t *testing.T) {
 
 	TearDownTestForSharedVIPSvcLB(t, g)
 	TeardownL4Rule(t, L4RuleName, NAMESPACE)
+}
+
+func TestCreateDeleteL4RuleSSLCustomValues(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	// setting license to enterprise
+	SetupLicense := func(license string) {
+		AddMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			url := r.URL.EscapedPath()
+			if strings.Contains(url, "/api/systemconfiguration") {
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`{"default_license_tier": "` + license + `"}`))
+				return
+			}
+			NormalControllerServer(w, r)
+		})
+		// Set the license
+		aviRestClientPool := cache.SharedAVIClients()
+		lib.AKOControlConfig().SetLicenseType(aviRestClientPool.AviClient[0])
+	}
+	SetupLicense(lib.LicenseTypeEnterprise)
+
+	L4RuleName := "test-l4rule"
+	ports := []int{8080}
+
+	SetUpTestForSvcLB(t)
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(nodes).To(gomega.HaveLen(1))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
+	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
+
+	// Check for the pools
+	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
+	address := "1.1.1.1"
+	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
+
+	applicationProfileRef := proto.String("thisisaviref-l4-ssl-appprofile")
+	networkProfileRef := proto.String("thisisaviref-networkprofile-tcp-proxy")
+	sslKeyAndCertificateRefs := []string{"thisisaviref-sslkeyandcertref"}
+	sslProfileRef := proto.String("thisisaviref-sslprofileref")
+	// Create the L4Rule
+	SetupL4RuleSSL(t, L4RuleName, NAMESPACE, ports, applicationProfileRef, networkProfileRef, sslProfileRef, sslKeyAndCertificateRefs...)
+
+	g.Eventually(func() string {
+		l4Rule, _ := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(NAMESPACE).Get(context.TODO(), L4RuleName, metav1.GetOptions{})
+		return l4Rule.Status.Status
+	}, 30*time.Second).Should(gomega.Equal("Accepted"))
+
+	// Apply the  L4Rule to Service
+	svcObj := (FakeService{
+		Name:         SINGLEPORTSVC,
+		Namespace:    NAMESPACE,
+		Type:         corev1.ServiceTypeLoadBalancer,
+		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
+	}).Service()
+	svcObj.Annotations = map[string]string{lib.L4RuleAnnotation: L4RuleName}
+	svcObj.ResourceVersion = "2"
+	_, err := KubeClient.CoreV1().Services(NAMESPACE).Update(context.TODO(), svcObj, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating Service: %v", err)
+	}
+
+	expectedDefaultPoolName := fmt.Sprintf("cluster--%s-%s-%s-%d", NAMESPACE, SINGLEPORTSVC, "TCP", ports[0])
+	g.Eventually(func() bool {
+		found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		if !found {
+			return false
+		}
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return g.Expect(nodes[0].AviVsNodeCommonFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].AviVsNodeGeneratedFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolCommonFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolGeneratedFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].L4PolicyRefs).To(gomega.HaveLen(0)) &&
+			g.Expect(nodes[0].DefaultPool).To(gomega.Equal(expectedDefaultPoolName))
+	}, 30*time.Second).Should(gomega.Equal(true))
+
+	l4Rule := FakeL4Rule{
+		Name:       L4RuleName,
+		Namespace:  NAMESPACE,
+		Ports:      ports,
+		SSLEnabled: true,
+	}
+	obj := l4Rule.L4Rule()
+	convertL4RuleToSSL(obj, ports, applicationProfileRef, networkProfileRef, sslProfileRef, sslKeyAndCertificateRefs...)
+
+	_, aviModel = objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+
+	validateCRDValues(t, g, obj.Spec, nodes[0].AviVsNodeGeneratedFields, nodes[0].AviVsNodeCommonFields)
+
+	validateCRDValues(t, g, obj.Spec.BackendProperties[0],
+		nodes[0].PoolRefs[0].AviPoolGeneratedFields, nodes[0].PoolRefs[0].AviPoolCommonFields)
+
+	// Remove the  L4Rule from Service
+	svcObj.Annotations = nil
+	svcObj.ResourceVersion = "3"
+	_, err = KubeClient.CoreV1().Services(NAMESPACE).Update(context.TODO(), svcObj, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating Service: %v", err)
+	}
+
+	g.Eventually(func() bool {
+		found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		if !found {
+			return false
+		}
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return g.Expect(nodes[0].AviVsNodeCommonFields).To(gomega.BeZero()) &&
+			g.Expect(nodes[0].AviVsNodeGeneratedFields).To(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolCommonFields).To(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolGeneratedFields).To(gomega.BeZero())
+	}, 30*time.Second).Should(gomega.Equal(true))
+
+	TearDownTestForSvcLB(t, g)
+	TeardownL4Rule(t, L4RuleName, NAMESPACE)
+
+	// setting license back to basic
+	SetupLicense("BASIC")
+	ResetMiddleware()
+}
+
+func TestCreateDeleteL4RuleSSLDefaultValues(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	// setting license to enterprise
+	SetupLicense := func(license string) {
+		AddMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			url := r.URL.EscapedPath()
+			if strings.Contains(url, "/api/systemconfiguration") {
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`{"default_license_tier": "` + license + `"}`))
+				return
+			}
+			NormalControllerServer(w, r)
+		})
+		// Set the license
+		aviRestClientPool := cache.SharedAVIClients()
+		lib.AKOControlConfig().SetLicenseType(aviRestClientPool.AviClient[0])
+	}
+	SetupLicense(lib.LicenseTypeEnterprise)
+
+	L4RuleName := "test-l4rule"
+	ports := []int{8080}
+
+	SetUpTestForSvcLB(t)
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(nodes).To(gomega.HaveLen(1))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
+	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
+
+	// Check for the pools
+	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
+	address := "1.1.1.1"
+	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
+
+	// Create the L4Rule
+	SetupL4RuleSSL(t, L4RuleName, NAMESPACE, ports, nil, nil, nil)
+
+	g.Eventually(func() string {
+		l4Rule, _ := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(NAMESPACE).Get(context.TODO(), L4RuleName, metav1.GetOptions{})
+		return l4Rule.Status.Status
+	}, 30*time.Second).Should(gomega.Equal("Accepted"))
+
+	// Apply the  L4Rule to Service
+	svcObj := (FakeService{
+		Name:         SINGLEPORTSVC,
+		Namespace:    NAMESPACE,
+		Type:         corev1.ServiceTypeLoadBalancer,
+		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
+	}).Service()
+	svcObj.Annotations = map[string]string{lib.L4RuleAnnotation: L4RuleName}
+	svcObj.ResourceVersion = "2"
+	_, err := KubeClient.CoreV1().Services(NAMESPACE).Update(context.TODO(), svcObj, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating Service: %v", err)
+	}
+
+	expectedDefaultPoolName := fmt.Sprintf("cluster--%s-%s-%s-%d", NAMESPACE, SINGLEPORTSVC, "TCP", ports[0])
+	g.Eventually(func() bool {
+		found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		if !found {
+			return false
+		}
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return g.Expect(nodes[0].AviVsNodeCommonFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].AviVsNodeGeneratedFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolCommonFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolGeneratedFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].L4PolicyRefs).To(gomega.HaveLen(0)) &&
+			g.Expect(nodes[0].DefaultPool).To(gomega.Equal(expectedDefaultPoolName))
+	}, 30*time.Second).Should(gomega.Equal(true))
+
+	l4Rule := FakeL4Rule{
+		Name:       L4RuleName,
+		Namespace:  NAMESPACE,
+		Ports:      ports,
+		SSLEnabled: true,
+	}
+	obj := l4Rule.L4Rule()
+	convertL4RuleToSSL(obj, ports, nil, nil, nil)
+
+	_, aviModel = objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+
+	validateCRDValues(t, g, obj.Spec, nodes[0].AviVsNodeGeneratedFields, nodes[0].AviVsNodeCommonFields)
+
+	validateCRDValues(t, g, obj.Spec.BackendProperties[0],
+		nodes[0].PoolRefs[0].AviPoolGeneratedFields, nodes[0].PoolRefs[0].AviPoolCommonFields)
+
+	// Remove the  L4Rule from Service
+	svcObj.Annotations = nil
+	svcObj.ResourceVersion = "3"
+	_, err = KubeClient.CoreV1().Services(NAMESPACE).Update(context.TODO(), svcObj, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating Service: %v", err)
+	}
+
+	g.Eventually(func() bool {
+		found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		if !found {
+			return false
+		}
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return g.Expect(nodes[0].AviVsNodeCommonFields).To(gomega.BeZero()) &&
+			g.Expect(nodes[0].AviVsNodeGeneratedFields).To(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolCommonFields).To(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolGeneratedFields).To(gomega.BeZero())
+	}, 30*time.Second).Should(gomega.Equal(true))
+
+	TearDownTestForSvcLB(t, g)
+	TeardownL4Rule(t, L4RuleName, NAMESPACE)
+
+	// setting license back to basic
+	SetupLicense("BASIC")
+	ResetMiddleware()
+}
+
+func TestCreateDeleteL4RuleSSLWrongAppProfile(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	L4RuleName := "test-l4rule"
+	ports := []int{8080}
+
+	SetUpTestForSvcLB(t)
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(nodes).To(gomega.HaveLen(1))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
+	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
+
+	// Check for the pools
+	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
+	address := "1.1.1.1"
+	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
+
+	// setting appProfileRef to some unknown non ssl app profile
+	appProfileRefIncorrect := proto.String("thisisaviref-L4-custom-profile")
+	// Create the L4Rule
+	SetupL4RuleSSL(t, L4RuleName, NAMESPACE, ports, appProfileRefIncorrect, nil, nil)
+
+	g.Eventually(func() string {
+		l4Rule, _ := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(NAMESPACE).Get(context.TODO(), L4RuleName, metav1.GetOptions{})
+		return l4Rule.Status.Status
+	}, 30*time.Second).Should(gomega.Equal("Rejected"))
+
+	TearDownTestForSvcLB(t, g)
+	TeardownL4Rule(t, L4RuleName, NAMESPACE)
+}
+
+func TestCreateDeleteL4RuleNoSSLInSvc(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	L4RuleName := "test-l4rule"
+	ports := []int{8080}
+
+	SetUpTestForSvcLB(t)
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(nodes).To(gomega.HaveLen(1))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
+	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
+
+	// Check for the pools
+	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
+	address := "1.1.1.1"
+	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
+
+	// setting appProfileRef to valid ssl app profile
+	appProfileRef := proto.String("thisisaviref-l4-ssl-appprofile")
+
+	// Create the L4Rule
+	l4Rule := FakeL4Rule{
+		Name:       L4RuleName,
+		Namespace:  NAMESPACE,
+		Ports:      ports,
+		SSLEnabled: false,
+	}
+	obj := l4Rule.L4Rule()
+	convertL4RuleToSSL(obj, []int{}, appProfileRef, nil, nil)
+	if _, err := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(NAMESPACE).Create(context.TODO(), obj, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding L4Rule: %v", err)
+	}
+
+	g.Eventually(func() string {
+		l4Rule, _ := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(NAMESPACE).Get(context.TODO(), L4RuleName, metav1.GetOptions{})
+		return l4Rule.Status.Status
+	}, 30*time.Second).Should(gomega.Equal("Rejected"))
+
+	TearDownTestForSvcLB(t, g)
+	TeardownL4Rule(t, L4RuleName, NAMESPACE)
+}
+
+func TestCreateDeleteL4RuleSSLProfileWithWrongAppProfile(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	// this test case can also be written for ssk key and cert
+	L4RuleName := "test-l4rule"
+	ports := []int{8080}
+
+	SetUpTestForSvcLB(t)
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(nodes).To(gomega.HaveLen(1))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
+	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
+
+	// Check for the pools
+	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
+	address := "1.1.1.1"
+	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
+
+	// setting appProfileRef to some unknown non ssl app profile
+	appProfileRefIncorrect := proto.String("thisisaviref-L4-custom-profile")
+	sslProfileRef := proto.String("thisisaviref-sslprofileref")
+	// Create the L4Rule
+	SetupL4RuleSSL(t, L4RuleName, NAMESPACE, ports, appProfileRefIncorrect, nil, sslProfileRef)
+
+	g.Eventually(func() string {
+		l4Rule, _ := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(NAMESPACE).Get(context.TODO(), L4RuleName, metav1.GetOptions{})
+		return l4Rule.Status.Status
+	}, 30*time.Second).Should(gomega.Equal("Rejected"))
+
+	TearDownTestForSvcLB(t, g)
+	TeardownL4Rule(t, L4RuleName, NAMESPACE)
+}
+
+func TestCreateDeleteL4RuleSSLWrongNetworkProfile(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	L4RuleName := "test-l4rule"
+	ports := []int{8080}
+
+	SetUpTestForSvcLB(t)
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(nodes).To(gomega.HaveLen(1))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
+	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
+
+	// Check for the pools
+	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
+	address := "1.1.1.1"
+	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
+
+	// setting networkProfileRef to some unknown non tcp network profile
+	networkProfileRefIncorrect := proto.String("thisisaviref-network-custom-profile")
+	// Create the L4Rule
+	SetupL4RuleSSL(t, L4RuleName, NAMESPACE, ports, networkProfileRefIncorrect, nil, nil)
+
+	g.Eventually(func() string {
+		l4Rule, _ := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(NAMESPACE).Get(context.TODO(), L4RuleName, metav1.GetOptions{})
+		return l4Rule.Status.Status
+	}, 30*time.Second).Should(gomega.Equal("Rejected"))
+
+	TearDownTestForSvcLB(t, g)
+	TeardownL4Rule(t, L4RuleName, NAMESPACE)
+}
+
+func TestCreateDeleteL4RuleInOtherNS(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	L4RuleName := "test-l4rule-Other"
+	ports := []int{8080}
+
+	SetUpTestForSvcLB(t)
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(nodes).To(gomega.HaveLen(1))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
+	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
+
+	// Check for the pools
+	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
+	address := "1.1.1.1"
+	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
+
+	// Create the L4Rule
+	SetupL4Rule(t, L4RuleName, "default", ports)
+
+	g.Eventually(func() string {
+		l4Rule, _ := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules("default").Get(context.TODO(), L4RuleName, metav1.GetOptions{})
+		return l4Rule.Status.Status
+	}, 30*time.Second).Should(gomega.Equal("Accepted"))
+
+	// Apply the  L4Rule to Service
+	svcObj := (FakeService{
+		Name:         SINGLEPORTSVC,
+		Namespace:    NAMESPACE,
+		Type:         corev1.ServiceTypeLoadBalancer,
+		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
+	}).Service()
+	l4Ruleannotation := fmt.Sprintf("default/%s", L4RuleName)
+	svcObj.Annotations = map[string]string{lib.L4RuleAnnotation: l4Ruleannotation}
+	svcObj.ResourceVersion = "2"
+	_, err := KubeClient.CoreV1().Services(NAMESPACE).Update(context.TODO(), svcObj, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating Service: %v", err)
+	}
+
+	g.Eventually(func() bool {
+		found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		if !found {
+			return false
+		}
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return g.Expect(nodes[0].AviVsNodeCommonFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].AviVsNodeGeneratedFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolCommonFields).NotTo(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolGeneratedFields).NotTo(gomega.BeZero())
+	}, 30*time.Second).Should(gomega.Equal(true))
+
+	l4Rule := FakeL4Rule{
+		Name:      L4RuleName,
+		Namespace: "default",
+		Ports:     ports,
+	}
+	obj := l4Rule.L4Rule()
+
+	_, aviModel = objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+
+	validateCRDValues(t, g, obj.Spec, nodes[0].AviVsNodeGeneratedFields, nodes[0].AviVsNodeCommonFields)
+
+	validateCRDValues(t, g, obj.Spec.BackendProperties[0],
+		nodes[0].PoolRefs[0].AviPoolGeneratedFields, nodes[0].PoolRefs[0].AviPoolCommonFields)
+
+	// Remove the  L4Rule from Service
+	svcObj.Annotations = nil
+	svcObj.ResourceVersion = "3"
+	_, err = KubeClient.CoreV1().Services(NAMESPACE).Update(context.TODO(), svcObj, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating Service: %v", err)
+	}
+
+	g.Eventually(func() bool {
+		found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		if !found {
+			return false
+		}
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return g.Expect(nodes[0].AviVsNodeCommonFields).To(gomega.BeZero()) &&
+			g.Expect(nodes[0].AviVsNodeGeneratedFields).To(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolCommonFields).To(gomega.BeZero()) &&
+			g.Expect(nodes[0].PoolRefs[0].AviPoolGeneratedFields).To(gomega.BeZero())
+	}, 30*time.Second).Should(gomega.Equal(true))
+
+	TearDownTestForSvcLB(t, g)
+	TeardownL4Rule(t, L4RuleName, "default")
 }

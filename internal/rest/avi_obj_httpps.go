@@ -188,7 +188,7 @@ func (rest *RestOperations) AviHttpPSBuild(hps_meta *nodes.AviHttpPolicySetNode,
 		protocol := "HTTPS"
 		redirect_action.StatusCode = &hppmap.StatusCode
 		redirect_action.Protocol = &protocol
-		redirect_action.Port = &hppmap.RedirectPort
+		redirect_action.Port = uint32(hppmap.RedirectPort)
 		var j int32
 		j = idx
 		rule := avimodels.HTTPRequestRule{Enable: &enable, Index: &j,
@@ -230,6 +230,18 @@ func (rest *RestOperations) AviHttpPSBuild(hps_meta *nodes.AviHttpPolicySetNode,
 			http_req_pol.Rules = append(http_req_pol.Rules, &rule)
 		}
 
+	}
+
+	if hps_meta.RequestRules != nil {
+		hps.HTTPRequestPolicy = &avimodels.HTTPRequestPolicy{
+			Rules: hps_meta.RequestRules,
+		}
+	}
+
+	if hps_meta.ResponseRules != nil {
+		hps.HTTPResponsePolicy = &avimodels.HTTPResponsePolicy{
+			Rules: hps_meta.ResponseRules,
+		}
 	}
 
 	var path string

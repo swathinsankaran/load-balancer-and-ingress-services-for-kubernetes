@@ -21,7 +21,7 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
 
-	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
 	avimodels "github.com/vmware/alb-sdk/go/models"
@@ -74,9 +74,6 @@ func (o *AviObjectGraph) BuildDedicatedL7VSGraphHostNameShard(vsName, hostname s
 		if !utils.HasElem(pathFQDNs, gslbHostHeader) {
 			pathFQDNs = append(pathFQDNs, gslbHostHeader)
 		}
-		if !utils.HasElem(vsNode[0].VSVIPRefs[0].FQDNs, gslbHostHeader) {
-			vsNode[0].VSVIPRefs[0].FQDNs = append(vsNode[0].VSVIPRefs[0].FQDNs, gslbHostHeader)
-		}
 		objects.SharedCRDLister().UpdateLocalFQDNToGSFqdnMapping(hostname, gslbHostHeader)
 	} else {
 		if found {
@@ -88,6 +85,7 @@ func (o *AviObjectGraph) BuildDedicatedL7VSGraphHostNameShard(vsName, hostname s
 	RemoveRedirectHTTPPolicyInModel(vsNode[0], pathFQDNs, key)
 	vsNode[0].DeletSSLRefInDedicatedNode(key)
 	vsNode[0].DeleteSSLPort(key)
+	vsNode[0].Secure = false
 	vsNode[0].DeleteSecureAppProfile(key)
 	objType := routeIgrObj.GetType()
 	isIngr := objType == utils.Ingress
@@ -112,7 +110,7 @@ func (o *AviObjectGraph) BuildDedicatedL7VSGraphHostNameShard(vsName, hostname s
 	objects.SharedCRDLister().UpdateFQDNToAliasesMappings(hostname, vsNode[0].VHDomainNames)
 }
 
-func (o *AviObjectGraph) BuildPoolPGPolicyForDedicatedVS(vsNode []*AviVsNode, namespace, ingName, hostname string, infraSetting *akov1alpha1.AviInfraSetting, key string, pathFQDNs []string, paths []IngressHostPathSvc, insecureEdgeTermAllow, isIngr bool) {
+func (o *AviObjectGraph) BuildPoolPGPolicyForDedicatedVS(vsNode []*AviVsNode, namespace, ingName, hostname string, infraSetting *akov1beta1.AviInfraSetting, key string, pathFQDNs []string, paths []IngressHostPathSvc, insecureEdgeTermAllow, isIngr bool) {
 	localPGList := make(map[string]*AviPoolGroupNode)
 	var policyNode *AviHttpPolicySetNode
 	var pgfound bool
@@ -236,7 +234,7 @@ func (o *AviObjectGraph) BuildL7VSGraphHostNameShard(vsName, hostname string, ro
 	var priorityLabel string
 	var poolName string
 	var serviceName string
-	var infraSetting *akov1alpha1.AviInfraSetting
+	var infraSetting *akov1beta1.AviInfraSetting
 	var infraSettingName string
 	infraSetting = routeIgrObj.GetAviInfraSetting()
 	if infraSetting != nil {
@@ -299,7 +297,7 @@ func (o *AviObjectGraph) BuildL7VSGraphHostNameShard(vsName, hostname string, ro
 	}
 }
 
-func buildPoolNode(key, poolName, ingName, namespace, priorityLabel, hostname string, infraSetting *akov1alpha1.AviInfraSetting, serviceName string, storedHosts []string, insecureEdgeTermAllow bool, obj IngressHostPathSvc) *AviPoolNode {
+func buildPoolNode(key, poolName, ingName, namespace, priorityLabel, hostname string, infraSetting *akov1beta1.AviInfraSetting, serviceName string, storedHosts []string, insecureEdgeTermAllow bool, obj IngressHostPathSvc) *AviPoolNode {
 	poolNode := &AviPoolNode{
 		Name:          poolName,
 		IngressName:   ingName,
@@ -318,9 +316,12 @@ func buildPoolNode(key, poolName, ingName, namespace, priorityLabel, hostname st
 		VrfContext: lib.GetVrf(),
 	}
 
-	poolNode.NetworkPlacementSettings, _ = lib.GetNodeNetworkMap()
+	poolNode.NetworkPlacementSettings = lib.GetNodeNetworkMap()
 
-	t1lr := objects.SharedWCPLister().GetT1LrForNamespace(namespace)
+	t1lr := lib.GetT1LRPath()
+	if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
+		t1lr = *infraSetting.Spec.NSXSettings.T1LR
+	}
 	if t1lr != "" {
 		poolNode.T1Lr = t1lr
 		// Unset the poolnode's vrfcontext.
@@ -570,14 +571,14 @@ func sniNodeHostName(routeIgrObj RouteIngressModel, tlssetting TlsSettings, ingN
 			return nil, dedicated
 		}
 
+		modelGraph := aviModel.(*AviObjectGraph)
+		modelGraph.BuildModelGraphForSNI(routeIgrObj, ingressHostMap, sniHosts, tlssetting, ingName, namespace, infraSetting, sniHost, paths.gslbHostHeader, key)
 		if found {
 			// if vsNode already exists, check for updates via AviInfraSetting
 			if infraSetting != nil {
-				buildWithInfraSetting(key, vsNode[0], vsNode[0].VSVIPRefs[0], infraSetting)
+				buildWithInfraSetting(key, namespace, vsNode[0], vsNode[0].VSVIPRefs[0], infraSetting)
 			}
 		}
-		modelGraph := aviModel.(*AviObjectGraph)
-		modelGraph.BuildModelGraphForSNI(routeIgrObj, ingressHostMap, sniHosts, tlssetting, ingName, namespace, infraSetting, sniHost, paths.gslbHostHeader, key)
 		// Only add this node to the list of models if the checksum has changed.
 		modelChanged := saveAviModel(model_name, modelGraph, key)
 		if !utils.HasElem(*modelList, model_name) && modelChanged {
@@ -588,7 +589,7 @@ func sniNodeHostName(routeIgrObj RouteIngressModel, tlssetting TlsSettings, ingN
 	return hostPathSvcMap, dedicated
 }
 
-func (o *AviObjectGraph) BuildModelGraphForSNI(routeIgrObj RouteIngressModel, ingressHostMap SecureHostNameMapProp, sniHosts []string, tlssetting TlsSettings, ingName, namespace string, infraSetting *akov1alpha1.AviInfraSetting, sniHost, gsFqdn string, key string) {
+func (o *AviObjectGraph) BuildModelGraphForSNI(routeIgrObj RouteIngressModel, ingressHostMap SecureHostNameMapProp, sniHosts []string, tlssetting TlsSettings, ingName, namespace string, infraSetting *akov1beta1.AviInfraSetting, sniHost, gsFqdn string, key string) {
 	o.Lock.Lock()
 	defer o.Lock.Unlock()
 	var sniNode *AviVsNode
@@ -638,6 +639,7 @@ func (o *AviObjectGraph) BuildModelGraphForSNI(routeIgrObj RouteIngressModel, in
 		vsNode[0].ServiceMetadata.Namespace = namespace
 		vsNode[0].ServiceMetadata.HostNames = sniHosts
 		vsNode[0].AddSSLPort(key)
+		vsNode[0].Secure = true
 		vsNode[0].ApplicationProfile = utils.DEFAULT_L7_SECURE_APP_PROFILE
 		vsNode[0].AviMarkers = lib.PopulateVSNodeMarkers(namespace, sniHost, infraSettingName)
 	}

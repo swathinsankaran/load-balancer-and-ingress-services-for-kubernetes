@@ -22,8 +22,9 @@ import (
 	"strings"
 	"sync"
 
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
+
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
-	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
 	avimodels "github.com/vmware/alb-sdk/go/models"
@@ -167,7 +168,7 @@ func (v *AviVsNode) CalculateForGraphChecksum() uint32 {
 	for _, sslkey := range v.SSLKeyCertRefs {
 		checksumStringSlice = append(checksumStringSlice, fmt.Sprint(sslkey.GetCheckSum()))
 	}
-	for _, sslkey := range v.SSLKeyCertAviRef {
+	for _, sslkey := range v.SslKeyAndCertificateRefs {
 		checksumStringSlice = append(checksumStringSlice, fmt.Sprint(utils.Hash(sslkey)))
 	}
 	for _, httppol := range v.HttpPolicyRefs {
@@ -406,12 +407,12 @@ type AviVsNode struct {
 	ICAPProfileRefs       []string
 	ErrorPageProfileRef   string
 	HttpPolicySetRefs     []string
-	SSLKeyCertAviRef      []string
 	AviMarkers            utils.AviObjectMarkers
 	Paths                 []string
 	IngressNames          []string
 	Dedicated             bool
 	IsL4VS                bool
+	Secure                bool
 
 	AviVsNodeCommonFields
 
@@ -425,12 +426,13 @@ type AviVsNode struct {
 // This struct is added to avoid any collision between the generated and
 // existing struct fields.
 type AviVsNodeCommonFields struct {
-	AnalyticsPolicy       *avimodels.AnalyticsPolicy
-	AnalyticsProfileRef   *string
-	ApplicationProfileRef *string
-	SslProfileRef         *string
-	VsDatascriptRefs      []string
-	WafPolicyRef          *string
+	AnalyticsPolicy          *avimodels.AnalyticsPolicy
+	AnalyticsProfileRef      *string
+	ApplicationProfileRef    *string
+	SslProfileRef            *string
+	VsDatascriptRefs         []string
+	WafPolicyRef             *string
+	SslKeyAndCertificateRefs []string // refs to avi sslkeyandcertificate objs
 }
 
 // Implementing AviVsEvhSniModel
@@ -449,6 +451,10 @@ func (v *AviVsNode) IsSharedVS() bool {
 
 func (v *AviVsNode) IsDedicatedVS() bool {
 	return v.Dedicated
+}
+
+func (v *AviVsNode) IsSecure() bool {
+	return v.Secure
 }
 
 func (v *AviVsNode) GetPortProtocols() []AviPortHostProtocol {
@@ -499,12 +505,12 @@ func (v *AviVsNode) SetServiceMetadata(serviceMetadata lib.ServiceMetadataObj) {
 	v.ServiceMetadata = serviceMetadata
 }
 
-func (v *AviVsNode) GetSSLKeyCertAviRef() []string {
-	return v.SSLKeyCertAviRef
+func (v *AviVsNode) GetSslKeyAndCertificateRefs() []string {
+	return v.SslKeyAndCertificateRefs
 }
 
-func (v *AviVsNode) SetSSLKeyCertAviRef(sslKeyCertAviRef []string) {
-	v.SSLKeyCertAviRef = sslKeyCertAviRef
+func (v *AviVsNode) SetSslKeyAndCertificateRefs(sslKeyAndCertificateRefs []string) {
+	v.SslKeyAndCertificateRefs = sslKeyAndCertificateRefs
 }
 
 func (v *AviVsNode) GetWafPolicyRef() *string {
@@ -614,6 +620,14 @@ func (v *AviVsNode) GetGeneratedFields() *AviVsNodeGeneratedFields {
 
 func (v *AviVsNode) GetCommonFields() *AviVsNodeCommonFields {
 	return &v.AviVsNodeCommonFields
+}
+
+func (v *AviVsNode) GetNetworkSecurityPolicyRef() *string {
+	return v.NetworkSecurityPolicyRef
+}
+
+func (v *AviVsNode) SetNetworkSecurityPolicyRef(networkSecurityPolicyRef *string) {
+	v.NetworkSecurityPolicyRef = networkSecurityPolicyRef
 }
 
 func (o *AviObjectGraph) GetAviVS() []*AviVsNode {
@@ -916,8 +930,8 @@ func (v *AviVsNode) CalculateCheckSum() {
 	for _, sslkeycert := range v.SSLKeyCertRefs {
 		checksumStringSlice = append(checksumStringSlice, "SSLKeyCert"+sslkeycert.Name)
 	}
-	for _, sslkeycert := range v.SSLKeyCertAviRef {
-		checksumStringSlice = append(checksumStringSlice, "SSLKeyCertAvi"+sslkeycert)
+	for _, sslkeycert := range v.SslKeyAndCertificateRefs {
+		checksumStringSlice = append(checksumStringSlice, "SslKeyAndCertificate"+sslkeycert)
 	}
 	for _, vsvipref := range v.VSVIPRefs {
 		checksumStringSlice = append(checksumStringSlice, "VSVIP"+vsvipref.Name)
@@ -1052,7 +1066,11 @@ func (v *AviL4PolicyNode) CalculateCheckSum() {
 	var checksum uint32
 	var ports []int64
 	var protocols []string
-
+	if len(v.PortPool) > 0 {
+		sort.Slice(v.PortPool, func(i, j int) bool {
+			return v.PortPool[i].Name < v.PortPool[j].Name
+		})
+	}
 	for _, hpp := range v.PortPool {
 		ports = append(ports, int64(hpp.Port))
 		protocols = append(protocols, hpp.Protocol)
@@ -1091,6 +1109,8 @@ type AviHttpPolicySetNode struct {
 	SecurityRules      []AviHTTPSecurity
 	AviMarkers         utils.AviObjectMarkers
 	AttachedToSharedVS bool
+	RequestRules       []*avimodels.HTTPRequestRule
+	ResponseRules      []*avimodels.HTTPResponseRule
 }
 
 func (v *AviHttpPolicySetNode) GetCheckSum() uint32 {
@@ -1118,6 +1138,14 @@ func (v *AviHttpPolicySetNode) CalculateCheckSum() {
 	}
 
 	checksum += lib.GetMarkersChecksum(v.AviMarkers)
+
+	if v.RequestRules != nil {
+		checksum += utils.Hash(utils.Stringify(v.RequestRules))
+	}
+
+	if v.ResponseRules != nil {
+		checksum += utils.Hash(utils.Stringify(v.ResponseRules))
+	}
 
 	v.CloudConfigCksum = checksum
 }
@@ -1238,6 +1266,7 @@ type AviPortHostProtocol struct {
 	Passthrough bool
 	Redirect    bool
 	EnableSSL   bool
+	EnableHTTP2 bool
 	Name        string
 }
 
@@ -1248,7 +1277,7 @@ type AviVSVIPNode struct {
 	FQDNs                   []string
 	VrfContext              string
 	IPAddress               string
-	VipNetworks             []akov1alpha1.AviInfraSettingVipNetwork
+	VipNetworks             []akov1beta1.AviInfraSettingVipNetwork
 	EnablePublicIP          *bool
 	BGPPeerLabels           []string
 	SecurePassthroughNode   *AviVsNode
@@ -1279,6 +1308,11 @@ func (v *AviVSVIPNode) CalculateCheckSum() {
 			chksumstr := vipNetwork.NetworkName + ":" + vipNetwork.Cidr
 			if vipNetwork.V6Cidr != "" {
 				chksumstr += ":" + vipNetwork.V6Cidr
+			}
+			// Network UUID will be published for networks with duplicate nw only.
+			// For existing vip(with no dup nw) cksum should be same
+			if vipNetwork.NetworkUUID != "" {
+				chksumstr += ":" + vipNetwork.NetworkUUID
 			}
 			vipNetworkStringList = append(vipNetworkStringList, chksumstr)
 
@@ -1485,7 +1519,7 @@ type AviPoolNode struct {
 	ServiceMetadata          lib.ServiceMetadataObj
 	SniEnabled               bool
 	PkiProfile               *AviPkiProfileNode
-	NetworkPlacementSettings map[string][]string
+	NetworkPlacementSettings map[string]lib.NodeNetworkMap
 	VrfContext               string
 	T1Lr                     string // Only applicable to NSX-T cloud, if this value is set, we automatically should unset the VRF context value.
 	AviMarkers               utils.AviObjectMarkers
@@ -1661,7 +1695,7 @@ type IngressHostPathSvc struct {
 	Path           string
 	PathType       networkingv1.PathType
 	Port           int32
-	weight         int32 //required for alternate backends in openshift route
+	weight         uint32 //required for alternate backends in openshift route
 	PortName       string
 	TargetPort     intstr.IntOrString
 	clusterContext string // required for Multi-cluster ingress

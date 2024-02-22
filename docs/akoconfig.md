@@ -11,7 +11,7 @@ metadata:
   namespace: avi-system
 spec:
   replicaCount: 1
-  imageRepository: projects.registry.vmware.com/ako/ako:1.9.1
+  imageRepository: projects.registry.vmware.com/ako/ako:1.10.1
   imagePullPolicy: "IfNotPresent"
   akoSettings:
     enableEvents: true
@@ -32,6 +32,7 @@ spec:
     istioEnabled: false
     ipFamily: ""
     blockedNamespaceList: []
+    useDefaultSecretsOnly: false
 
   networkSettings:
     nodeNetworkList: []
@@ -82,7 +83,7 @@ spec:
   ```
 
   - `metadata.finalizers`: Used for garbage collection. This field must have this element: `ako.vmware.com/cleanup`. Whenever, the AKOConfig object is deleted, the ako operator takes care of removing all the AKO related artifacts because of this finalizer.
-  - `metadata.name`: Name of the AKOConfig object. With `helm install`, the name of the default AKOConfig object is `ako-config`.
+  - `metadata.name`: Name of the AKOConfig object.
   - `metadata.namespace`: The namespace in which the AKOConfig object (and hence, the ako-operator) will be created. Only `avi-system` namespace is allowed for the ako-operator.
   - `spec.imageRepository`: The image repository for the ako-operator.
   - `spec.replicaCount`: The number of replicas for AKO StatefulSet
@@ -94,7 +95,7 @@ spec:
     * `deleteConfig`: Set to true if user wants to delete AKO created objects from Avi. Default value is `false`.
     * `disableStaticRouteSync`: Disables static route syncing if set to `true`. Default value is `false`.
     * `clusterName`: Unique identifier for the running AKO controller instance. The AKO controller identifies objects, which it created on Avi Controller using the `clusterName` param.
-    * `cniPlugin`: Set the string if your CNI is calico or openshift. Specify one of: `calico`, `canal`, `flannel`, `openshift`, `antrea`, `ncp`.
+    * `cniPlugin`: The CNI plugin to be used in Openshift cluster. Specify one of: `openshift`, `ovn-kubernetes`.
     * `enableEVH`: This enables the Enhanced Virtual Hosting Model in Avi Controller for the Virtual Services
     * `layer7Only`: If this flag is switched on, then AKO will only do layer 7 loadbalancing.
     * `namespaceSelector.labelKey`: Set the key of a namespace's label, if the requirement is to sync k8s objects from that namespace.
@@ -104,10 +105,11 @@ spec:
     * `istioEnabled`: This flag needs to be enabled when AKO is be to brought up in an Istio environment.
     * `ipFamily`: IPFamily specifies IP family to be used. This flag can take values `V4` or `V6` (default `V4`). This is for the backend pools to use ipv6 or ipv4. For frontside VS, use v6cidr
     * `blockedNamespaceList`: This is the list of system namespaces from which AKO will not listen any Kubernetes or Openshift object event.
+    * `useDefaultSecretsOnly`: If this flag is set to true, AKO will only handle default secrets from the namespace where AKO is installed. This flag is applicable only to Openshift clusters.
   - `networkSettings`: Data network setting
     * `nodeNetworkList`: This list of network and cidrs are used in pool placement network for vcenter cloud. Node Network details are not needed when in nodeport mode / static routes are disabled / non vcenter clouds.
     * `enableRHI`: This is a cluster wide setting for BGP peering.
-    * `nsxtT1LR`: T1 Logical Segment mapping for backend network. Only applies to NSX-T cloud.
+    * `nsxtT1LR`: Unique ID (note: not display name) of the T1 Logical Router for Service Engine connectivity. Only applies to NSX-T cloud.
     * `bgpPeerLabels`: Select BGP peers using bgpPeerLabels, for selective VsVip advertisement.
     * `vipNetworkList`: List of Network Names and Subnet Information for VIP network, multiple networks allowed only for AWS Cloud.
   - `l7Settings`: Settings for L7 Virtual Services
@@ -124,7 +126,8 @@ spec:
     * `controllerVersion`: The controller API version.
     * `cloudName`: The configured cloud name on the AVI controller.
     * `controllerIP`: The IP Address (URL) of the AVI Controller.
-    * `tenantName`: Name of the tenant where the AKO controller will create objects in AVI.
+    * `tenantName`: Name of the tenant where the AVI controller will create objects in AVI.
+    * `vrfName`: Name of the vrfContext present. All AKO created objects, static routes will be associated with this VRF Context.
   - `nodePortSelector`: Only applicable if `l7Settings.serviceType` is set to `NodePort`.
     * `key`
     * `value`

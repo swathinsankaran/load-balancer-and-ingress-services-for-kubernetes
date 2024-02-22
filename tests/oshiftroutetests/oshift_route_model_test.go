@@ -27,6 +27,8 @@ import (
 	avinodes "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
 	crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned/fake"
+	v1beta1crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/clientset/versioned/fake"
+
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/tests/integrationtest"
 
 	utils "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
@@ -40,6 +42,7 @@ import (
 
 var KubeClient *k8sfake.Clientset
 var CRDClient *crdfake.Clientset
+var V1beta1CRDClient *v1beta1crdfake.Clientset
 var ctrl *k8s.AviController
 
 func TestMain(m *testing.M) {
@@ -51,11 +54,14 @@ func TestMain(m *testing.M) {
 	os.Setenv("NODE_NETWORK_LIST", `[{"networkName":"net123","cidrs":["10.79.168.0/22"]}]`)
 	os.Setenv("POD_NAMESPACE", utils.AKO_DEFAULT_NS)
 	os.Setenv("SHARD_VS_SIZE", "LARGE")
+	os.Setenv("POD_NAME", "ako-0")
 
 	akoControlConfig := lib.AKOControlConfig()
 	KubeClient = k8sfake.NewSimpleClientset()
 	CRDClient = crdfake.NewSimpleClientset()
+	V1beta1CRDClient = v1beta1crdfake.NewSimpleClientset()
 	akoControlConfig.SetCRDClientset(CRDClient)
+	akoControlConfig.Setv1beta1CRDClientset(V1beta1CRDClient)
 	akoControlConfig.SetEventRecorder(lib.AKOEventComponent, KubeClient, true)
 	akoControlConfig.SetAKOInstanceFlag(true)
 	data := map[string][]byte{
@@ -79,7 +85,7 @@ func TestMain(m *testing.M) {
 	}
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: KubeClient}, registeredInformers, informersArg)
 	informers := k8s.K8sinformers{Cs: KubeClient}
-	k8s.NewCRDInformers(CRDClient)
+	k8s.NewCRDInformers()
 
 	mcache := cache.SharedAviObjCache()
 	cloudObj := &cache.AviCloudPropertyCache{Name: "Default-Cloud", VType: "mock"}
@@ -119,6 +125,8 @@ func TestMain(m *testing.M) {
 	ctrl.SetSEGroupCloudNameFromNSAnnotations()
 
 	SetupRouteNamespaceSync(defaultKey, defaultValue)
+	integrationtest.AddDefaultNamespace()
+	integrationtest.AddDefaultNamespace("red")
 
 	go ctrl.InitController(informers, registeredInformers, ctrlCh, stopCh, quickSyncCh, waitGroupMap)
 
@@ -212,7 +220,7 @@ func TestRouteDefaultPath(t *testing.T) {
 func TestRouteServiceDel(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	SetUpTestForRoute(t, defaultModelName)
-	integrationtest.CreateSVC(t, "default", "newsvc", corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateSVC(t, "default", "newsvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
 	integrationtest.CreateEP(t, "default", "newsvc", false, false, "3.3.3")
 	routeExample := FakeRoute{Path: "/foo", ServiceName: "newsvc"}.Route()
 	_, err := OshiftClient.RouteV1().Routes(defaultNamespace).Create(context.TODO(), routeExample, metav1.CreateOptions{})
@@ -266,7 +274,7 @@ func TestRouteServiceAdd(t *testing.T) {
 		t.Fatalf("error in adding route: %v", err)
 	}
 
-	integrationtest.CreateSVC(t, "default", "newsvc", corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateSVC(t, "default", "newsvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
 	integrationtest.CreateEP(t, "default", "newsvc", false, false, "3.3.3")
 
 	aviModel := ValidateModelCommon(t, g)
@@ -434,7 +442,7 @@ func TestRouteUpdatePath(t *testing.T) {
 func TestAlternateBackendNoPath(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	SetUpTestForRoute(t, defaultModelName)
-	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
 	integrationtest.CreateEP(t, "default", "absvc2", false, false, "3.3.3")
 	time.Sleep(2 * time.Second)
 	routeExample := FakeRoute{}.ABRoute()
@@ -459,10 +467,10 @@ func TestAlternateBackendNoPath(t *testing.T) {
 	for _, pgmember := range poolgroups[0].Members {
 		if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com-default-foo-avisvc" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(100)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(100)))
 		} else if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com-default-foo-absvc2" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(200)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(200)))
 		} else {
 			t.Fatalf("unexpected pgmember: %s", *pgmember.PoolRef)
 		}
@@ -478,7 +486,7 @@ func TestAlternateBackendNoPath(t *testing.T) {
 func TestAlternateBackendDefaultPath(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	SetUpTestForRoute(t, defaultModelName)
-	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
 	integrationtest.CreateEP(t, "default", "absvc2", false, false, "3.3.3")
 	routeExample := FakeRoute{Path: "/foo"}.ABRoute()
 	_, err := OshiftClient.RouteV1().Routes(defaultNamespace).Create(context.TODO(), routeExample, metav1.CreateOptions{})
@@ -502,10 +510,10 @@ func TestAlternateBackendDefaultPath(t *testing.T) {
 	for _, pgmember := range poolgroups[0].Members {
 		if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com_foo-default-foo-avisvc" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com/foo"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(100)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(100)))
 		} else if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com_foo-default-foo-absvc2" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com/foo"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(200)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(200)))
 		} else {
 			t.Fatalf("unexpected pgmember: %s", *pgmember.PoolRef)
 		}
@@ -521,7 +529,7 @@ func TestAlternateBackendDefaultPath(t *testing.T) {
 func TestRemoveAlternateBackend(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	SetUpTestForRoute(t, defaultModelName)
-	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
 	integrationtest.CreateEP(t, "default", "absvc2", false, false, "3.3.3")
 	routeExample := FakeRoute{Path: "/foo"}.ABRoute()
 	_, err := OshiftClient.RouteV1().Routes(defaultNamespace).Create(context.TODO(), routeExample, metav1.CreateOptions{})
@@ -551,7 +559,7 @@ func TestRemoveAlternateBackend(t *testing.T) {
 	for _, pgmember := range poolgroups[0].Members {
 		if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com_foo-default-foo-avisvc" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com/foo"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(100)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(100)))
 		} else {
 			t.Fatalf("unexpected pgmember: %s", *pgmember.PoolRef)
 		}
@@ -567,7 +575,7 @@ func TestRemoveAlternateBackend(t *testing.T) {
 func TestAlternateBackendUpdatePath(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	SetUpTestForRoute(t, defaultModelName)
-	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
 	integrationtest.CreateEP(t, "default", "absvc2", false, false, "3.3.3")
 	routeExample := FakeRoute{Path: "/foo"}.ABRoute()
 	_, err := OshiftClient.RouteV1().Routes(defaultNamespace).Create(context.TODO(), routeExample, metav1.CreateOptions{})
@@ -601,10 +609,10 @@ func TestAlternateBackendUpdatePath(t *testing.T) {
 	for _, pgmember := range poolgroups[0].Members {
 		if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com_bar-default-foo-avisvc" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com/bar"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(100)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(100)))
 		} else if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com_bar-default-foo-absvc2" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com/bar"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(200)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(200)))
 		} else {
 			t.Fatalf("unexpected pgmember: %s", *pgmember.PoolRef)
 		}
@@ -620,7 +628,7 @@ func TestAlternateBackendUpdatePath(t *testing.T) {
 func TestAlternateBackendUpdateWeight(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	SetUpTestForRoute(t, defaultModelName)
-	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
 	integrationtest.CreateEP(t, "default", "absvc2", false, false, "3.3.3")
 	time.Sleep(2 * time.Second)
 	routeExample := FakeRoute{Path: "/foo"}.ABRoute()
@@ -651,10 +659,10 @@ func TestAlternateBackendUpdateWeight(t *testing.T) {
 	for _, pgmember := range poolgroups[0].Members {
 		if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com_foo-default-foo-avisvc" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com/foo"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(100)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(100)))
 		} else if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com_foo-default-foo-absvc2" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com/foo"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(300)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(300)))
 		} else {
 			t.Fatalf("unexpected pgmember: %s", *pgmember.PoolRef)
 		}

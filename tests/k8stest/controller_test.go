@@ -24,6 +24,8 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/k8s"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned/fake"
+	v1beta1crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/clientset/versioned/fake"
+
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/tests/integrationtest"
 
 	corev1 "k8s.io/api/core/v1"
@@ -41,6 +43,7 @@ import (
 
 var kubeClient *k8sfake.Clientset
 var crdClient *crdfake.Clientset
+var v1beta1crdClient *v1beta1crdfake.Clientset
 var dynamicClient *dynamicfake.FakeDynamicClient
 var keyChan chan string
 var ctrl *k8s.AviController
@@ -95,6 +98,7 @@ func TestMain(m *testing.M) {
 	os.Setenv("POD_NAMESPACE", utils.AKO_DEFAULT_NS)
 	os.Setenv("SHARD_VS_SIZE", "LARGE")
 	os.Setenv("MCI_ENABLED", "true")
+	os.Setenv("POD_NAME", "ako-0")
 
 	data := map[string][]byte{
 		"username": []byte("admin"),
@@ -106,9 +110,12 @@ func TestMain(m *testing.M) {
 
 	akoControlConfig := lib.AKOControlConfig()
 	crdClient = crdfake.NewSimpleClientset()
+	v1beta1crdClient = v1beta1crdfake.NewSimpleClientset()
 	akoControlConfig.SetCRDClientset(crdClient)
+	akoControlConfig.Setv1beta1CRDClientset(v1beta1crdClient)
 	akoControlConfig.SetAKOInstanceFlag(true)
 	akoControlConfig.SetEventRecorder(lib.AKOEventComponent, kubeClient, true)
+	akoControlConfig.SetDefaultLBController(true)
 
 	registeredInformers := []string{
 		utils.ServiceInformer,
@@ -125,7 +132,7 @@ func TestMain(m *testing.M) {
 	args := make(map[string]interface{})
 	args[utils.INFORMERS_AKO_CLIENT] = crdClient
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: kubeClient}, registeredInformers, args)
-	k8s.NewCRDInformers(crdClient)
+	k8s.NewCRDInformers()
 	integrationtest.InitializeFakeAKOAPIServer()
 
 	integrationtest.NewAviFakeClientInstance(kubeClient)
@@ -289,8 +296,8 @@ func TestIngressNoUpdate(t *testing.T) {
 	waitAndverify(t, "Ingress/red-ns/testingr-noupdate")
 
 	ingrNoUpdate.Status = networkingv1.IngressStatus{
-		LoadBalancer: corev1.LoadBalancerStatus{
-			Ingress: []corev1.LoadBalancerIngress{
+		LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+			Ingress: []networkingv1.IngressLoadBalancerIngress{
 				{
 					IP:       "1.1.1.1",
 					Hostname: "testingr.avi.internal",
@@ -305,8 +312,8 @@ func TestIngressNoUpdate(t *testing.T) {
 	}
 
 	ingrNoUpdate.Status = networkingv1.IngressStatus{
-		LoadBalancer: corev1.LoadBalancerStatus{
-			Ingress: []corev1.LoadBalancerIngress{
+		LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+			Ingress: []networkingv1.IngressLoadBalancerIngress{
 				{
 					IP:       "1.1.1.1",
 					Hostname: "testingr.avi.internal",

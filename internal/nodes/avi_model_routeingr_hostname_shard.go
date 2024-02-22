@@ -17,7 +17,7 @@ package nodes
 import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
-	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -55,7 +55,7 @@ func HostNameShardAndPublish(objType, objname, namespace, key string, fullsync b
 	defer func(routeIgrObj RouteIngressModel) {
 		if aviInfraSetting := routeIgrObj.GetAviInfraSetting(); aviInfraSetting != nil {
 			var shardSize string
-			if aviInfraSetting.Spec.L7Settings != (akov1alpha1.AviInfraL7Settings{}) {
+			if aviInfraSetting.Spec.L7Settings != (akov1beta1.AviInfraL7Settings{}) {
 				shardSize = aviInfraSetting.Spec.L7Settings.ShardSize
 			}
 			objects.InfraSettingL7Lister().UpdateIngRouteInfraSettingMappings(namespace+"/"+objname, aviInfraSetting.Name, shardSize)
@@ -192,16 +192,17 @@ func ProcessInsecureHosts(routeIgrObj RouteIngressModel, key string, parsedIng I
 
 		vsNode := aviModel.(*AviObjectGraph).GetAviVS()
 		infraSetting := routeIgrObj.GetAviInfraSetting()
-		if len(vsNode) > 0 && found {
-			// if vsNode already exists, check for updates via AviInfraSetting
-			if infraSetting != nil {
-				buildWithInfraSetting(key, vsNode[0], vsNode[0].VSVIPRefs[0], infraSetting)
-			}
-		}
+
 		if !shardVsName.Dedicated {
 			aviModel.(*AviObjectGraph).BuildL7VSGraphHostNameShard(shardVsName.Name, host, routeIgrObj, pathsvcmap.ingressHPSvc, pathsvcmap.gslbHostHeader, parsedIng.InsecureEdgeTermAllow, key)
 		} else {
 			aviModel.(*AviObjectGraph).BuildDedicatedL7VSGraphHostNameShard(shardVsName.Name, host, routeIgrObj, parsedIng.InsecureEdgeTermAllow, pathsvcmap, key)
+		}
+		if len(vsNode) > 0 && found {
+			// if vsNode already exists, check for updates via AviInfraSetting
+			if infraSetting != nil {
+				buildWithInfraSetting(key, routeIgrObj.GetNamespace(), vsNode[0], vsNode[0].VSVIPRefs[0], infraSetting)
+			}
 		}
 		changedModel := saveAviModel(modelName, aviModel.(*AviObjectGraph), key)
 		if !utils.HasElem(modelList, modelName) && changedModel {
@@ -283,14 +284,14 @@ func ProcessPassthroughHosts(routeIgrObj RouteIngressModel, key string, parsedIn
 		found, aviModel := objects.SharedAviGraphLister().Get(modelName)
 		if !found || aviModel == nil {
 			aviModel = NewAviObjectGraph()
-			aviModel.(*AviObjectGraph).BuildVSForPassthrough(shardVsName, routeIgrObj.GetNamespace(), host, key)
+			aviModel.(*AviObjectGraph).BuildVSForPassthrough(shardVsName, routeIgrObj.GetNamespace(), host, key, infraSetting)
 		}
 		vsNode := aviModel.(*AviObjectGraph).GetAviVS()
 		if len(vsNode) < 1 {
 			return
 		}
 		if infraSetting != nil {
-			buildWithInfraSetting(key, vsNode[0], vsNode[0].VSVIPRefs[0], infraSetting)
+			buildWithInfraSetting(key, routeIgrObj.GetNamespace(), vsNode[0], vsNode[0].VSVIPRefs[0], infraSetting)
 		}
 		aviModel.(*AviObjectGraph).BuildGraphForPassthrough(pass.PathSvc, routeIgrObj.GetName(), host, routeIgrObj.GetNamespace(), key, redirect, infraSetting)
 

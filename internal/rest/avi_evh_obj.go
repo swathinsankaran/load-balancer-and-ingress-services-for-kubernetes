@@ -237,8 +237,8 @@ func (rest *RestOperations) EvhNodeCU(sni_node *nodes.AviEvhVsNode, vs_cache_obj
 func setDedicatedEvhVSNodeProperties(vs *avimodels.VirtualService, vs_meta *nodes.AviEvhVsNode) {
 	var datascriptCollection []*avimodels.VSDataScripts
 	// this overwrites the sslkeycert created from the Secret object, with the one mentioned in HostRule.TLS
-	if len(vs_meta.SSLKeyCertAviRef) != 0 {
-		vs.SslKeyAndCertificateRefs = append(vs.SslKeyAndCertificateRefs, vs_meta.SSLKeyCertAviRef...)
+	if len(vs_meta.SslKeyAndCertificateRefs) != 0 {
+		vs.SslKeyAndCertificateRefs = append(vs.SslKeyAndCertificateRefs, vs_meta.SslKeyAndCertificateRefs...)
 	} else {
 		for _, sslkeycert := range vs_meta.SSLKeyCertRefs {
 			certName := "/api/sslkeyandcertificate/?name=" + sslkeycert.Name
@@ -358,8 +358,8 @@ func (rest *RestOperations) AviVsBuildForEvh(vs_meta *nodes.AviEvhVsNode, rest_m
 		// TODO other fields like cloud_ref, mix of TCP & UDP protocols, etc.
 
 		for i, pp := range vs_meta.PortProto {
-			port := pp.Port
-			svc := avimodels.Service{Port: &port, EnableSsl: &vs_meta.PortProto[i].EnableSSL}
+			port := uint32(pp.Port)
+			svc := avimodels.Service{Port: &port, EnableSsl: &vs_meta.PortProto[i].EnableSSL, EnableHttp2: &vs_meta.PortProto[i].EnableHTTP2}
 			vs.Services = append(vs.Services, &svc)
 		}
 
@@ -399,8 +399,8 @@ func (rest *RestOperations) AviVsBuildForEvh(vs_meta *nodes.AviEvhVsNode, rest_m
 		if vs_meta.TLSType != utils.TLS_PASSTHROUGH && !vs_meta.Dedicated {
 			//Append cert from hostrule
 			for _, evhNode := range vs_meta.EvhNodes {
-				if len(evhNode.SSLKeyCertAviRef) != 0 {
-					for _, evhcert := range evhNode.SSLKeyCertAviRef {
+				if len(evhNode.SslKeyAndCertificateRefs) != 0 {
+					for _, evhcert := range evhNode.SslKeyAndCertificateRefs {
 						if !utils.HasElem(vs.SslKeyAndCertificateRefs, evhcert) {
 							vs.SslKeyAndCertificateRefs = append(vs.SslKeyAndCertificateRefs, evhcert)
 						}
@@ -430,7 +430,9 @@ func (rest *RestOperations) AviVsBuildForEvh(vs_meta *nodes.AviEvhVsNode, rest_m
 		}
 		vs.AnalyticsPolicy = vs_meta.GetAnalyticsPolicy()
 
-		copier.Copy(&vs, &vs_meta.AviVsNodeGeneratedFields)
+		if err := copier.CopyWithOption(&vs, &vs_meta.AviVsNodeGeneratedFields, copier.Option{IgnoreEmpty: true}); err != nil {
+			utils.AviLog.Warnf("key: %s, msg: unable to set few parameters in the VS, err: %v", key, err)
+		}
 
 		var rest_ops []*utils.RestOp
 
@@ -531,7 +533,6 @@ func (rest *RestOperations) AviVsChildEvhBuild(vs_meta *nodes.AviEvhVsNode, rest
 			MatchCase:     &match_case,
 			MatchStr:      []string{"/"},
 		}
-		pathMatches := make([]*avimodels.PathMatch, 0)
 		vHMatchRules := make([]*avimodels.VHMatchRule, 0)
 		matchTarget := &avimodels.MatchTarget{
 			Path: &path_match,
@@ -541,25 +542,28 @@ func (rest *RestOperations) AviVsChildEvhBuild(vs_meta *nodes.AviEvhVsNode, rest
 			Matches: matchTarget,
 		}
 		vHMatchRules = append(vHMatchRules, vHMatchRule)
-		pathMatches = append(pathMatches, &path_match)
 
 		hostname := Vhostname
-		var vhMatch *avimodels.VHMatch
-		if utils.CtrlVersion >= utils.CTRL_VERSION_22_1_3 {
-			vhMatch = &avimodels.VHMatch{Host: &hostname, Rules: vHMatchRules}
-		} else {
-			vhMatch = &avimodels.VHMatch{Host: &hostname, Path: pathMatches, Rules: vHMatchRules}
-		}
+		vhMatch := &avimodels.VHMatch{Host: &hostname, Rules: vHMatchRules}
 		vhMatches = append(vhMatches, vhMatch)
 	}
 
 	evhChild.VhMatches = vhMatches
+
+	if vs_meta.VHMatches != nil {
+		evhChild.VhMatches = vs_meta.VHMatches
+	}
 
 	evhChild.Markers = lib.GetAllMarkers(vs_meta.AviMarkers)
 
 	if vs_meta.DefaultPool != "" {
 		pool_ref := "/api/pool/?name=" + vs_meta.DefaultPool
 		evhChild.PoolRef = &pool_ref
+	}
+
+	if vs_meta.DefaultPoolGroup != "" {
+		pg_ref := "/api/poolgroup/?name=" + vs_meta.DefaultPoolGroup
+		evhChild.PoolGroupRef = &pg_ref
 	}
 
 	//DS from hostrule
@@ -577,7 +581,9 @@ func (rest *RestOperations) AviVsChildEvhBuild(vs_meta *nodes.AviEvhVsNode, rest
 		evhChild.HTTPPolicies = AviVsHttpPSAdd(vs_meta, true)
 	}
 	evhChild.AnalyticsPolicy = vs_meta.GetAnalyticsPolicy()
-	copier.Copy(&evhChild, &vs_meta.AviVsNodeGeneratedFields)
+	if err := copier.CopyWithOption(&evhChild, &vs_meta.AviVsNodeGeneratedFields, copier.Option{IgnoreEmpty: true}); err != nil {
+		utils.AviLog.Warnf("key: %s, msg: unable to set few parameters in the child VS, err: %v", key, err)
+	}
 
 	var rest_ops []*utils.RestOp
 	var rest_op utils.RestOp

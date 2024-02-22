@@ -18,9 +18,11 @@ data:
   layer7Only: {{ .Values.AKOSettings.layer7Only | quote }}
   vipPerNamespace: {{ .Values.AKOSettings.vipPerNamespace | quote }}
   tenantName: {{ .Values.ControllerSettings.tenantName | quote }}
+  vrfName: {{ .Values.ControllerSettings.vrfName | quote }}
   defaultDomain: {{ .Values.L4Settings.defaultDomain | quote }}
   disableStaticRouteSync: {{ .Values.AKOSettings.disableStaticRouteSync | quote }}
   defaultIngController: {{ .Values.L7Settings.defaultIngController | quote }}
+  defaultLBController: {{ .Values.L4Settings.defaultLBController | quote }}
   noPGForSNI: {{ .Values.L7Settings.noPGForSNI | quote }}
   enableRHI: {{ .Values.NetworkSettings.enableRHI | quote }}
   nsxtT1LR: {{ .Values.NetworkSettings.nsxtT1LR | quote }}
@@ -49,3 +51,4 @@ data:
   ipFamily: {{ .Values.AKOSettings.ipFamily | quote }}
   istioEnabled: {{ .Values.AKOSettings.istioEnabled | quote }}
   useDefaultSecretsOnly: {{ .Values.AKOSettings.useDefaultSecretsOnly | quote }}
+  enablePrometheus: {{ default "false" .Values.featureGates.EnablePrometheus | quote }}

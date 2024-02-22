@@ -20,13 +20,14 @@ import (
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
 	akov1alpha2 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha2"
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
 	advl4v1alpha1pre1 "github.com/vmware-tanzu/service-apis/apis/v1alpha1pre1"
 	"google.golang.org/protobuf/proto"
 	v1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	utilsnet "k8s.io/utils/net"
 	svcapiv1alpha1 "sigs.k8s.io/service-apis/apis/v1alpha1"
 )
@@ -90,7 +91,17 @@ func (o *AviObjectGraph) ConstructAdvL4VsNode(gatewayName, namespace, key string
 	}
 
 	var vrfcontext string
-	t1lr := objects.SharedWCPLister().GetT1LrForNamespace(namespace)
+	infraSetting, err := getL4InfraSetting(key, namespace, nil, &gw.Spec.Class)
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
+			return nil
+		}
+	}
+	t1lr := lib.GetT1LRPath()
+	if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
+		t1lr = *infraSetting.Spec.NSXSettings.T1LR
+	}
 	if t1lr == "" {
 		vrfcontext = lib.GetVrf()
 		avi_vs_meta.VrfContext = vrfcontext
@@ -121,26 +132,13 @@ func (o *AviObjectGraph) ConstructAdvL4VsNode(gatewayName, namespace, key string
 	avi_vs_meta.PortProto = portProtocols
 	avi_vs_meta.ApplicationProfile = utils.DEFAULT_L4_APP_PROFILE
 
-	// In case the VS has services that are a mix of TCP and UDP sockets,
-	// we create the VS with global network profile TCP Fast Path,
-	// and override required services with UDP Fast Path. Having a separate
-	// internally used network profile (MIXED_NET_PROFILE) helps ensure PUT calls
-	// on existing VSes.
-	if isSCTP {
-		avi_vs_meta.NetworkProfile = utils.SYSTEM_SCTP_PROXY
-	} else if isTCP && !isUDP {
-		avi_vs_meta.NetworkProfile = utils.TCP_NW_FAST_PATH
-	} else if isUDP && !isTCP {
-		avi_vs_meta.NetworkProfile = utils.SYSTEM_UDP_FAST_PATH
-	} else {
-		avi_vs_meta.NetworkProfile = utils.MIXED_NET_PROFILE
-	}
+	avi_vs_meta.NetworkProfile = getNetworkProfile(isSCTP, isTCP, isUDP)
 
 	vsVipNode := &AviVSVIPNode{
 		Name:        lib.GetL4VSVipName(gatewayName, namespace),
 		Tenant:      lib.GetTenant(),
 		VrfContext:  vrfcontext,
-		VipNetworks: lib.GetVipNetworkList(),
+		VipNetworks: utils.GetVipNetworkList(),
 	}
 
 	if t1lr != "" {
@@ -150,6 +148,8 @@ func (o *AviObjectGraph) ConstructAdvL4VsNode(gatewayName, namespace, key string
 	if avi_vs_meta.EnableRhi != nil && *avi_vs_meta.EnableRhi {
 		vsVipNode.BGPPeerLabels = lib.GetGlobalBgpPeerLabels()
 	}
+	// configures VS and VsVip nodes using infraSetting object (via CRD).
+	buildWithInfraSetting(key, namespace, avi_vs_meta, vsVipNode, infraSetting)
 
 	if len(gw.Spec.Addresses) > 0 && gw.Spec.Addresses[0].Type == advl4v1alpha1pre1.IPAddressType {
 		vsVipNode.IPAddress = gw.Spec.Addresses[0].Value
@@ -222,7 +222,17 @@ func (o *AviObjectGraph) ConstructSvcApiL4VsNode(gatewayName, namespace, key str
 	}
 
 	var vrfcontext string
-	t1lr := objects.SharedWCPLister().GetT1LrForNamespace(namespace)
+	infraSetting, err := getL4InfraSetting(key, namespace, nil, &gw.Spec.GatewayClassName)
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
+			return nil
+		}
+	}
+	t1lr := lib.GetT1LRPath()
+	if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
+		t1lr = *infraSetting.Spec.NSXSettings.T1LR
+	}
 	if t1lr == "" {
 		vrfcontext = lib.GetVrf()
 		avi_vs_meta.VrfContext = vrfcontext
@@ -252,32 +262,14 @@ func (o *AviObjectGraph) ConstructSvcApiL4VsNode(gatewayName, namespace, key str
 	avi_vs_meta.PortProto = portProtocols
 	avi_vs_meta.ApplicationProfile = utils.DEFAULT_L4_APP_PROFILE
 
-	// In case the VS has services that are a mix of TCP and UDP sockets,
-	// we create the VS with global network profile TCP Fast Path,
-	// and override required services with UDP Fast Path. Having a separate
-	// internally used network profile (MIXED_NET_PROFILE) helps ensure PUT calls
-	// on existing VSes.
-	if isSCTP {
-		avi_vs_meta.NetworkProfile = utils.SYSTEM_SCTP_PROXY
-	} else if isTCP && !isUDP {
-		license := lib.AKOControlConfig().GetLicenseType()
-		if license == lib.LicenseTypeEnterprise {
-			avi_vs_meta.NetworkProfile = utils.DEFAULT_TCP_NW_PROFILE
-		} else {
-			avi_vs_meta.NetworkProfile = utils.TCP_NW_FAST_PATH
-		}
-	} else if isUDP && !isTCP {
-		avi_vs_meta.NetworkProfile = utils.SYSTEM_UDP_FAST_PATH
-	} else {
-		avi_vs_meta.NetworkProfile = utils.MIXED_NET_PROFILE
-	}
+	avi_vs_meta.NetworkProfile = getNetworkProfile(isSCTP, isTCP, isUDP)
 
 	vsVipNode := &AviVSVIPNode{
 		Name:        lib.GetL4VSVipName(gatewayName, namespace),
 		Tenant:      lib.GetTenant(),
 		VrfContext:  vrfcontext,
 		FQDNs:       fqdns,
-		VipNetworks: lib.GetVipNetworkList(),
+		VipNetworks: utils.GetVipNetworkList(),
 	}
 
 	if t1lr != "" {
@@ -287,11 +279,8 @@ func (o *AviObjectGraph) ConstructSvcApiL4VsNode(gatewayName, namespace, key str
 	if avi_vs_meta.EnableRhi != nil && *avi_vs_meta.EnableRhi {
 		vsVipNode.BGPPeerLabels = lib.GetGlobalBgpPeerLabels()
 	}
-
 	// configures VS and VsVip nodes using infraSetting object (via CRD).
-	if infraSetting, err := getL4InfraSetting(key, nil, &gw.Spec.GatewayClassName); err == nil {
-		buildWithInfraSetting(key, avi_vs_meta, vsVipNode, infraSetting)
-	}
+	buildWithInfraSetting(key, namespace, avi_vs_meta, vsVipNode, infraSetting)
 
 	if len(gw.Spec.Addresses) > 0 && gw.Spec.Addresses[0].Type == svcapiv1alpha1.IPAddressType {
 		vsVipNode.IPAddress = gw.Spec.Addresses[0].Value
@@ -311,6 +300,7 @@ func (o *AviObjectGraph) ConstructAdvL4PolPoolNodes(vsNode *AviVsNode, gwName, n
 
 	// create a mapping of portProto to hostname
 	gwListenerHostNameMapping := make(map[string]string)
+	gwClassName := ""
 	if lib.UseServicesAPI() {
 		// enable fqdn for gateway services only for non-advancedl4 usecases.
 		gw, err := lib.AKOControlConfig().SvcAPIInformers().GatewayInformer.Lister().Gateways(namespace).Get(gwName)
@@ -323,24 +313,15 @@ func (o *AviObjectGraph) ConstructAdvL4PolPoolNodes(vsNode *AviVsNode, gwName, n
 				gwListenerHostNameMapping[fmt.Sprintf("%s/%d", gwlistener.Protocol, gwlistener.Port)] = string(*gwlistener.Hostname)
 			}
 		}
-	}
-
-	var infraSetting *v1alpha1.AviInfraSetting
-	if lib.UseServicesAPI() {
-		gw, err := lib.AKOControlConfig().SvcAPIInformers().GatewayInformer.Lister().Gateways(namespace).Get(gwName)
+		gwClassName = gw.Spec.GatewayClassName
+	} else {
+		gw, err := lib.AKOControlConfig().AdvL4Informers().GatewayInformer.Lister().Gateways(namespace).Get(gwName)
 		if err != nil {
-			utils.AviLog.Warnf("key: %s, msg: GatewayLister returned error for services APIs : %s", err)
+			utils.AviLog.Warnf("key: %s, msg: GatewayLister returned error : %s", err)
 			return
 		}
-		// configures VS and VsVip nodes using infraSetting object (via CRD).
-		infraSetting, err = getL4InfraSetting(key, nil, &gw.Spec.GatewayClassName)
-		if err != nil {
-			utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
-			return
-		}
+		gwClassName = gw.Spec.Class
 	}
-
-	t1lr := objects.SharedWCPLister().GetT1LrForNamespace(namespace)
 
 	var portPoolSet []AviHostPathPortPoolPG
 	for listener, svc := range svcListeners {
@@ -376,13 +357,25 @@ func (o *AviObjectGraph) ConstructAdvL4PolPoolNodes(vsNode *AviVsNode, gwName, n
 			VrfContext: lib.GetVrf(),
 		}
 
+		infraSetting, err := getL4InfraSetting(key, namespace, nil, &gwClassName)
+		if err != nil {
+			if !k8serrors.IsNotFound(err) {
+				utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
+				return
+			}
+		}
+
+		t1lr := lib.GetT1LRPath()
+		if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
+			t1lr = *infraSetting.Spec.NSXSettings.T1LR
+		}
 		// Unset the poolnode's vrfcontext.
 		if t1lr != "" {
 			poolNode.T1Lr = t1lr
 			poolNode.VrfContext = ""
 		}
 
-		poolNode.NetworkPlacementSettings, _ = lib.GetNodeNetworkMap()
+		poolNode.NetworkPlacementSettings = lib.GetNodeNetworkMap()
 
 		if svcFQDN != "" {
 			poolNode.ServiceMetadata.HostNames = []string{svcFQDN}
@@ -466,6 +459,14 @@ func (o *AviObjectGraph) ConstructSharedVipSvcLBNode(sharedVipKey, namespace, ke
 	if subDomains != nil && autoFQDN {
 		for _, service := range serviceNSNames {
 			svcNsName := strings.Split(service, "/")
+			svcObj, err := utils.GetInformers().ServiceInformer.Lister().Services(namespace).Get(svcNsName[1])
+			if err == nil {
+				if extDNS, ok := svcObj.Annotations[lib.ExternalDNSAnnotation]; ok {
+					fqdns = append(fqdns, extDNS)
+					continue
+				}
+			}
+
 			if fqdn := getAutoFQDNForService(svcNsName[0], svcNsName[1]); fqdn != "" {
 				fqdns = append(fqdns, fqdn)
 			}
@@ -513,6 +514,7 @@ func (o *AviObjectGraph) ConstructSharedVipSvcLBNode(sharedVipKey, namespace, ke
 		for _, listener := range svcObj.Spec.Ports {
 			protocol := string(listener.Protocol)
 			pp := AviPortHostProtocol{Port: listener.Port, Protocol: protocol}
+			pp.Name = fmt.Sprintf("%s-%d", protocol, listener.Port)
 			portProtocols = append(portProtocols, pp)
 			if protocol == "" || protocol == utils.TCP {
 				isTCP = true
@@ -531,22 +533,14 @@ func (o *AviObjectGraph) ConstructSharedVipSvcLBNode(sharedVipKey, namespace, ke
 	avi_vs_meta.PortProto = portProtocols
 	avi_vs_meta.ApplicationProfile = utils.DEFAULT_L4_APP_PROFILE
 
-	if isSCTP {
-		avi_vs_meta.NetworkProfile = utils.SYSTEM_SCTP_PROXY
-	} else if isTCP && !isUDP {
-		avi_vs_meta.NetworkProfile = utils.TCP_NW_FAST_PATH
-	} else if isUDP && !isTCP {
-		avi_vs_meta.NetworkProfile = utils.SYSTEM_UDP_FAST_PATH
-	} else {
-		avi_vs_meta.NetworkProfile = utils.MIXED_NET_PROFILE
-	}
+	avi_vs_meta.NetworkProfile = getNetworkProfile(isSCTP, isTCP, isUDP)
 
 	vsVipNode := &AviVSVIPNode{
 		Name:        lib.GetL4VSVipName(sharedVipKey, namespace),
 		Tenant:      lib.GetTenant(),
 		VrfContext:  lib.GetVrf(),
 		FQDNs:       fqdns,
-		VipNetworks: lib.GetVipNetworkList(),
+		VipNetworks: utils.GetVipNetworkList(),
 	}
 
 	if sharedPreferredVIP != "" {
@@ -559,9 +553,14 @@ func (o *AviObjectGraph) ConstructSharedVipSvcLBNode(sharedVipKey, namespace, ke
 
 	// configures VS and VsVip nodes using infraSetting object (via CRD).
 	if serviceObject != nil {
-		if infraSetting, err := getL4InfraSetting(key, serviceObject, nil); err == nil {
-			buildWithInfraSetting(key, avi_vs_meta, vsVipNode, infraSetting)
+		infraSetting, err := getL4InfraSetting(key, namespace, serviceObject, nil)
+		if err != nil {
+			if !k8serrors.IsNotFound(err) {
+				utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting %s", key, err.Error())
+				return nil
+			}
 		}
+		buildWithInfraSetting(key, namespace, avi_vs_meta, vsVipNode, infraSetting)
 
 		// Copy the VS properties from L4Rule object
 		if l4Rule, err := getL4Rule(key, serviceObject); err == nil {
@@ -588,7 +587,7 @@ func (o *AviObjectGraph) ConstructSharedVipPolPoolNodes(vsNode *AviVsNode, share
 	}
 
 	var l4Policies []*AviL4PolicyNode
-	var infraSetting *v1alpha1.AviInfraSetting
+	var infraSetting *v1beta1.AviInfraSetting
 	var l4Rule *akov1alpha2.L4Rule
 
 	var portPoolSet []AviHostPathPortPoolPG
@@ -601,10 +600,12 @@ func (o *AviObjectGraph) ConstructSharedVipPolPoolNodes(vsNode *AviVsNode, share
 		}
 
 		if i == 0 {
-			infraSetting, err = getL4InfraSetting(key, svcObj, nil)
+			infraSetting, err = getL4InfraSetting(key, namespace, svcObj, nil)
 			if err != nil {
-				utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Service %s", key, err.Error())
-				return
+				if !k8serrors.IsNotFound(err) {
+					utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Service %s", key, err.Error())
+					return
+				}
 			}
 
 			l4Rule, err = getL4Rule(key, svcObj)
@@ -640,7 +641,7 @@ func (o *AviObjectGraph) ConstructSharedVipPolPoolNodes(vsNode *AviVsNode, share
 
 			buildPoolWithL4Rule(key, poolNode, l4Rule)
 
-			poolNode.NetworkPlacementSettings, _ = lib.GetNodeNetworkMap()
+			poolNode.NetworkPlacementSettings = lib.GetNodeNetworkMap()
 
 			if svcFQDN != "" {
 				poolNode.ServiceMetadata.HostNames = []string{svcFQDN}
@@ -673,6 +674,7 @@ func (o *AviObjectGraph) ConstructSharedVipPolPoolNodes(vsNode *AviVsNode, share
 				Pool:     poolRef,
 				Protocol: protocol,
 			}
+			portPool.Name = fmt.Sprintf("%s-%d", protocol, port)
 			portPoolSet = append(portPoolSet, portPool)
 
 			buildPoolWithInfraSetting(key, poolNode, infraSetting)

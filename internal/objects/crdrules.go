@@ -18,7 +18,7 @@ import (
 	"strings"
 	"sync"
 
-	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 )
 
 var CRDinstance *CRDLister
@@ -39,6 +39,7 @@ func SharedCRDLister() *CRDLister {
 			FQDNToAliasesCache:     NewObjectMapStore(),
 			FqdnSSORuleCache:       NewObjectMapStore(),
 			SSORuleFQDNCache:       NewObjectMapStore(),
+			L7RuleHostRuleCache:    NewObjectMapStore(),
 		}
 	})
 	return CRDinstance
@@ -84,6 +85,9 @@ type CRDLister struct {
 
 	// hr1: fqdn.com - required for httprule
 	SSORuleFQDNCache *ObjectMapStore
+
+	// L7CRD : HostruleCRD
+	L7RuleHostRuleCache *ObjectMapStore
 }
 
 // FqdnHostRuleCache
@@ -102,20 +106,20 @@ func (c *CRDLister) GetFQDNToHostruleMappingWithType(fqdn string) (bool, string)
 	for _, mFqdn := range allFqdns {
 		oktype, fqdnType := c.FqdnFqdnTypeCache.Get(mFqdn)
 		if !oktype || fqdnType == "" {
-			fqdnType = string(akov1alpha1.Exact)
+			fqdnType = string(akov1beta1.Exact)
 		}
 
-		if fqdnType == string(akov1alpha1.Exact) && mFqdn == fqdn {
+		if fqdnType == string(akov1beta1.Exact) && mFqdn == fqdn {
 			if found, hostrule := c.FqdnHostRuleCache.Get(mFqdn); found {
 				returnHostrules = append(returnHostrules, hostrule.(string))
 				break
 			}
-		} else if fqdnType == string(akov1alpha1.Contains) && strings.Contains(fqdn, mFqdn) {
+		} else if fqdnType == string(akov1beta1.Contains) && strings.Contains(fqdn, mFqdn) {
 			if found, hostrule := c.FqdnHostRuleCache.Get(mFqdn); found {
 				returnHostrules = append(returnHostrules, hostrule.(string))
 				break
 			}
-		} else if fqdnType == string(akov1alpha1.Wildcard) && strings.HasPrefix(mFqdn, "*") {
+		} else if fqdnType == string(akov1beta1.Wildcard) && strings.HasPrefix(mFqdn, "*") {
 			wildcardFqdn := strings.Split(mFqdn, "*")[1]
 			if strings.HasSuffix(fqdn, wildcardFqdn) {
 				if found, hostrule := c.FqdnHostRuleCache.Get(mFqdn); found {
@@ -187,7 +191,7 @@ func (c *CRDLister) UpdateFQDNHostruleMapping(fqdn string, hostrule string) {
 func (c *CRDLister) GetFQDNFQDNTypeMapping(fqdn string) string {
 	found, fqdnType := c.FqdnFqdnTypeCache.Get(fqdn)
 	if !found {
-		return string(akov1alpha1.Exact)
+		return string(akov1beta1.Exact)
 	}
 	return fqdnType.(string)
 }
@@ -254,16 +258,16 @@ func (c *CRDLister) GetFQDNToSharedVSModelMapping(fqdn, fqdnType string) (bool, 
 	allFqdns := c.FqdnSharedVSModelCache.GetAllKeys()
 	returnModelNames := []string{}
 	for _, mFqdn := range allFqdns {
-		if fqdnType == string(akov1alpha1.Exact) && mFqdn == fqdn {
+		if fqdnType == string(akov1beta1.Exact) && mFqdn == fqdn {
 			if found, modelName := c.FqdnSharedVSModelCache.Get(mFqdn); found {
 				returnModelNames = append(returnModelNames, modelName.(string))
 				break
 			}
-		} else if fqdnType == string(akov1alpha1.Contains) && strings.Contains(mFqdn, fqdn) {
+		} else if fqdnType == string(akov1beta1.Contains) && strings.Contains(mFqdn, fqdn) {
 			if found, modelName := c.FqdnSharedVSModelCache.Get(mFqdn); found {
 				returnModelNames = append(returnModelNames, modelName.(string))
 			}
-		} else if fqdnType == string(akov1alpha1.Wildcard) && strings.HasPrefix(fqdn, "*") {
+		} else if fqdnType == string(akov1beta1.Wildcard) && strings.HasPrefix(fqdn, "*") {
 			wildcardFqdn := strings.Split(fqdn, "*")[1]
 			if strings.HasSuffix(mFqdn, wildcardFqdn) {
 				if found, modelName := c.FqdnSharedVSModelCache.Get(mFqdn); found {
@@ -360,4 +364,30 @@ func (c *CRDLister) UpdateFQDNSSORuleMapping(fqdn string, ssoRule string) {
 	defer c.NSLock.Unlock()
 	c.FqdnSSORuleCache.AddOrUpdate(fqdn, ssoRule)
 	c.SSORuleFQDNCache.AddOrUpdate(ssoRule, fqdn)
+}
+
+func (c *CRDLister) GetL7RuleToHostRuleMapping(l7Rule string) (bool, map[string]bool) {
+	found, hostRules := c.L7RuleHostRuleCache.Get(l7Rule)
+	if !found {
+		return false, make(map[string]bool)
+	}
+	return true, hostRules.(map[string]bool)
+}
+
+func (c *CRDLister) DeleteL7RuleToHostRuleMapping(l7Rule string, hostRule string) {
+	c.NSLock.Lock()
+	defer c.NSLock.Unlock()
+	found, hostRules := c.GetL7RuleToHostRuleMapping(l7Rule)
+	if found {
+		delete(hostRules, hostRule)
+		c.L7RuleHostRuleCache.AddOrUpdate(l7Rule, hostRules)
+	}
+}
+
+func (c *CRDLister) UpdateL7RuleToHostRuleMapping(l7Rule string, hostRule string) {
+	c.NSLock.Lock()
+	defer c.NSLock.Unlock()
+	_, hostRules := c.GetL7RuleToHostRuleMapping(l7Rule)
+	hostRules[hostRule] = true
+	c.L7RuleHostRuleCache.AddOrUpdate(l7Rule, hostRules)
 }

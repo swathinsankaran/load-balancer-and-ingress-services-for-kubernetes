@@ -31,6 +31,8 @@ import (
 	avinodes "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
 	crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned/fake"
+	v1beta1crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/clientset/versioned/fake"
+
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/tests/integrationtest"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/api"
@@ -43,6 +45,7 @@ import (
 
 var KubeClient *k8sfake.Clientset
 var CRDClient *crdfake.Clientset
+var V1beta1CRDClient *v1beta1crdfake.Clientset
 var ctrl *k8s.AviController
 var akoApiServer *api.FakeApiServer
 
@@ -58,11 +61,14 @@ func TestMain(m *testing.M) {
 	os.Setenv("SERVICE_TYPE", "NodePort")
 	os.Setenv("ENABLE_EVH", "true")
 	os.Setenv("MCI_ENABLED", "true")
+	os.Setenv("POD_NAME", "ako-0")
 
 	akoControlConfig := lib.AKOControlConfig()
 	KubeClient = k8sfake.NewSimpleClientset()
 	CRDClient = crdfake.NewSimpleClientset()
+	V1beta1CRDClient = v1beta1crdfake.NewSimpleClientset()
 	akoControlConfig.SetCRDClientset(CRDClient)
+	akoControlConfig.Setv1beta1CRDClientset(V1beta1CRDClient)
 	akoControlConfig.SetEventRecorder(lib.AKOEventComponent, KubeClient, true)
 	akoControlConfig.SetAKOInstanceFlag(true)
 	data := map[string][]byte{
@@ -89,7 +95,7 @@ func TestMain(m *testing.M) {
 	args[utils.INFORMERS_AKO_CLIENT] = CRDClient
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: KubeClient}, registeredInformers, args)
 	informers := k8s.K8sinformers{Cs: KubeClient}
-	k8s.NewCRDInformers(CRDClient)
+	k8s.NewCRDInformers()
 
 	mcache := cache.SharedAviObjCache()
 	cloudObj := &cache.AviCloudPropertyCache{Name: "Default-Cloud", VType: "mock"}
@@ -165,7 +171,7 @@ func getServiceImportName(str string) string {
 func SetUpServices(t *testing.T, paths []string) {
 	for _, path := range paths {
 		serviceName := getServiceName(path)
-		integrationtest.CreateSVC(t, "default", serviceName, corev1.ServiceTypeNodePort, false)
+		integrationtest.CreateSVC(t, "default", serviceName, corev1.ProtocolTCP, corev1.ServiceTypeNodePort, false)
 	}
 }
 

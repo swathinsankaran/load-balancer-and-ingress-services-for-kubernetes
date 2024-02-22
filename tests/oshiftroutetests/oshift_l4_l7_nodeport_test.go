@@ -37,7 +37,7 @@ func SetUpTestForRouteInNodePort(t *testing.T, modelName string) {
 		}
 	}
 	objects.SharedAviGraphLister().Delete(modelName)
-	integrationtest.CreateSVC(t, "default", "avisvc", corev1.ServiceTypeNodePort, false)
+	integrationtest.CreateSVC(t, "default", "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeNodePort, false)
 }
 
 func TearDownTestForRouteInNodePort(t *testing.T, modelName string) {
@@ -340,7 +340,7 @@ func TestAlternateBackendNoPathInNodePort(t *testing.T) {
 	defer integrationtest.DeleteNode(t, "testNodeNP")
 
 	SetUpTestForRouteInNodePort(t, defaultModelName)
-	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ServiceTypeNodePort, false)
+	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ProtocolTCP, corev1.ServiceTypeNodePort, false)
 	routeExample := FakeRoute{}.ABRoute()
 	_, err := OshiftClient.RouteV1().Routes(defaultNamespace).Create(context.TODO(), routeExample, metav1.CreateOptions{})
 	if err != nil {
@@ -366,10 +366,10 @@ func TestAlternateBackendNoPathInNodePort(t *testing.T) {
 	for _, pgmember := range poolgroups[0].Members {
 		if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com-default-foo-avisvc" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(100)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(100)))
 		} else if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com-default-foo-absvc2" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(200)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(200)))
 		} else {
 			t.Fatalf("unexpected pgmember: %s", *pgmember.PoolRef)
 		}
@@ -391,7 +391,7 @@ func TestAlternateBackendDefaultPathInNodePort(t *testing.T) {
 	defer integrationtest.DeleteNode(t, "testNodeNP")
 
 	SetUpTestForRouteInNodePort(t, defaultModelName)
-	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ServiceTypeNodePort, false)
+	integrationtest.CreateSVC(t, "default", "absvc2", corev1.ProtocolTCP, corev1.ServiceTypeNodePort, false)
 	routeExample := FakeRoute{Path: "/foo"}.ABRoute()
 	_, err := OshiftClient.RouteV1().Routes(defaultNamespace).Create(context.TODO(), routeExample, metav1.CreateOptions{})
 	if err != nil {
@@ -414,10 +414,10 @@ func TestAlternateBackendDefaultPathInNodePort(t *testing.T) {
 	for _, pgmember := range poolgroups[0].Members {
 		if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com_foo-default-foo-avisvc" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com/foo"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(100)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(100)))
 		} else if *pgmember.PoolRef == "/api/pool?name=cluster--foo.com_foo-default-foo-absvc2" {
 			g.Expect(*pgmember.PriorityLabel).To(gomega.Equal("foo.com/foo"))
-			g.Expect(*pgmember.Ratio).To(gomega.Equal(int32(200)))
+			g.Expect(*pgmember.Ratio).To(gomega.Equal(uint32(200)))
 		} else {
 			t.Fatalf("unexpected pgmember: %s", *pgmember.PoolRef)
 		}
@@ -583,7 +583,7 @@ func TestSecureRouteMultiNamespaceInNodePort(t *testing.T) {
 	if !utils.CheckIfNamespaceAccepted("test") {
 		time.Sleep(time.Second * 2)
 	}
-	integrationtest.CreateSVC(t, "test", "avisvc", corev1.ServiceTypeNodePort, false)
+	integrationtest.CreateSVC(t, "test", "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeNodePort, false)
 	route2 := FakeRoute{Namespace: "test", Path: "/bar"}.SecureRoute()
 	_, err = OshiftClient.RouteV1().Routes("test").Create(context.TODO(), route2, metav1.CreateOptions{})
 	if err != nil {

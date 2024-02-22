@@ -29,6 +29,7 @@ import (
 
 	advl4v1alpha1pre1 "github.com/vmware-tanzu/service-apis/apis/v1alpha1pre1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 
 	advl4crd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/service-apis/client/clientset/versioned"
@@ -179,8 +180,24 @@ func (c *AviController) SetupAdvL4EventHandlers(numWorkers uint32) {
 	informer.GatewayClassInformer.Informer().AddEventHandler(gatewayClassEventHandler)
 }
 
-func (c *AviController) SetupNamespaceDeletionEventHandler(numWorkers uint32) {
+func (c *AviController) SetupNamespaceEventHandler(numWorkers uint32) {
 	nsHandler := cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(old, cur interface{}) {
+			nsOld := old.(*corev1.Namespace)
+			nsCur := cur.(*corev1.Namespace)
+			if isNamespaceUpdated(nsOld, nsCur) {
+				infraSettingOld := nsOld.Annotations[lib.InfraSettingNameAnnotation]
+				infraSettingNew := nsCur.Annotations[lib.InfraSettingNameAnnotation]
+				if infraSettingOld != infraSettingNew {
+					if utils.GetInformers().IngressInformer != nil {
+						utils.AviLog.Debugf("Adding ingresses for namespaces: %s", nsCur.GetName())
+						AddIngressFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
+					}
+					utils.AviLog.Debugf("Adding Gateways for namespaces: %s", nsCur.GetName())
+					AddGatewaysFromNSToIngestionQueueWCP(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
+				}
+			}
+		},
 		DeleteFunc: func(obj interface{}) {
 			ns, ok := obj.(*corev1.Namespace)
 			if !ok {
@@ -291,8 +308,6 @@ func checkSvcForGatewayPortConflict(svc *corev1.Service, key string) {
 
 	// detect unsupported protocol
 	// TODO
-
-	return
 }
 
 func checkGWForGatewayPortConflict(key string, gw *advl4v1alpha1pre1.Gateway) {
@@ -334,5 +349,19 @@ func checkGWForGatewayPortConflict(key string, gw *advl4v1alpha1pre1.Gateway) {
 			status.UpdateGatewayStatusObject(key, gw, gwStatus)
 			return
 		}
+	}
+}
+
+func AddGatewaysFromNSToIngestionQueueWCP(numWorkers uint32, c *AviController, namespace string, msg string) {
+	gateways, err := lib.AKOControlConfig().AdvL4Informers().GatewayInformer.Lister().Gateways(namespace).List(labels.Set(nil).AsSelector())
+	if err != nil {
+		utils.AviLog.Warnf("Failed to list Gateways in the namespace %s", namespace)
+		return
+	}
+	for _, gw := range gateways {
+		key := lib.Gateway + "/" + utils.ObjKey(gw)
+		bkt := utils.Bkt(namespace, numWorkers)
+		c.workqueue[bkt].AddRateLimited(key)
+		utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
 	}
 }

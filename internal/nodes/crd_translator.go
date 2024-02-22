@@ -22,10 +22,12 @@ import (
 	"github.com/jinzhu/copier"
 	"github.com/vmware/alb-sdk/go/models"
 	"google.golang.org/protobuf/proto"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
-	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
+
 	akov1alpha2 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha2"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 )
@@ -43,7 +45,7 @@ func BuildL7HostRule(host, key string, vsNode AviVsEvhSniModel) {
 
 	var err error
 	var hrNSName []string
-	var hostrule *akov1alpha1.HostRule
+	var hostrule *akov1beta1.HostRule
 	if !deleteCase {
 		hrNSName = strings.Split(hrNamespaceName, "/")
 		hostrule, err = lib.AKOControlConfig().CRDInformers().HostRuleInformer.Lister().HostRules(hrNSName[0]).Get(hrNSName[1])
@@ -57,7 +59,8 @@ func BuildL7HostRule(host, key string, vsNode AviVsEvhSniModel) {
 	}
 
 	// host specific
-	var vsWafPolicy, vsAppProfile, vsErrorPageProfile, vsAnalyticsProfile, vsSslProfile, lbIP string
+	var vsWafPolicy, vsAppProfile, vsAnalyticsProfile, vsSslProfile, vsNetworkSecurityPolicy *string
+	var vsErrorPageProfile, lbIP string
 	var vsSslKeyCertificates []string
 	var vsEnabled *bool
 	var crdStatus lib.CRDMetadata
@@ -73,32 +76,35 @@ func BuildL7HostRule(host, key string, vsNode AviVsEvhSniModel) {
 
 	portProtocols := []AviPortHostProtocol{
 		{Port: 80, Protocol: utils.HTTP},
-		{Port: 443, Protocol: utils.HTTP, EnableSSL: true},
+	}
+
+	if vsNode.IsSecure() || !vsNode.IsDedicatedVS() {
+		portProtocols = append(portProtocols, AviPortHostProtocol{Port: 443, Protocol: utils.HTTP, EnableSSL: true})
 	}
 
 	if !deleteCase {
-		if hostrule.Spec.VirtualHost.TLS.SSLKeyCertificate.Type == akov1alpha1.HostRuleSecretTypeAviReference &&
+		if hostrule.Spec.VirtualHost.TLS.SSLKeyCertificate.Type == akov1beta1.HostRuleSecretTypeAviReference &&
 			hostrule.Spec.VirtualHost.TLS.SSLKeyCertificate.Name != "" {
 			vsSslKeyCertificates = append(vsSslKeyCertificates, fmt.Sprintf("/api/sslkeyandcertificate?name=%s", hostrule.Spec.VirtualHost.TLS.SSLKeyCertificate.Name))
 			vsNode.SetSSLKeyCertRefs([]*AviTLSKeyCertNode{})
 		}
 
-		if hostrule.Spec.VirtualHost.TLS.SSLKeyCertificate.AlternateCertificate.Type == akov1alpha1.HostRuleSecretTypeAviReference &&
+		if hostrule.Spec.VirtualHost.TLS.SSLKeyCertificate.AlternateCertificate.Type == akov1beta1.HostRuleSecretTypeAviReference &&
 			hostrule.Spec.VirtualHost.TLS.SSLKeyCertificate.AlternateCertificate.Name != "" {
 			vsSslKeyCertificates = append(vsSslKeyCertificates, fmt.Sprintf("/api/sslkeyandcertificate?name=%s", hostrule.Spec.VirtualHost.TLS.SSLKeyCertificate.AlternateCertificate.Name))
 			vsNode.SetSSLKeyCertRefs([]*AviTLSKeyCertNode{})
 		}
 
 		if hostrule.Spec.VirtualHost.TLS.SSLProfile != "" {
-			vsSslProfile = fmt.Sprintf("/api/sslprofile?name=%s", hostrule.Spec.VirtualHost.TLS.SSLProfile)
+			vsSslProfile = proto.String(fmt.Sprintf("/api/sslprofile?name=%s", hostrule.Spec.VirtualHost.TLS.SSLProfile))
 		}
 
 		if hostrule.Spec.VirtualHost.WAFPolicy != "" {
-			vsWafPolicy = fmt.Sprintf("/api/wafpolicy?name=%s", hostrule.Spec.VirtualHost.WAFPolicy)
+			vsWafPolicy = proto.String(fmt.Sprintf("/api/wafpolicy?name=%s", hostrule.Spec.VirtualHost.WAFPolicy))
 		}
 
 		if hostrule.Spec.VirtualHost.ApplicationProfile != "" {
-			vsAppProfile = fmt.Sprintf("/api/applicationprofile?name=%s", hostrule.Spec.VirtualHost.ApplicationProfile)
+			vsAppProfile = proto.String(fmt.Sprintf("/api/applicationprofile?name=%s", hostrule.Spec.VirtualHost.ApplicationProfile))
 		}
 
 		if len(hostrule.Spec.VirtualHost.ICAPProfile) != 0 {
@@ -109,7 +115,7 @@ func BuildL7HostRule(host, key string, vsNode AviVsEvhSniModel) {
 		}
 
 		if hostrule.Spec.VirtualHost.AnalyticsProfile != "" {
-			vsAnalyticsProfile = fmt.Sprintf("/api/analyticsprofile?name=%s", hostrule.Spec.VirtualHost.AnalyticsProfile)
+			vsAnalyticsProfile = proto.String(fmt.Sprintf("/api/analyticsprofile?name=%s", hostrule.Spec.VirtualHost.AnalyticsProfile))
 		}
 
 		for _, policy := range hostrule.Spec.VirtualHost.HTTPPolicy.PolicySets {
@@ -131,7 +137,9 @@ func BuildL7HostRule(host, key string, vsNode AviVsEvhSniModel) {
 
 		if hostrule.Spec.VirtualHost.TCPSettings != nil {
 			if vsNode.IsSharedVS() || vsNode.IsDedicatedVS() {
-				portProtocols = []AviPortHostProtocol{}
+				if hostrule.Spec.VirtualHost.TCPSettings.Listeners != nil {
+					portProtocols = []AviPortHostProtocol{}
+				}
 				for _, listener := range hostrule.Spec.VirtualHost.TCPSettings.Listeners {
 					portProtocol := AviPortHostProtocol{
 						Port:     int32(listener.Port),
@@ -149,7 +157,15 @@ func BuildL7HostRule(host, key string, vsNode AviVsEvhSniModel) {
 				}
 			}
 		}
-
+		if hostrule.Spec.VirtualHost.NetworkSecurityPolicy != "" {
+			if vsNode.IsSharedVS() || vsNode.IsDedicatedVS() {
+				vsNetworkSecurityPolicy = proto.String(fmt.Sprintf("/api/networksecuritypolicy?name=%s", hostrule.Spec.VirtualHost.NetworkSecurityPolicy))
+			} else {
+				utils.AviLog.Warnf("key: %s, can not associate network security policy with host which is attached to child virtual service. Configuration is ignored", key)
+				lib.AKOControlConfig().EventRecorder().Eventf(hostrule, corev1.EventTypeWarning, lib.InvalidConfiguration,
+					"can not associate network security policy with host which is attached to child virtual service. Configuration is ignored")
+			}
+		}
 		vsEnabled = hostrule.Spec.VirtualHost.EnableVirtualHost
 		crdStatus = lib.CRDMetadata{
 			Type:   "HostRule",
@@ -158,7 +174,7 @@ func BuildL7HostRule(host, key string, vsNode AviVsEvhSniModel) {
 		}
 
 		if hostrule.Spec.VirtualHost.AnalyticsPolicy != nil {
-			var infinite int32 = 0 // Special value to set log duration as infinite
+			var infinite uint32 = 0 // Special value to set log duration as infinite
 			analyticsPolicy = &models.AnalyticsPolicy{
 				FullClientLogs: &models.FullClientLogs{
 					Duration: &infinite,
@@ -174,6 +190,13 @@ func BuildL7HostRule(host, key string, vsNode AviVsEvhSniModel) {
 				VHDomainNames = append(VHDomainNames, alias)
 			}
 		}
+		if lib.IsEvhEnabled() {
+			if hostrule.Spec.VirtualHost.L7Rule != "" {
+				BuildL7Rule(host, key, hostrule.Spec.VirtualHost.L7Rule, hrNSName[0], vsNode)
+			} else {
+				vsNode.GetGeneratedFields().ConvertL7RuleFieldsToNil()
+			}
+		}
 
 		utils.AviLog.Infof("key: %s, Successfully attached hostrule %s on vsNode %s", key, hrNamespaceName, vsNode.GetName())
 	} else {
@@ -184,26 +207,31 @@ func BuildL7HostRule(host, key string, vsNode AviVsEvhSniModel) {
 		if hrNamespaceName != "" {
 			utils.AviLog.Infof("key: %s, Successfully detached hostrule %s from vsNode %s", key, hrNamespaceName, vsNode.GetName())
 		}
+		vsNode.GetGeneratedFields().ConvertL7RuleFieldsToNil()
 	}
 
-	vsNode.SetSSLKeyCertAviRef(vsSslKeyCertificates)
-	vsNode.SetWafPolicyRef(&vsWafPolicy)
+	vsNode.SetSslKeyAndCertificateRefs(vsSslKeyCertificates)
+	vsNode.SetWafPolicyRef(vsWafPolicy)
 	vsNode.SetHttpPolicySetRefs(vsHTTPPolicySets)
 	vsNode.SetICAPProfileRefs(vsICAPProfile)
-	vsNode.SetAppProfileRef(&vsAppProfile)
-	vsNode.SetAnalyticsProfileRef(&vsAnalyticsProfile)
+	vsNode.SetAppProfileRef(vsAppProfile)
+	vsNode.SetAnalyticsProfileRef(vsAnalyticsProfile)
 	vsNode.SetErrorPageProfileRef(vsErrorPageProfile)
-	vsNode.SetSSLProfileRef(&vsSslProfile)
+	vsNode.SetSSLProfileRef(vsSslProfile)
 	vsNode.SetVsDatascriptRefs(vsDatascripts)
 	vsNode.SetEnabled(vsEnabled)
 	vsNode.SetAnalyticsPolicy(analyticsPolicy)
-	vsNode.SetPortProtocols(portProtocols)
+	if len(portProtocols) != 0 {
+		vsNode.SetPortProtocols(portProtocols)
+	}
 	vsNode.SetVSVIPLoadBalancerIP(lbIP)
 	vsNode.SetVHDomainNames(VHDomainNames)
+	vsNode.SetNetworkSecurityPolicyRef(vsNetworkSecurityPolicy)
 
 	serviceMetadataObj := vsNode.GetServiceMetadata()
 	serviceMetadataObj.CRDStatus = crdStatus
 	vsNode.SetServiceMetadata(serviceMetadataObj)
+
 }
 
 // BuildPoolHTTPRule notes
@@ -225,7 +253,7 @@ func BuildPoolHTTPRule(host, poolPath, ingName, namespace, infraSettingName, key
 	}
 
 	// maintains map of rrname+path: rrobj.spec.paths, prefetched for compute ahead
-	httpruleNameObjMap := make(map[string]akov1alpha1.HTTPRulePaths)
+	httpruleNameObjMap := make(map[string]akov1beta1.HTTPRulePaths)
 	for _, httprule := range getHTTPRules {
 		pathNSName := strings.Split(httprule, "/")
 		httpRuleObj, err := lib.AKOControlConfig().CRDInformers().HTTPRuleInformer.Lister().HTTPRules(pathNSName[0]).Get(pathNSName[1])
@@ -330,7 +358,9 @@ func BuildPoolHTTPRule(host, poolPath, ingName, namespace, infraSettingName, key
 				pool.ApplicationPersistenceProfileRef = persistenceProfile
 
 				// from this path, generate refs to this pool node
-				pool.LbAlgorithm = proto.String(httpRulePath.LoadBalancerPolicy.Algorithm)
+				if httpRulePath.LoadBalancerPolicy.Algorithm != "" {
+					pool.LbAlgorithm = proto.String(httpRulePath.LoadBalancerPolicy.Algorithm)
+				}
 				if pool.LbAlgorithm != nil &&
 					*pool.LbAlgorithm == lib.LB_ALGORITHM_CONSISTENT_HASH {
 					pool.LbAlgorithmHash = proto.String(httpRulePath.LoadBalancerPolicy.Hash)
@@ -457,4 +487,30 @@ func BuildL7SSORule(host, key string, vsNode AviVsEvhSniModel) {
 	serviceMetadataObj := vsNode.GetServiceMetadata()
 	serviceMetadataObj.CRDStatus = crdStatus
 	vsNode.SetServiceMetadata(serviceMetadataObj)
+}
+
+func BuildL7Rule(host, key, l7RuleName, namespace string, vsNode AviVsEvhSniModel) {
+	deleteL7RuleCase := false
+	l7Rule, err := lib.AKOControlConfig().CRDInformers().L7RuleInformer.Lister().L7Rules(namespace).Get(l7RuleName)
+	if err != nil {
+		utils.AviLog.Debugf("key: %s, msg: No L7Rule found for virtualhost: %s msg: %v", key, host, err)
+		deleteL7RuleCase = true
+	} else if l7Rule.Status.Status == lib.StatusRejected {
+		// do not apply a rejected L7Rule, this way the VS would retain
+		return
+	}
+	generatedFields := vsNode.GetGeneratedFields()
+	if !deleteL7RuleCase {
+		utils.AviLog.Debugf("key: %s, msg: applying l7 Rule %s", key, l7Rule.Name)
+		copier.CopyWithOption(vsNode, &l7Rule.Spec, copier.Option{DeepCopy: true})
+		if !vsNode.IsDedicatedVS() {
+			if !vsNode.IsSharedVS() {
+				generatedFields.ConvertL7RuleParentOnlyFieldsToNil()
+			}
+		}
+		utils.AviLog.Infof("key: %s, Successfully attached L7Rule %s on vsNode %s", key, l7RuleName, vsNode.GetName())
+		generatedFields.ConvertToRef()
+	} else {
+		generatedFields.ConvertL7RuleFieldsToNil()
+	}
 }

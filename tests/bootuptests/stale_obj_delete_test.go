@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/k8s"
@@ -18,10 +19,13 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 
 	crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned/fake"
+	v1beta1crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/clientset/versioned/fake"
 )
 
 var KubeClient *k8sfake.Clientset
 var CRDClient *crdfake.Clientset
+var V1beta1CRDClient *v1beta1crdfake.Clientset
+var ctrl *k8s.AviController
 var restChan chan bool
 var uuidMap map[string]bool
 
@@ -37,6 +41,7 @@ func TestMain(m *testing.M) {
 	os.Setenv("NODE_NETWORK_LIST", `[{"networkName":"net123","cidrs":["10.79.168.0/22"]}]`)
 	os.Setenv("POD_NAMESPACE", utils.AKO_DEFAULT_NS)
 	os.Setenv("SHARD_VS_SIZE", "LARGE")
+	os.Setenv("POD_NAME", "ako-0")
 
 	restChan = make(chan bool)
 	uuidMap = make(map[string]bool)
@@ -44,8 +49,10 @@ func TestMain(m *testing.M) {
 	akoControlConfig := lib.AKOControlConfig()
 	KubeClient = k8sfake.NewSimpleClientset()
 	CRDClient = crdfake.NewSimpleClientset()
+	V1beta1CRDClient = v1beta1crdfake.NewSimpleClientset()
 	akoControlConfig.SetCRDClientset(CRDClient)
 	akoControlConfig.SetAKOInstanceFlag(true)
+	akoControlConfig.Setv1beta1CRDClientset(V1beta1CRDClient)
 	akoControlConfig.SetEventRecorder(lib.AKOEventComponent, KubeClient, true)
 	lib.AKOControlConfig().SetControllerVersion("20.1.1")
 	data := map[string][]byte{
@@ -67,7 +74,7 @@ func TestMain(m *testing.M) {
 		utils.ConfigMapInformer,
 	}
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: KubeClient}, registeredInformers)
-	k8s.NewCRDInformers(CRDClient)
+	k8s.NewCRDInformers()
 
 	mcache := cache.SharedAviObjCache()
 	cloudObj := &cache.AviCloudPropertyCache{Name: "Default-Cloud", VType: "mock"}
@@ -79,7 +86,7 @@ func TestMain(m *testing.M) {
 
 	integrationtest.NewAviFakeClientInstance(KubeClient, true)
 	defer integrationtest.AviFakeClientInstance.Close()
-
+	ctrl = k8s.SharedAviController()
 	os.Exit(m.Run())
 }
 
@@ -161,4 +168,16 @@ func TestNetworkIssueCacheValidationDuringBootup(t *testing.T) {
 		t.Fatalf("Cache validation failed.")
 	}
 	integrationtest.ResetMiddleware()
+}
+
+func TestConfigmapDeletion(t *testing.T) {
+	integrationtest.AddConfigMap(KubeClient)
+	time.Sleep(10 * time.Second)
+	integrationtest.DeleteConfigMap(KubeClient, t)
+	ctrl.CleanupStaleVSes()
+	// Simulated error condition while fetching configmap by deleting it.
+	// if Disablesync is false or DeleteConfig is true, fail the test case.
+	if !ctrl.DisableSync || lib.GetDeleteConfigMap() {
+		t.Fatalf("Validation for cofigmapDelete Failed.")
+	}
 }

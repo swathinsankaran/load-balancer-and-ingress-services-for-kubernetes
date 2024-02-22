@@ -20,8 +20,9 @@ import (
 	"strings"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
-	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
 	akov1alpha2 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha2"
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
+
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
 	corev1 "k8s.io/api/core/v1"
@@ -36,7 +37,7 @@ type UpdateCRDStatusOptions struct {
 }
 
 // UpdateHostRuleStatus HostRule status updates
-func UpdateHostRuleStatus(key string, hr *akov1alpha1.HostRule, updateStatus UpdateCRDStatusOptions, retryNum ...int) {
+func UpdateHostRuleStatus(key string, hr *akov1beta1.HostRule, updateStatus UpdateCRDStatusOptions, retryNum ...int) {
 	retry := 0
 	if len(retryNum) > 0 {
 		retry = retryNum[0]
@@ -47,10 +48,10 @@ func UpdateHostRuleStatus(key string, hr *akov1alpha1.HostRule, updateStatus Upd
 	}
 
 	patchPayload, _ := json.Marshal(map[string]interface{}{
-		"status": akov1alpha1.HostRuleStatus(updateStatus),
+		"status": akov1beta1.HostRuleStatus(updateStatus),
 	})
 
-	_, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().HostRules(hr.Namespace).Patch(context.TODO(), hr.Name, types.MergePatchType, patchPayload, metav1.PatchOptions{}, "status")
+	_, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules(hr.Namespace).Patch(context.TODO(), hr.Name, types.MergePatchType, patchPayload, metav1.PatchOptions{}, "status")
 	if err != nil {
 		utils.AviLog.Errorf("key: %s, msg: there was an error in updating the hostrule status: %+v", key, err)
 		updatedHr, err := lib.AKOControlConfig().CRDInformers().HostRuleInformer.Lister().HostRules(hr.Namespace).Get(hr.Name)
@@ -106,7 +107,7 @@ func HostRuleEventBroadcast(vsName string, vsCacheMetadataOld, vsMetadataNew lib
 }
 
 // UpdateHTTPRuleStatus HttpRule status updates
-func UpdateHTTPRuleStatus(key string, rr *akov1alpha1.HTTPRule, updateStatus UpdateCRDStatusOptions, retryNum ...int) {
+func UpdateHTTPRuleStatus(key string, rr *akov1beta1.HTTPRule, updateStatus UpdateCRDStatusOptions, retryNum ...int) {
 	retry := 0
 	if len(retryNum) > 0 {
 		retry = retryNum[0]
@@ -117,10 +118,10 @@ func UpdateHTTPRuleStatus(key string, rr *akov1alpha1.HTTPRule, updateStatus Upd
 	}
 
 	patchPayload, _ := json.Marshal(map[string]interface{}{
-		"status": akov1alpha1.HTTPRuleStatus(updateStatus),
+		"status": akov1beta1.HTTPRuleStatus(updateStatus),
 	})
 
-	_, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().HTTPRules(rr.Namespace).Patch(context.TODO(), rr.Name, types.MergePatchType, patchPayload, metav1.PatchOptions{}, "status")
+	_, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HTTPRules(rr.Namespace).Patch(context.TODO(), rr.Name, types.MergePatchType, patchPayload, metav1.PatchOptions{}, "status")
 	if err != nil {
 		utils.AviLog.Errorf("key: %s, msg: %d there was an error in updating the httprule status: %+v", key, retry, err)
 		updatedRr, err := lib.AKOControlConfig().CRDInformers().HTTPRuleInformer.Lister().HTTPRules(rr.Namespace).Get(rr.Name)
@@ -147,8 +148,8 @@ func HttpRuleEventBroadcast(poolName string, poolCacheMetadataOld, vsMetadataNew
 			return
 		}
 
-		oldHttpRule, _ := lib.AKOControlConfig().CRDInformers().HostRuleInformer.Lister().HostRules(oldHRNamespaceName[0]).Get(oldHRNamespaceName[1])
-		newHttpRule, _ := lib.AKOControlConfig().CRDInformers().HostRuleInformer.Lister().HostRules(newHRNamespaceName[0]).Get(newHRNamespaceName[1])
+		oldHttpRule, _ := lib.AKOControlConfig().CRDInformers().HTTPRuleInformer.Lister().HTTPRules(oldHRNamespaceName[0]).Get(oldHRNamespaceName[1])
+		newHttpRule, _ := lib.AKOControlConfig().CRDInformers().HTTPRuleInformer.Lister().HTTPRules(newHRNamespaceName[0]).Get(newHRNamespaceName[1])
 		if oldHttpRule == nil || newHttpRule == nil {
 			return
 		}
@@ -176,7 +177,8 @@ func HttpRuleEventBroadcast(poolName string, poolCacheMetadataOld, vsMetadataNew
 }
 
 // UpdateAviInfraSettingStatus AviInfraSetting status updates
-func UpdateAviInfraSettingStatus(key string, infraSetting *akov1alpha1.AviInfraSetting, updateStatus UpdateCRDStatusOptions, retryNum ...int) {
+func UpdateAviInfraSettingStatus(key string, infraSetting *akov1beta1.AviInfraSetting, updateStatus UpdateCRDStatusOptions, retryNum ...int) {
+
 	retry := 0
 	if len(retryNum) > 0 {
 		retry = retryNum[0]
@@ -187,10 +189,10 @@ func UpdateAviInfraSettingStatus(key string, infraSetting *akov1alpha1.AviInfraS
 	}
 
 	patchPayload, _ := json.Marshal(map[string]interface{}{
-		"status": akov1alpha1.AviInfraSettingStatus(updateStatus),
+		"status": akov1beta1.AviInfraSettingStatus(updateStatus),
 	})
 
-	_, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Patch(context.TODO(), infraSetting.Name, types.MergePatchType, patchPayload, metav1.PatchOptions{}, "status")
+	_, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Patch(context.TODO(), infraSetting.Name, types.MergePatchType, patchPayload, metav1.PatchOptions{}, "status")
 	if err != nil {
 		utils.AviLog.Errorf("key: %s, msg: %d there was an error in updating the aviinfrasetting status: %+v", key, retry, err)
 		updatedInfraSetting, err := lib.AKOControlConfig().CRDInformers().AviInfraSettingInformer.Lister().Get(infraSetting.Name)
@@ -345,5 +347,76 @@ func SSORuleEventBroadcast(vsName string, vsCacheMetadataOld, vsMetadataNew lib.
 	} else if vsCacheMetadataOld.Status == lib.CRDActive && (vsMetadataNew.Status == "" || vsMetadataNew.Status == lib.CRDInactive) {
 		// CRD was removed, ACTIVE -> INACTIVE transitions
 		lib.AKOControlConfig().EventRecorder().Eventf(ssoRule, corev1.EventTypeNormal, lib.Attached, "Configuration removed from VirtualService %s", vsName)
+	}
+}
+
+// UpdateL7RuleStatus updates the L7Rule status
+func UpdateL7RuleStatus(key string, l7Rule *akov1alpha2.L7Rule, updateStatus UpdateCRDStatusOptions, retryNum ...int) {
+	retry := 0
+	if len(retryNum) > 0 {
+		retry = retryNum[0]
+		if retry >= 3 {
+			utils.AviLog.Errorf("key: %s, msg: UpdateL7RuleStatus retried 3 times, aborting", key)
+			return
+		}
+	}
+
+	patchPayload, _ := json.Marshal(map[string]interface{}{
+		"status": akov1alpha2.L7RuleStatus(updateStatus),
+	})
+
+	_, err := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L7Rules(l7Rule.Namespace).Patch(context.TODO(), l7Rule.Name, types.MergePatchType, patchPayload, metav1.PatchOptions{}, "status")
+	if err != nil {
+		utils.AviLog.Errorf("key: %s, msg: %d there was an error in updating the L7Rule status: %+v", key, retry, err)
+		updatedL7RuleObj, err := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L7Rules(l7Rule.Namespace).Get(context.TODO(), l7Rule.Name, metav1.GetOptions{})
+		if err != nil {
+			utils.AviLog.Warnf("key: %s, msg: L7Rule not found %v", key, err)
+			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) {
+				UpdateL7RuleStatus(key, updatedL7RuleObj, updateStatus, retry+1)
+			}
+			return
+		}
+		UpdateL7RuleStatus(key, updatedL7RuleObj, updateStatus, retry+1)
+	}
+
+	utils.AviLog.Infof("key: %s, msg: Successfully updated the L7Rule %s status %+v", key, l7Rule.Name, utils.Stringify(updateStatus))
+}
+
+// L7RuleEventBroadcast is responsible from broadcasting L7Rule specific events when the VS Cache is Added/Updated/Deleted.
+func L7RuleEventBroadcast(vsName string, vsCacheMetadataOld, vsMetadataNew lib.CRDMetadata) {
+	if vsCacheMetadataOld.Value != vsMetadataNew.Value {
+		oldLRNamespaceName := strings.Split(vsCacheMetadataOld.Value, "/")
+		newLRNamespaceName := strings.Split(vsMetadataNew.Value, "/")
+
+		if len(oldLRNamespaceName) != 2 || len(newLRNamespaceName) != 2 {
+			return
+		}
+
+		oldL7Rule, _ := lib.AKOControlConfig().CRDInformers().L7RuleInformer.Lister().L7Rules(oldLRNamespaceName[0]).Get(oldLRNamespaceName[1])
+		newL7Rule, _ := lib.AKOControlConfig().CRDInformers().L7RuleInformer.Lister().L7Rules(newLRNamespaceName[0]).Get(newLRNamespaceName[1])
+		if oldL7Rule == nil || newL7Rule == nil {
+			return
+		}
+
+		lib.AKOControlConfig().EventRecorder().Eventf(oldL7Rule, corev1.EventTypeNormal, lib.Attached, "Configuration removed from VirtualService %s", vsName)
+		lib.AKOControlConfig().EventRecorder().Eventf(newL7Rule, corev1.EventTypeNormal, lib.Attached, "Configuration applied to VirtualService %s", vsName)
+	}
+
+	lrNamespaceName := strings.Split(vsMetadataNew.Value, "/")
+	if len(lrNamespaceName) != 2 {
+		return
+	}
+
+	l7Rule, _ := lib.AKOControlConfig().CRDInformers().L7RuleInformer.Lister().L7Rules(lrNamespaceName[0]).Get(lrNamespaceName[1])
+	if l7Rule == nil {
+		return
+	}
+
+	if (vsCacheMetadataOld.Status == lib.CRDInactive || vsCacheMetadataOld.Status == "") && vsMetadataNew.Status == lib.CRDActive {
+		// CRD was added, INACTIVE -> ACTIVE transitions
+		lib.AKOControlConfig().EventRecorder().Eventf(l7Rule, corev1.EventTypeNormal, lib.Attached, "Configuration applied to VirtualService %s", vsName)
+	} else if vsCacheMetadataOld.Status == lib.CRDActive && (vsMetadataNew.Status == "" || vsMetadataNew.Status == lib.CRDInactive) {
+		// CRD was removed, ACTIVE -> INACTIVE transitions
+		lib.AKOControlConfig().EventRecorder().Eventf(l7Rule, corev1.EventTypeNormal, lib.Attached, "Configuration removed from VirtualService %s", vsName)
 	}
 }

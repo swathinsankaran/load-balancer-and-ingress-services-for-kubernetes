@@ -278,6 +278,7 @@ func (l *leader) AviRestOperate(c *clients.AviClient, rest_ops []*utils.RestOp, 
 			utils.AviLog.Warnf("key: %s, msg: Sync is disabled, Only DELETE operation is allowed for models other than VRF model", key)
 			continue
 		}
+		lib.IncrementRestOpCouter(utils.Stringify(op.Method), op.ObjName)
 		SetTenant := session.SetTenant(op.Tenant)
 		SetTenant(c.AviSession)
 		if op.Version != "" {
@@ -313,6 +314,8 @@ func (l *leader) AviRestOperate(c *clients.AviClient, rest_ops []*utils.RestOp, 
 			} else if aviErr.HttpStatusCode == 404 && op.Method == utils.RestDelete {
 				utils.AviLog.Warnf("key: %s, msg: Error during rest operation: %v, object of type %s not found in the controller. Ignoring err: %v", key, op.Method, op.Model, op.Err)
 				continue
+			} else if op.Model == "VrfContext" && aviErr.HttpStatusCode == 412 {
+				utils.AviLog.Debugf("key: %s, msg: Error in rest operation for VrfContext Put request.", key)
 			} else if !isErrorRetryable(aviErr.HttpStatusCode, *aviErr.Message) {
 				if op.Method != utils.RestPost {
 					continue

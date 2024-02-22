@@ -20,7 +20,7 @@ import (
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
-	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
 	avimodels "github.com/vmware/alb-sdk/go/models"
@@ -62,6 +62,7 @@ func (o *AviObjectGraph) ConstructAviL7VsNode(vsName string, key string, routeIg
 	defer o.Lock.Unlock()
 
 	var vrfcontext string
+	infraSetting := routeIgrObj.GetAviInfraSetting()
 	avi_vs_meta := &AviVsNode{
 		Name:               vsName,
 		Tenant:             lib.GetTenant(),
@@ -73,6 +74,9 @@ func (o *AviObjectGraph) ConstructAviL7VsNode(vsName string, key string, routeIg
 			{Port: 80, Protocol: utils.HTTP},
 		},
 	}
+
+	avi_vs_meta.Secure = secureVS
+
 	if !dedicatedVs {
 		avi_vs_meta.SharedVS = true
 		avi_vs_meta.SNIParent = true
@@ -91,7 +95,10 @@ func (o *AviObjectGraph) ConstructAviL7VsNode(vsName string, key string, routeIg
 	}
 
 	// If NSX-T LR path is empty, set vrfContext
-	t1lr := objects.SharedWCPLister().GetT1LrForNamespace(routeIgrObj.GetNamespace())
+	t1lr := lib.GetT1LRPath()
+	if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
+		t1lr = *infraSetting.Spec.NSXSettings.T1LR
+	}
 	if t1lr == "" {
 		vrfcontext = lib.GetVrf()
 		avi_vs_meta.VrfContext = vrfcontext
@@ -102,8 +109,9 @@ func (o *AviObjectGraph) ConstructAviL7VsNode(vsName string, key string, routeIg
 	}
 	o.AddModelNode(avi_vs_meta)
 
+	shardSize := lib.GetShardSizeFromAviInfraSetting(routeIgrObj.GetAviInfraSetting())
 	subDomains := GetDefaultSubDomain()
-	fqdns, fqdn := lib.GetFqdns(vsName, key, subDomains)
+	fqdns, fqdn := lib.GetFqdns(vsName, key, subDomains, shardSize)
 	configuredSharedVSFqdn := fqdn
 
 	vsVipNode := &AviVSVIPNode{
@@ -111,7 +119,7 @@ func (o *AviObjectGraph) ConstructAviL7VsNode(vsName string, key string, routeIg
 		Tenant:      lib.GetTenant(),
 		FQDNs:       fqdns,
 		VrfContext:  vrfcontext,
-		VipNetworks: lib.GetVipNetworkList(),
+		VipNetworks: utils.GetVipNetworkList(),
 	}
 
 	if t1lr != "" {
@@ -122,9 +130,7 @@ func (o *AviObjectGraph) ConstructAviL7VsNode(vsName string, key string, routeIg
 		vsVipNode.BGPPeerLabels = lib.GetGlobalBgpPeerLabels()
 	}
 
-	if infraSetting := routeIgrObj.GetAviInfraSetting(); infraSetting != nil {
-		buildWithInfraSetting(key, avi_vs_meta, vsVipNode, infraSetting)
-	}
+	buildWithInfraSetting(key, routeIgrObj.GetNamespace(), avi_vs_meta, vsVipNode, infraSetting)
 
 	avi_vs_meta.VSVIPRefs = append(avi_vs_meta.VSVIPRefs, vsVipNode)
 	//Apply hostrule on shared Vs fqdn
@@ -305,7 +311,7 @@ func (o *AviObjectGraph) BuildTlsCertNode(svcLister *objects.SvcLister, tlsNode 
 	return true
 }
 
-func (o *AviObjectGraph) BuildPolicyPGPoolsForSNI(vsNode []*AviVsNode, tlsNode *AviVsNode, namespace string, ingName string, hostpath TlsSettings, secretName string, key string, isIngr bool, infraSetting *akov1alpha1.AviInfraSetting, hostName string) {
+func (o *AviObjectGraph) BuildPolicyPGPoolsForSNI(vsNode []*AviVsNode, tlsNode *AviVsNode, namespace string, ingName string, hostpath TlsSettings, secretName string, key string, isIngr bool, infraSetting *akov1beta1.AviInfraSetting, hostName string) {
 	localPGList := make(map[string]*AviPoolGroupNode)
 	var sniFQDNs []string
 	var priorityLabel string
@@ -335,10 +341,6 @@ func (o *AviObjectGraph) BuildPolicyPGPoolsForSNI(vsNode []*AviVsNode, tlsNode *
 			// check if the VHDomain is already added, if not add it.
 			if !utils.HasElem(pathFQDNs, paths.gslbHostHeader) {
 				pathFQDNs = append(pathFQDNs, paths.gslbHostHeader)
-			}
-
-			if vsNode[0].Dedicated && !utils.HasElem(vsNode[0].VSVIPRefs[0].FQDNs, paths.gslbHostHeader) {
-				vsNode[0].VSVIPRefs[0].FQDNs = append(vsNode[0].VSVIPRefs[0].FQDNs, paths.gslbHostHeader)
 			}
 
 		}
@@ -419,9 +421,12 @@ func (o *AviObjectGraph) BuildPolicyPGPoolsForSNI(vsNode []*AviVsNode, tlsNode *
 				VrfContext: lib.GetVrf(),
 			}
 
-			poolNode.NetworkPlacementSettings, _ = lib.GetNodeNetworkMap()
+			poolNode.NetworkPlacementSettings = lib.GetNodeNetworkMap()
 
-			t1lr := objects.SharedWCPLister().GetT1LrForNamespace(namespace)
+			t1lr := lib.GetT1LRPath()
+			if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
+				t1lr = *infraSetting.Spec.NSXSettings.T1LR
+			}
 			if t1lr != "" {
 				poolNode.T1Lr = t1lr
 				// Unset the poolnode's vrfcontext.
@@ -640,7 +645,7 @@ func RemoveFqdnFromVIP(vsNode *AviVsNode, key string, Fqdns []string) {
 		}
 	}
 }
-func buildWithInfraSetting(key string, vs *AviVsNode, vsvip *AviVSVIPNode, infraSetting *akov1alpha1.AviInfraSetting) {
+func buildWithInfraSetting(key, namespace string, vs *AviVsNode, vsvip *AviVSVIPNode, infraSetting *akov1beta1.AviInfraSetting) {
 	if infraSetting != nil && infraSetting.Status.Status == lib.StatusAccepted {
 		if infraSetting.Spec.SeGroup.Name != "" {
 			// This assumes that the SeGroup has the appropriate labels configured
@@ -667,29 +672,64 @@ func buildWithInfraSetting(key string, vs *AviVsNode, vsvip *AviVSVIPNode, infra
 		}
 
 		if infraSetting.Spec.Network.VipNetworks != nil && len(infraSetting.Spec.Network.VipNetworks) > 0 {
-			vsvip.VipNetworks = infraSetting.Spec.Network.VipNetworks
+			vsvip.VipNetworks = lib.GetVipInfraNetworkList(infraSetting.Name)
 		} else {
-			vsvip.VipNetworks = lib.GetVipNetworkList()
+			vsvip.VipNetworks = utils.GetVipNetworkList()
 		}
 		if lib.IsPublicCloud() {
 			vsvip.EnablePublicIP = infraSetting.Spec.Network.EnablePublicIP
+		}
+		if vs.SNIParent || vs.Dedicated && (infraSetting.Spec.Network.Listeners != nil && len(infraSetting.Spec.Network.Listeners) > 0) {
+			portProto := buildListenerPortsWithInfraSetting(infraSetting, vs.PortProto)
+			vs.SetPortProtocols(portProto)
+		}
+		if infraSetting.Spec.NSXSettings.T1LR != nil {
+			vsvip.T1Lr = *infraSetting.Spec.NSXSettings.T1LR
 		}
 		utils.AviLog.Debugf("key: %s, msg: Applied AviInfraSetting configuration over VSNode %s", key, vs.Name)
 	}
 }
 
-func buildPoolWithInfraSetting(key string, pool *AviPoolNode, infraSetting *akov1alpha1.AviInfraSetting) {
+func buildPoolWithInfraSetting(key string, pool *AviPoolNode, infraSetting *akov1beta1.AviInfraSetting) {
 	if infraSetting != nil && infraSetting.Status.Status == lib.StatusAccepted {
 		if infraSetting.Spec.Network.NodeNetworks != nil && len(infraSetting.Spec.Network.NodeNetworks) > 0 {
-			nodeNetworkMap := make(map[string][]string)
-			for _, nodeNetwork := range infraSetting.Spec.Network.NodeNetworks {
-				nodeNetworkMap[nodeNetwork.NetworkName] = nodeNetwork.Cidrs
-			}
-			pool.NetworkPlacementSettings = nodeNetworkMap
+			pool.NetworkPlacementSettings = lib.GetNodeInfraNetworkList(infraSetting.Name)
 		} else {
-			pool.NetworkPlacementSettings, _ = lib.GetNodeNetworkMap()
+			pool.NetworkPlacementSettings = lib.GetNodeNetworkMap()
 		}
 
 		utils.AviLog.Debugf("key: %s, msg: Applied AviInfraSetting configuration over PoolNode %s", key, pool.Name)
 	}
+}
+
+func buildListenerPortsWithInfraSetting(infraSetting *akov1beta1.AviInfraSetting, aviPortProto []AviPortHostProtocol) []AviPortHostProtocol {
+	for _, listener := range infraSetting.Spec.Network.Listeners {
+		found := false
+		if listener.Port == nil {
+			continue
+		}
+		portProtocol := AviPortHostProtocol{
+			Port:        int32(*listener.Port),
+			Protocol:    utils.HTTP,
+			EnableHTTP2: false,
+			EnableSSL:   false,
+		}
+		if listener.EnableSSL != nil {
+			portProtocol.EnableSSL = *listener.EnableSSL
+		}
+		if listener.EnableHTTP2 != nil {
+			portProtocol.EnableHTTP2 = *listener.EnableHTTP2
+		}
+		for i, portProto := range aviPortProto {
+			if portProto.Port == int32(*listener.Port) {
+				aviPortProto[i] = portProtocol
+				found = true
+				break
+			}
+		}
+		if !found {
+			aviPortProto = append(aviPortProto, portProtocol)
+		}
+	}
+	return aviPortProto
 }

@@ -24,6 +24,7 @@ const (
 	NCP_CNI                   = "ncp"
 	OPENSHIFT_CNI             = "openshift"
 	OVN_KUBERNETES_CNI        = "ovn-kubernetes"
+	CILIUM_CNI                = "cilium"
 	INGRESS_API               = "INGRESS_API"
 	AviConfigMap              = "avi-k8s-config"
 	AviSecret                 = "avi-secret"
@@ -74,7 +75,7 @@ const (
 	ShardVSSubstring                           = "Shared-"
 	ShardVSPrefix                              = "Shared-L7"
 	ShardEVHVSPrefix                           = "Shared-L7-EVH-"
-	AKOSuffix                                  = "ako-"
+	AKOPrefix                                  = "ako-"
 	DedicatedSuffix                            = "-L7-dedicated"
 	EVHSuffix                                  = "-EVH"
 	PassthroughPrefix                          = "Shared-Passthrough-"
@@ -94,6 +95,7 @@ const (
 	AviInfraSetting                            = "AviInfraSetting"
 	SSORule                                    = "SSORule"
 	L4Rule                                     = "L4Rule"
+	L7Rule                                     = "L7Rule"
 	IstioVirtualService                        = "IstioVirtualService"
 	IstioDestinationRule                       = "DestinationRule"
 	IstioGateway                               = "IstioGateway"
@@ -105,12 +107,15 @@ const (
 	StatusAccepted                             = "Accepted"
 	AllowedL7ApplicationProfile                = "APPLICATION_PROFILE_TYPE_HTTP"
 	AllowedL4ApplicationProfile                = "APPLICATION_PROFILE_TYPE_L4"
+	AllowedL4SSLApplicationProfile             = "APPLICATION_PROFILE_TYPE_SSL"
+	AllowedTCPProxyNetworkProfileType          = "PROTOCOL_TYPE_TCP_PROXY"
 	TypeTLSReencrypt                           = "reencrypt"
 	DefaultPoolSSLProfile                      = "System-Standard"
 	LB_ALGORITHM_CONSISTENT_HASH_CUSTOM_HEADER = "LB_ALGORITHM_CONSISTENT_HASH_CUSTOM_HEADER"
 	LB_ALGORITHM_CONSISTENT_HASH               = "LB_ALGORITHM_CONSISTENT_HASH"
 	Gateway                                    = "Gateway"
 	GatewayClass                               = "GatewayClass"
+	HTTPRoute                                  = "HTTPRoute"
 	DuplicateBackends                          = "MultipleBackendsWithSameServiceError"
 	DummyVSForStaleData                        = "DummyVSForStaleData"
 	ControllerReqWaitTime                      = 300
@@ -170,6 +175,7 @@ const (
 	FQDN_SVCNAME_PREFIX                        = "s"
 	FQDN_SVCNAMESPACE_PREFIX                   = "n"
 	FQDN_SUBDOMAIN_PREFIX                      = "d"
+	DNS_LABEL_LENGTH                           = 63
 	VCF_NETWORK                                = "vcf-ako-net"
 	VIP_PER_NAMESPACE                          = "VIP_PER_NAMESPACE"
 	PRIMARY_AKO_FLAG                           = "PRIMARY_AKO_FLAG"
@@ -189,25 +195,30 @@ const (
 	CTRL_VERSION_21_1_3                        = "21.1.3"
 	FullSyncInterval                           = 300
 	Namespace                                  = "Namespace"
+	VrfContextNotFoundError                    = "VrfContext not found"
+	HTTPMethodGet                              = "GET"
+	HTTPMethodPut                              = "PUT"
 
 	// AKO Event constants
-	AKOEventComponent      = "avi-kubernetes-operator"
-	AKOShutdown            = "AKOShutdown"
-	SyncDisabled           = "SyncDisabled"
-	ValidatedUserInput     = "ValidatedUserInput"
-	StatusSync             = "StatusSync"
-	AKOReady               = "AKOReady"
-	AKOPause               = "AKOPause"
-	DuplicateHostPath      = "DuplicateHostPath"
-	DuplicateHost          = "DuplicateHost"
-	Removed                = "Removed"
-	Synced                 = "Synced"
-	Attached               = "Attached"
-	Detached               = "Detached"
-	AKODeleteConfigSet     = "AKODeleteConfigSet"
-	AKODeleteConfigUnset   = "AKODeleteConfigUnset"
-	AKODeleteConfigDone    = "AKODeleteConfigDone"
-	AKODeleteConfigTimeout = "AKODeleteConfigTimeout"
+	AKOEventComponent        = "avi-kubernetes-operator"
+	AKOShutdown              = "AKOShutdown"
+	SyncDisabled             = "SyncDisabled"
+	ValidatedUserInput       = "ValidatedUserInput"
+	StatusSync               = "StatusSync"
+	AKOReady                 = "AKOReady"
+	AKOPause                 = "AKOPause"
+	DuplicateHostPath        = "DuplicateHostPath"
+	DuplicateHost            = "DuplicateHost"
+	Removed                  = "Removed"
+	Synced                   = "Synced"
+	Attached                 = "Attached"
+	Detached                 = "Detached"
+	InvalidConfiguration     = "InvalidConfiguration"
+	AKODeleteConfigSet       = "AKODeleteConfigSet"
+	AKODeleteConfigUnset     = "AKODeleteConfigUnset"
+	AKODeleteConfigDone      = "AKODeleteConfigDone"
+	AKODeleteConfigTimeout   = "AKODeleteConfigTimeout"
+	AKOGatewayEventComponent = "avi-kubernetes-operator-gateway-api"
 
 	DefaultIngressClassAnnotation  = "ingressclass.kubernetes.io/is-default-class"
 	ExternalDNSAnnotation          = "external-dns.alpha.kubernetes.io/hostname"
@@ -289,6 +300,11 @@ const (
 	// Service objects. This helps in fetching all Services
 	// with a given L4Rule CRD name.
 	L4RuleToServicesIndex = "l4RuleToServicesIndex"
+
+	// AviSettingNamespaceIndex maintains a map of AviInfraSetting Objects to
+	// Namespace objects. This helps in fettching a Namespace with a given
+	// AviInfraSetting.
+	AviSettingNamespaceIndex = "aviSettingNamespaces"
 )
 
 // Passthrough deployment same in EVH and SNI. Not changing log messages.

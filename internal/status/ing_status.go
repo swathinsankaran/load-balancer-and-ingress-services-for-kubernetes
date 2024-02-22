@@ -119,7 +119,7 @@ func updateObject(mIngress *networkingv1.Ingress, updateOption UpdateOptions, re
 	// Handle fresh hostname update
 	for _, host := range hostnames {
 		for _, vip := range updateOption.Vip {
-			lbIngress := corev1.LoadBalancerIngress{
+			lbIngress := networkingv1.IngressLoadBalancerIngress{
 				IP:       vip,
 				Hostname: host,
 			}
@@ -143,7 +143,7 @@ func updateObject(mIngress *networkingv1.Ingress, updateOption UpdateOptions, re
 	}
 
 	// we need hosts for which the IP is getting removed, and hosts for which it is being added/updated
-	sameStatus, hostsBefore, hostsAfter := compareLBStatus(oldIngressStatus, &mIngress.Status.LoadBalancer)
+	sameStatus, hostsBefore, hostsAfter := compareIngressLBStatus(oldIngressStatus, &mIngress.Status.LoadBalancer)
 	var updatedIng *networkingv1.Ingress
 	var err error
 	if !sameStatus {
@@ -160,10 +160,10 @@ func updateObject(mIngress *networkingv1.Ingress, updateOption UpdateOptions, re
 				return updateObject(mIngresses[mIngress.Namespace+"/"+mIngress.Name], updateOption, retry+1)
 			}
 		} else {
-			for _, hns := range (hostsBefore.Difference(hostsAfter)).List() {
+			for _, hns := range (hostsBefore.Difference(hostsAfter)).UnsortedList() {
 				lib.AKOControlConfig().EventRecorder().Eventf(updatedIng, corev1.EventTypeNormal, lib.Removed, "Removed virtualservice for %s", hns)
 			}
-			for _, hns := range (hostsAfter.Difference(hostsBefore)).List() {
+			for _, hns := range (hostsAfter.Difference(hostsBefore)).UnsortedList() {
 				lib.AKOControlConfig().EventRecorder().Eventf(updatedIng, corev1.EventTypeNormal, lib.Synced, "Added virtualservice %s for %s", updateOption.VSName, hns)
 			}
 			utils.AviLog.Infof("key: %s, msg: Successfully updated the ingress status of ingress: %s/%s old: %+v new: %+v",
@@ -383,7 +383,7 @@ func deleteObject(option UpdateOptions, key string, isVSDelete bool, retryNum ..
 		}
 	}
 
-	sameStatus, hostsBefore, hostsAfter := compareLBStatus(oldIngressStatus, &mIngress.Status.LoadBalancer)
+	sameStatus, hostsBefore, hostsAfter := compareIngressLBStatus(oldIngressStatus, &mIngress.Status.LoadBalancer)
 
 	var updatedIng *networkingv1.Ingress
 	if !sameStatus {
@@ -400,7 +400,7 @@ func deleteObject(option UpdateOptions, key string, isVSDelete bool, retryNum ..
 			utils.AviLog.Errorf("key: %s, msg: there was an error in deleting the ingress status: %v", key, err)
 			return deleteObject(option, key, isVSDelete, retry+1)
 		} else {
-			for _, hns := range (hostsBefore.Difference(hostsAfter)).List() {
+			for _, hns := range (hostsBefore.Difference(hostsAfter)).UnsortedList() {
 				lib.AKOControlConfig().EventRecorder().Eventf(updatedIng, corev1.EventTypeNormal, lib.Removed, "Removed virtualservice for %s", hns)
 			}
 			utils.AviLog.Infof("key: %s, msg: Successfully deleted the ingress status of ingress: %s/%s old: %+v new: %+v",
@@ -470,10 +470,38 @@ func deleteIngressAnnotation(ingObj *networkingv1.Ingress, svcMeta lib.ServiceMe
 }
 
 // compareLBStatus returns true if status objects are same, so status update is not required
-func compareLBStatus(oldStatus, newStatus *corev1.LoadBalancerStatus) (bool, sets.String, sets.String) {
-	exists := sets.NewString()
-	oldHosts := sets.NewString()
-	newHosts := sets.NewString()
+func compareIngressLBStatus(oldStatus, newStatus *networkingv1.IngressLoadBalancerStatus) (bool, sets.Set[string], sets.Set[string]) {
+	exists := sets.Set[string]{}
+	oldHosts := sets.Set[string]{}
+	newHosts := sets.Set[string]{}
+	var diff *bool
+	for _, status := range oldStatus.Ingress {
+		exists.Insert(status.IP + ":" + status.Hostname)
+		oldHosts.Insert(status.Hostname)
+	}
+
+	if len(newStatus.Ingress) != len(oldStatus.Ingress) {
+		diff = proto.Bool(false)
+	}
+	for _, status := range newStatus.Ingress {
+		if !exists.Has(status.IP + ":" + status.Hostname) {
+			if diff == nil {
+				diff = proto.Bool(false)
+			}
+		}
+		newHosts.Insert(status.Hostname)
+	}
+
+	if diff == nil {
+		diff = proto.Bool(true)
+	}
+	return *diff, oldHosts, newHosts
+}
+
+func compareLBStatus(oldStatus, newStatus *corev1.LoadBalancerStatus) (bool, sets.Set[string], sets.Set[string]) {
+	exists := sets.Set[string]{}
+	oldHosts := sets.Set[string]{}
+	newHosts := sets.Set[string]{}
 	var diff *bool
 	for _, status := range oldStatus.Ingress {
 		exists.Insert(status.IP + ":" + status.Hostname)
@@ -519,8 +547,8 @@ func getIngresses(ingressNSNames []string, bulk bool, retryNum ...int) map[strin
 		ingClassList, err := utils.GetInformers().IngressClassInformer.Lister().List(labels.Set(nil).AsSelector())
 		if err != nil {
 			utils.AviLog.Warnf("Could not get the IngressClass object for UpdateStatus: %s", err)
-			// retry get if request timeout
-			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) {
+			// retry get if request timeout or Unauthorized
+			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) || strings.Contains(err.Error(), utils.K8S_UNAUTHORIZED) {
 				return getIngresses(ingressNSNames, bulk, retry+1)
 			}
 			return ingressMap
@@ -539,8 +567,8 @@ func getIngresses(ingressNSNames []string, bulk bool, retryNum ...int) map[strin
 		ingressList, err := utils.GetInformers().IngressInformer.Lister().List(labels.Set(nil).AsSelector())
 		if err != nil {
 			utils.AviLog.Warnf("Could not get the ingress object for UpdateStatus: %v", err)
-			// retry get if request timeout
-			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) {
+			// retry get if request timeout or Unauthorized
+			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) || strings.Contains(err.Error(), utils.K8S_UNAUTHORIZED) {
 				return getIngresses(ingressNSNames, bulk, retry+1)
 			}
 		}
@@ -572,8 +600,8 @@ func getIngresses(ingressNSNames []string, bulk bool, retryNum ...int) map[strin
 		mIngress, err := utils.GetInformers().ClientSet.NetworkingV1().Ingresses(nsNameSplit[0]).Get(context.TODO(), nsNameSplit[1], metav1.GetOptions{})
 		if err != nil {
 			utils.AviLog.Warnf("Could not get the ingress object for UpdateStatus: %v", err)
-			// retry get if request timeout
-			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) {
+			// retry get if request timeout or Unauthorized
+			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) || strings.Contains(err.Error(), utils.K8S_UNAUTHORIZED) {
 				return getIngresses(ingressNSNames, bulk, retry+1)
 			}
 			continue

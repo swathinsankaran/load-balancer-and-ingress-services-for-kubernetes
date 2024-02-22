@@ -26,6 +26,9 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	avinodes "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
+	crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1alpha1/clientset/versioned/fake"
+	v1beta1crdfake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/clientset/versioned/fake"
+
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/tests/integrationtest"
 	advl4fake "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/service-apis/client/clientset/versioned/fake"
@@ -40,6 +43,8 @@ import (
 
 var KubeClient *k8sfake.Clientset
 var AdvL4Client *advl4fake.Clientset
+var CRDClient *crdfake.Clientset
+var V1beta1CRDClient *v1beta1crdfake.Clientset
 var ctrl *k8s.AviController
 
 func TestMain(m *testing.M) {
@@ -48,13 +53,19 @@ func TestMain(m *testing.M) {
 	os.Setenv("ADVANCED_L4", "true")
 	os.Setenv("POD_NAMESPACE", utils.AKO_DEFAULT_NS)
 	os.Setenv("SHARD_VS_SIZE", "LARGE")
+	os.Setenv("POD_NAME", "ako-0")
 
 	akoControlConfig := lib.AKOControlConfig()
 	KubeClient = k8sfake.NewSimpleClientset()
 	AdvL4Client = advl4fake.NewSimpleClientset()
+	CRDClient = crdfake.NewSimpleClientset()
+	V1beta1CRDClient = v1beta1crdfake.NewSimpleClientset()
 	akoControlConfig.SetAKOInstanceFlag(true)
 	akoControlConfig.SetAdvL4Clientset(AdvL4Client)
+	akoControlConfig.Setv1beta1CRDClientset(V1beta1CRDClient)
+	akoControlConfig.SetCRDClientsetAndEnableInfraSettingParam(V1beta1CRDClient)
 	akoControlConfig.SetEventRecorder(lib.AKOEventComponent, KubeClient, true)
+	akoControlConfig.SetDefaultLBController(true)
 	data := map[string][]byte{
 		"username": []byte("admin"),
 		"password": []byte("admin"),
@@ -72,7 +83,7 @@ func TestMain(m *testing.M) {
 	}
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: KubeClient}, registeredInformers)
 	informers := k8s.K8sinformers{Cs: KubeClient}
-	// k8s.NewCRDInformers(CRDClient)
+	k8s.NewCRDInformers()
 	k8s.NewAdvL4Informers(AdvL4Client)
 
 	mcache := cache.SharedAviObjCache()
@@ -81,6 +92,7 @@ func TestMain(m *testing.M) {
 	cloudObj.NSIpamDNS = subdomains
 	mcache.CloudKeyCache.AviCacheAdd("Default-Cloud", cloudObj)
 
+	integrationtest.KubeClient = KubeClient
 	integrationtest.InitializeFakeAKOAPIServer()
 
 	integrationtest.NewAviFakeClientInstance(KubeClient)
@@ -110,8 +122,8 @@ func TestMain(m *testing.M) {
 	integrationtest.PollForSyncStart(ctrl, 10)
 
 	ctrl.HandleConfigMap(informers, ctrlCh, stopCh, quickSyncCh)
+	integrationtest.AddDefaultNamespace()
 	go ctrl.InitController(informers, registeredInformers, ctrlCh, stopCh, quickSyncCh, waitGroupMap)
-	integrationtest.KubeClient = KubeClient
 	os.Exit(m.Run())
 }
 
@@ -250,6 +262,27 @@ func SetupAdvLBService(t *testing.T, svcname, namespace, gwname, gwnamespace str
 	integrationtest.CreateEP(t, namespace, svcname, false, true, "1.1.1")
 }
 
+func SetupAdvLBServiceWithLoadBalancerClass(t *testing.T, svcname, namespace, gwname, gwnamespace string, LBClass string) {
+	svc := integrationtest.FakeService{
+		Name:      svcname,
+		Namespace: namespace,
+		Labels: map[string]string{
+			lib.GatewayNameLabelKey:      gwname,
+			lib.GatewayNamespaceLabelKey: gwnamespace,
+			lib.GatewayTypeLabelKey:      "direct",
+		},
+		Type:              corev1.ServiceTypeLoadBalancer,
+		ServicePorts:      []integrationtest.Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8081, TargetPort: intstr.FromInt(8081)}},
+		LoadBalancerClass: LBClass,
+	}
+
+	svcCreate := svc.Service()
+	if _, err := KubeClient.CoreV1().Services(namespace).Create(context.TODO(), svcCreate, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding Service: %v", err)
+	}
+	integrationtest.CreateEP(t, namespace, svcname, false, true, "1.1.1")
+}
+
 func TeardownAdvLBService(t *testing.T, svcname, namespace string) {
 	if err := KubeClient.CoreV1().Services(namespace).Delete(context.TODO(), svcname, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("error in deleting AdvLB Service: %v", err)
@@ -316,6 +349,56 @@ func TestAdvL4BestCase(t *testing.T) {
 	VerifyGatewayVSNodeDeletion(g, modelName)
 }
 
+func TestAdvL4WithInvalidLoadBalancerClass(t *testing.T) {
+	// create gwclass, create gw
+	// create svc with invalid LBClass
+	// Ako should skip LBClass validation and VS should come up
+
+	g := gomega.NewGomegaWithT(t)
+	gwClassName, gatewayName, ns := "avi-lb", "my-gateway", "default"
+	modelName := "admin/abc--default-my-gateway"
+
+	SetupGatewayClass(t, gwClassName, lib.AviGatewayController)
+	SetupGateway(t, gatewayName, ns, gwClassName)
+	SetupAdvLBServiceWithLoadBalancerClass(t, "svc", ns, gatewayName, ns, integrationtest.INVALID_LB_CLASS)
+
+	g.Eventually(func() string {
+		gw, _ := AdvL4Client.NetworkingV1alpha1pre1().Gateways(ns).Get(context.TODO(), gatewayName, metav1.GetOptions{})
+		if len(gw.Status.Addresses) > 0 {
+			return gw.Status.Addresses[0].Value
+		}
+		return ""
+	}, 40*time.Second).Should(gomega.Equal("10.250.250.1"))
+
+	g.Eventually(func() string {
+		svc, _ := KubeClient.CoreV1().Services(ns).Get(context.TODO(), "svc", metav1.GetOptions{})
+		if len(svc.Status.LoadBalancer.Ingress) > 0 {
+			return svc.Status.LoadBalancer.Ingress[0].IP
+		}
+		return ""
+	}, 30*time.Second).Should(gomega.Equal("10.250.250.1"))
+
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8081)))
+	g.Expect(nodes[0].HttpPolicySetRefs).To(gomega.HaveLen(0))
+	g.Expect(nodes[0].L4PolicyRefs).To(gomega.HaveLen(1))
+	g.Expect(nodes[0].L4PolicyRefs[0].PortPool[0].Port).To(gomega.Equal(uint32(8081)))
+	g.Expect(nodes[0].L4PolicyRefs[0].PortPool[0].Protocol).To(gomega.Equal("TCP"))
+	g.Expect(nodes[0].ServiceMetadata.NamespaceServiceName[0]).To(gomega.Equal("default/svc"))
+	g.Expect(nodes[0].ServiceMetadata.Gateway).To(gomega.Equal("default/my-gateway"))
+	g.Expect(nodes[0].PoolRefs[0].Servers).To(gomega.HaveLen(3))
+
+	TeardownGatewayClass(t, gwClassName)
+	g.Eventually(func() int {
+		gw, _ := AdvL4Client.NetworkingV1alpha1pre1().Gateways(ns).Get(context.TODO(), gatewayName, metav1.GetOptions{})
+		return len(gw.Status.Addresses)
+	}, 20*time.Second).Should(gomega.Equal(0))
+
+	TeardownAdvLBService(t, "svc", ns)
+	TeardownGateway(t, gatewayName, ns)
+	VerifyGatewayVSNodeDeletion(g, modelName)
+}
 func TestAdvL4NamingConvention(t *testing.T) {
 	// create gwclass, create gw, create 1svc
 	// check naming conventions for vs, pool, l4policy

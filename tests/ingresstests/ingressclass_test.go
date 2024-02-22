@@ -16,11 +16,13 @@ package ingresstests
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
@@ -303,6 +305,61 @@ func TestIngressWithNonAVILBIngressClass(t *testing.T) {
 }
 
 // AviInfraSetting CRD
+
+func TestAviInfraSettingForLBSvcWithInvalidLBClass(t *testing.T) {
+	// create invalid LB SVC, aviinfrasetting CRD
+	// update SVC with aviinfrasetting annotation
+	// VS should not come up
+	g := gomega.NewWithT(t)
+	model_name, svc_name, ns, infraSettingName := "admin/cluster--default-testsvc", "testsvc", "default", "my-infrasetting"
+
+	objects.SharedAviGraphLister().Delete(model_name)
+	integrationtest.CreateSVCWithValidOrInvalidLBClass(t, ns, svc_name, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, integrationtest.INVALID_LB_CLASS)
+	integrationtest.CreateEP(t, ns, svc_name, false, false, "1.1.1")
+	integrationtest.PollForCompletion(t, model_name, 5)
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(model_name)
+		return found
+	}, 10*time.Second).Should(gomega.Equal(false))
+
+	setting := integrationtest.FakeAviInfraSetting{
+		Name:        infraSettingName,
+		SeGroupName: "thisisaviref-" + infraSettingName + "-seGroup",
+	}
+	settingCreate := setting.AviInfraSetting()
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Create(context.TODO(), settingCreate, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding AviInfraSetting: %v", err)
+	}
+
+	svcObj := (integrationtest.FakeService{
+		Name:      svc_name,
+		Namespace: ns,
+		Type:      corev1.ServiceTypeLoadBalancer,
+	}).Service()
+	svcObj.Annotations = map[string]string{lib.InfraSettingNameAnnotation: infraSettingName}
+	svcObj.ResourceVersion = "2"
+	_, err := KubeClient.CoreV1().Services(ns).Update(context.TODO(), svcObj, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in updating Service: %v", err)
+	}
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(model_name)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(false))
+
+	objects.SharedAviGraphLister().Delete(model_name)
+	integrationtest.DelSVC(t, ns, svc_name)
+	integrationtest.DelEP(t, ns, svc_name)
+	mcache := cache.SharedAviObjCache()
+	vsKey := cache.NamespaceName{Namespace: "admin", Name: fmt.Sprintf("cluster--%s-%s", ns, svc_name)}
+	g.Eventually(func() bool {
+		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
+		return found
+	}, 5*time.Second).Should(gomega.Equal(false))
+
+	integrationtest.TeardownAviInfraSetting(t, infraSettingName)
+}
 func TestAviInfraSettingNamingConvention(t *testing.T) {
 	// create secure and insecure host ingress, connect with infrasetting
 	// check for names of all Avi objects
@@ -311,11 +368,15 @@ func TestAviInfraSettingNamingConvention(t *testing.T) {
 	ingClassName, ingressName, ns, settingName := "avi-lb", "foo-with-class", "default", "my-infrasetting"
 	secretName := "my-secret"
 	modelName := "admin/cluster--Shared-L7-1"
+	nsSettingName := "ns-my-infrasetting"
 
 	SetUpTestForIngress(t, modelName)
 
 	settingModelName := "admin/cluster--Shared-L7-my-infrasetting-0"
 	integrationtest.SetupAviInfraSetting(t, settingName, "SMALL")
+	integrationtest.SetupAviInfraSetting(t, nsSettingName, "DEDICATED")
+
+	integrationtest.AnnotateAKONamespaceWithInfraSetting(t, ns, nsSettingName)
 	integrationtest.SetupIngressClass(t, ingClassName, lib.AviIngressController, settingName)
 	waitAndVerify(t, ingClassName)
 	integrationtest.AddSecret(secretName, ns, "tlsCert", "tlsKey")
@@ -367,6 +428,83 @@ func TestAviInfraSettingNamingConvention(t *testing.T) {
 		t.Fatalf("Couldn't DELETE the Ingress %v", err)
 	}
 	integrationtest.DeleteSecret(secretName, ns)
+	integrationtest.RemoveAnnotateAKONamespaceWithInfraSetting(t, ns)
+	integrationtest.TeardownAviInfraSetting(t, nsSettingName)
+	integrationtest.TeardownAviInfraSetting(t, settingName)
+	TearDownTestForIngress(t, modelName, settingModelName)
+	integrationtest.TeardownIngressClass(t, ingClassName)
+	waitAndVerify(t, ingClassName)
+	VerifyPoolDeletionFromVsNode(g, modelName)
+}
+
+// AviInfraSetting CRD
+func TestAviInfraSettingPerNSNamingConvention(t *testing.T) {
+	// create secure and insecure host ingress, connect with infrasetting
+	// check for names of all Avi objects
+	g := gomega.NewGomegaWithT(t)
+
+	ingClassName, ingressName, ns, settingName := "avi-lb", "foo-with-class", "default", "my-infrasetting"
+	secretName := "my-secret"
+	modelName := "admin/cluster--Shared-L7-1"
+
+	SetUpTestForIngress(t, modelName)
+
+	settingModelName := "admin/cluster--Shared-L7-my-infrasetting-0"
+	integrationtest.SetupAviInfraSetting(t, settingName, "SMALL")
+	integrationtest.AnnotateAKONamespaceWithInfraSetting(t, ns, settingName)
+	integrationtest.SetupIngressClass(t, ingClassName, lib.AviIngressController, "")
+	waitAndVerify(t, ingClassName)
+	integrationtest.AddSecret(secretName, ns, "tlsCert", "tlsKey")
+
+	ingressCreate := (integrationtest.FakeIngress{
+		Name:        ingressName,
+		Namespace:   ns,
+		ClassName:   ingClassName,
+		DnsNames:    []string{"baz.com", "bar.com"},
+		ServiceName: "avisvc",
+		TlsSecretDNS: map[string][]string{
+			secretName: {"baz.com"},
+		},
+	}).Ingress()
+	_, err := KubeClient.NetworkingV1().Ingresses(ns).Create(context.TODO(), ingressCreate, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+
+	shardVsName := "cluster--Shared-L7-my-infrasetting-0"
+	sniVsName := "cluster--my-infrasetting-baz.com"
+	shardPoolName := "cluster--my-infrasetting-bar.com_foo-default-foo-with-class"
+	sniPoolName := "cluster--my-infrasetting-default-baz.com_foo-foo-with-class"
+
+	g.Eventually(func() bool {
+		if found, aviSettingModel := objects.SharedAviGraphLister().Get(settingModelName); found {
+			if settingNodes := aviSettingModel.(*avinodes.AviObjectGraph).GetAviVS(); len(settingNodes) > 0 &&
+				len(settingNodes[0].SniNodes) > 0 {
+				return settingNodes[0].SniNodes[0].Name == sniVsName && len(settingNodes[0].PoolRefs) == 1
+			}
+		}
+		return false
+	}, 55*time.Second).Should(gomega.Equal(true))
+	_, aviSettingModel := objects.SharedAviGraphLister().Get(settingModelName)
+	settingNodes := aviSettingModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(settingNodes[0].PoolRefs[0].Name).Should(gomega.Equal(shardPoolName))
+	g.Expect(settingNodes[0].ServiceEngineGroup).Should(gomega.Equal("thisisaviref-my-infrasetting-seGroup"))
+	g.Expect(settingNodes[0].PoolGroupRefs[0].Name).Should(gomega.Equal(shardVsName))
+	g.Expect(settingNodes[0].HTTPDSrefs[0].Name).Should(gomega.Equal(shardVsName))
+	g.Expect(settingNodes[0].HttpPolicyRefs).Should(gomega.HaveLen(1))
+	g.Expect(settingNodes[0].HttpPolicyRefs[0].Name).Should(gomega.Equal(shardVsName))
+	g.Expect(settingNodes[0].SniNodes[0].PoolRefs[0].Name).Should(gomega.Equal(sniPoolName))
+	g.Expect(settingNodes[0].SniNodes[0].PoolGroupRefs[0].Name).Should(gomega.Equal(sniPoolName))
+	g.Expect(settingNodes[0].SniNodes[0].SSLKeyCertRefs[0].Name).Should(gomega.Equal(sniVsName))
+	g.Expect(settingNodes[0].SniNodes[0].HttpPolicyRefs[0].HppMap[0].Name).Should(gomega.Equal(sniPoolName))
+	g.Expect(settingNodes[0].VSVIPRefs[0].T1Lr).Should(gomega.Equal("avi-domain-c9:1234"))
+
+	err = KubeClient.NetworkingV1().Ingresses(ns).Delete(context.TODO(), ingressName, metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("Couldn't DELETE the Ingress %v", err)
+	}
+	integrationtest.DeleteSecret(secretName, ns)
+	integrationtest.RemoveAnnotateAKONamespaceWithInfraSetting(t, ns)
 	integrationtest.TeardownAviInfraSetting(t, settingName)
 	TearDownTestForIngress(t, modelName, settingModelName)
 	integrationtest.TeardownIngressClass(t, ingClassName)
@@ -765,12 +903,12 @@ func TestUpdateWithInfraSetting(t *testing.T) {
 
 	settingCreate := settingsUpdate.AviInfraSetting()
 	settingCreate.ResourceVersion = "2"
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Create(context.TODO(), settingCreate, metav1.CreateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Create(context.TODO(), settingCreate, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("error in adding AviInfraSetting: %v", err)
 	}
 
 	g.Eventually(func() string {
-		setting, _ := CRDClient.AkoV1alpha1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
+		setting, _ := v1beta1CRDClient.AkoV1beta1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
 		return setting.Status.Status
 	}, 40*time.Second).Should(gomega.Equal("Rejected"))
 	g.Eventually(func() bool {
@@ -786,12 +924,12 @@ func TestUpdateWithInfraSetting(t *testing.T) {
 		EnableRhi:   true,
 	}).AviInfraSetting()
 	settingUpdate.ResourceVersion = "3"
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Update(context.TODO(), settingUpdate, metav1.UpdateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Update(context.TODO(), settingUpdate, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("error in updating AviInfraSetting: %v", err)
 	}
 
 	g.Eventually(func() string {
-		setting, _ := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
+		setting, _ := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
 		return setting.Status.Status
 	}, 40*time.Second).Should(gomega.Equal("Accepted"))
 	g.Eventually(func() bool {
@@ -812,12 +950,12 @@ func TestUpdateWithInfraSetting(t *testing.T) {
 		EnableRhi:   true,
 	}).AviInfraSetting()
 	settingUpdate.ResourceVersion = "4"
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Update(context.TODO(), settingUpdate, metav1.UpdateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Update(context.TODO(), settingUpdate, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("error in updating AviInfraSetting: %v", err)
 	}
 
 	g.Eventually(func() string {
-		setting, _ := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
+		setting, _ := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
 		return setting.Status.Status
 	}, 40*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -883,12 +1021,12 @@ func TestPublicIPStatusWithInfraSetting(t *testing.T) {
 
 	settingCreate := settingsUpdate.AviInfraSetting()
 	settingCreate.ResourceVersion = "2"
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Create(context.TODO(), settingCreate, metav1.CreateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Create(context.TODO(), settingCreate, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("error in adding AviInfraSetting: %v", err)
 	}
 
 	g.Eventually(func() string {
-		setting, _ := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
+		setting, _ := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
 		return setting.Status.Status
 	}, 40*time.Second).Should(gomega.Equal("Accepted"))
 	g.Eventually(func() bool {
@@ -956,12 +1094,12 @@ func TestMultiVipStatusWithInfraSetting(t *testing.T) {
 
 	settingCreate := settingsUpdate.AviInfraSetting()
 	settingCreate.ResourceVersion = "2"
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Create(context.TODO(), settingCreate, metav1.CreateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Create(context.TODO(), settingCreate, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("error in adding AviInfraSetting: %v", err)
 	}
 
 	g.Eventually(func() string {
-		setting, _ := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
+		setting, _ := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
 		return setting.Status.Status
 	}, 40*time.Second).Should(gomega.Equal("Accepted"))
 	g.Eventually(func() bool {
@@ -1032,12 +1170,12 @@ func TestMultiFipStatusWithInfraSetting(t *testing.T) {
 
 	settingCreate := settingsUpdate.AviInfraSetting()
 	settingCreate.ResourceVersion = "2"
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Create(context.TODO(), settingCreate, metav1.CreateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Create(context.TODO(), settingCreate, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("error in adding AviInfraSetting: %v", err)
 	}
 
 	g.Eventually(func() string {
-		setting, _ := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
+		setting, _ := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
 		return setting.Status.Status
 	}, 40*time.Second).Should(gomega.Equal("Accepted"))
 	g.Eventually(func() bool {
@@ -1226,13 +1364,13 @@ func TestBGPConfigurationWithInfraSetting(t *testing.T) {
 		BGPPeerLabels: []string{"peer1", "peer2"},
 	}).AviInfraSetting()
 	settingUpdate.ResourceVersion = "2"
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Update(context.TODO(), settingUpdate, metav1.UpdateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Update(context.TODO(), settingUpdate, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("error in updating AviInfraSetting: %v", err)
 	}
 
 	// AviInfraSetting is Rejected since enableRhi is false, but the bgpPeerLabels are configured.
 	g.Eventually(func() string {
-		setting, _ := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
+		setting, _ := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Get(context.TODO(), settingName, metav1.GetOptions{})
 		return setting.Status.Status
 	}, 40*time.Second).Should(gomega.Equal("Rejected"))
 
@@ -1294,7 +1432,7 @@ func TestBGPConfigurationUpdateLabelWithInfraSetting(t *testing.T) {
 		BGPPeerLabels: []string{"peerUPDATE1", "peerUPDATE2", "peerUPDATE3"},
 	}).AviInfraSetting()
 	settingUpdate.ResourceVersion = "2"
-	if _, err := lib.AKOControlConfig().CRDClientset().AkoV1alpha1().AviInfraSettings().Update(context.TODO(), settingUpdate, metav1.UpdateOptions{}); err != nil {
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().AviInfraSettings().Update(context.TODO(), settingUpdate, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("error in updating AviInfraSetting: %v", err)
 	}
 
@@ -1370,11 +1508,11 @@ func TestCRDWithAviInfraSetting(t *testing.T) {
 	}
 
 	g.Eventually(func() string {
-		hostrule, _ := CRDClient.AkoV1alpha1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
 		return hostrule.Status.Status
 	}, 30*time.Second).Should(gomega.Equal("Accepted"))
 	g.Eventually(func() string {
-		httprule, _ := CRDClient.AkoV1alpha1().HTTPRules("default").Get(context.TODO(), rrname, metav1.GetOptions{})
+		httprule, _ := v1beta1CRDClient.AkoV1beta1().HTTPRules("default").Get(context.TODO(), rrname, metav1.GetOptions{})
 		return httprule.Status.Status
 	}, 30*time.Second).Should(gomega.Equal("Accepted"))
 
@@ -1388,8 +1526,8 @@ func TestCRDWithAviInfraSetting(t *testing.T) {
 	_, aviModel := objects.SharedAviGraphLister().Get(settingModelName)
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(*nodes[0].SniNodes[0].Enabled).To(gomega.Equal(true))
-	g.Expect(nodes[0].SniNodes[0].SSLKeyCertAviRef).To(gomega.HaveLen(1))
-	g.Expect(nodes[0].SniNodes[0].SSLKeyCertAviRef[0]).To(gomega.ContainSubstring("thisisaviref-sslkey"))
+	g.Expect(nodes[0].SniNodes[0].SslKeyAndCertificateRefs).To(gomega.HaveLen(1))
+	g.Expect(nodes[0].SniNodes[0].SslKeyAndCertificateRefs[0]).To(gomega.ContainSubstring("thisisaviref-sslkey"))
 	g.Expect(*nodes[0].SniNodes[0].WafPolicyRef).To(gomega.ContainSubstring("thisisaviref-waf"))
 	g.Expect(*nodes[0].SniNodes[0].PoolRefs[0].LbAlgorithm).To(gomega.Equal("LB_ALGORITHM_CONSISTENT_HASH"))
 	g.Expect(*nodes[0].SniNodes[0].PoolRefs[0].LbAlgorithmHash).To(gomega.Equal("LB_ALGORITHM_CONSISTENT_HASH_SOURCE_IP_ADDRESS"))
@@ -1420,4 +1558,337 @@ func TestCRDWithAviInfraSetting(t *testing.T) {
 	ingestionQueue := utils.SharedWorkQueue().GetQueueByName(utils.ObjectIngestionLayer)
 	ingestionQueue.SyncFunc = k8s.SyncFromIngestionLayer
 	integrationtest.AddDefaultIngressClass()
+}
+
+func TestFQDNsCountForAviInfraSettingWithDedicatedShardSize(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modelName := "admin/cluster--my-infrasetting-foo.com-L7-dedicated"
+
+	ingClassName, ingressName, ns, settingName := "avi-lb", "foo-with-class", "default", "my-infrasetting"
+	secretName := "my-secret"
+
+	SetUpTestForIngress(t, modelName)
+	integrationtest.RemoveDefaultIngressClass()
+	defer integrationtest.AddDefaultIngressClass()
+
+	integrationtest.SetupAviInfraSetting(t, settingName, "DEDICATED")
+	integrationtest.SetupIngressClass(t, ingClassName, lib.AviIngressController, settingName)
+	integrationtest.AddSecret(secretName, ns, "tlsCert", "tlsKey")
+
+	ingressCreate := (integrationtest.FakeIngress{
+		Name:        ingressName,
+		Namespace:   ns,
+		ClassName:   ingClassName,
+		DnsNames:    []string{"foo.com"},
+		ServiceName: "avisvc",
+		TlsSecretDNS: map[string][]string{
+			secretName: {"foo.com"},
+		},
+	}).Ingress()
+	_, err := KubeClient.NetworkingV1().Ingresses(ns).Create(context.TODO(), ingressCreate, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+
+	g.Eventually(func() int {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		if aviModel == nil {
+			return 0
+		}
+		nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return len(nodes)
+	}, 10*time.Second).Should(gomega.Equal(1))
+
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	node := aviModel.(*avinodes.AviObjectGraph).GetAviVS()[0]
+
+	g.Expect(node.VSVIPRefs).To(gomega.HaveLen(1))
+	g.Expect(node.VSVIPRefs[0].FQDNs).To(gomega.HaveLen(1))
+	for _, fqdn := range node.VSVIPRefs[0].FQDNs {
+		g.Expect(fqdn).ShouldNot(gomega.ContainSubstring("L7-dedicated"))
+	}
+	integrationtest.TeardownAviInfraSetting(t, settingName)
+	integrationtest.TeardownIngressClass(t, ingClassName)
+	err = KubeClient.NetworkingV1().Ingresses(ns).Delete(context.TODO(), ingressName, metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("Couldn't DELETE the Ingress %v", err)
+	}
+	integrationtest.DeleteSecret(secretName, ns)
+
+	mcache := cache.SharedAviObjCache()
+	vsKey := cache.NamespaceName{Namespace: "admin", Name: "cluster--my-infrasetting-foo.com-L7-dedicated"}
+	// verify the removal of VS.
+	g.Eventually(func() bool {
+		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
+		return found
+	}, 50*time.Second).Should(gomega.Equal(false))
+	TearDownTestForIngress(t, modelName)
+}
+
+func TestFQDNsCountForAviInfraSettingWithLargeShardSize(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modelName := "admin/cluster--Shared-L7-my-infrasetting-0"
+
+	ingClassName, ingressName, ns, settingName := "avi-lb", "foo-with-class", "default", "my-infrasetting"
+	secretName := "my-secret"
+
+	SetUpTestForIngress(t, modelName)
+	integrationtest.RemoveDefaultIngressClass()
+	defer integrationtest.AddDefaultIngressClass()
+
+	integrationtest.SetupAviInfraSetting(t, settingName, "LARGE")
+	integrationtest.SetupIngressClass(t, ingClassName, lib.AviIngressController, settingName)
+	integrationtest.AddSecret(secretName, ns, "tlsCert", "tlsKey")
+
+	ingressCreate := (integrationtest.FakeIngress{
+		Name:        ingressName,
+		Namespace:   ns,
+		ClassName:   ingClassName,
+		DnsNames:    []string{"foo.com"},
+		ServiceName: "avisvc",
+		TlsSecretDNS: map[string][]string{
+			secretName: {"foo.com"},
+		},
+	}).Ingress()
+	_, err := KubeClient.NetworkingV1().Ingresses(ns).Create(context.TODO(), ingressCreate, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+
+	g.Eventually(func() int {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		if aviModel == nil {
+			return 0
+		}
+		nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return len(nodes)
+	}, 10*time.Second).Should(gomega.Equal(1))
+
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	node := aviModel.(*avinodes.AviObjectGraph).GetAviVS()[0]
+
+	g.Expect(node.VSVIPRefs).To(gomega.HaveLen(1))
+	g.Expect(node.VSVIPRefs[0].FQDNs).To(gomega.HaveLen(2))
+	for _, fqdn := range node.VSVIPRefs[0].FQDNs {
+		if fqdn == "foo.com" {
+			continue
+		}
+		g.Expect(fqdn).Should(gomega.ContainSubstring("Shared-L7"))
+	}
+	integrationtest.TeardownAviInfraSetting(t, settingName)
+	integrationtest.TeardownIngressClass(t, ingClassName)
+	err = KubeClient.NetworkingV1().Ingresses(ns).Delete(context.TODO(), ingressName, metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("Couldn't DELETE the Ingress %v", err)
+	}
+	integrationtest.DeleteSecret(secretName, ns)
+
+	mcache := cache.SharedAviObjCache()
+	vsKey := cache.NamespaceName{Namespace: "admin", Name: "cluster--Shared-L7-my-infrasetting-0"}
+	// Shard VS remains, Pools are moved/removed
+	g.Eventually(func() bool {
+		sniCache1, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
+		sniCacheObj1, _ := sniCache1.(*cache.AviVsCache)
+		if found {
+			return len(sniCacheObj1.PoolKeyCollection) == 0
+		}
+		return false
+	}, 50*time.Second).Should(gomega.Equal(true))
+	TearDownTestForIngress(t, modelName)
+}
+
+func TestAddIngressClassWithInfraSettingMultipleIngress(t *testing.T) {
+	// add ingress, ingressclass with valid infrasetting,
+	// add ingressclass in ingress, delete ingress
+	g := gomega.NewGomegaWithT(t)
+
+	ingClassName, ns, settingName := "avi-lb", "default", "my-infrasetting"
+	ingressName1, ingressName2 := "foo-with-class", "bar-with-class"
+	modelName := "admin/cluster--Shared-L7-1"
+
+	SetUpTestForIngress(t, modelName)
+
+	integrationtest.SetupAviInfraSetting(t, settingName, "SMALL")
+	settingModelName := "admin/cluster--Shared-L7-my-infrasetting-0"
+
+	integrationtest.RemoveDefaultIngressClass()
+	defer integrationtest.AddDefaultIngressClass()
+	integrationtest.SetupIngressClass(t, ingClassName, lib.AviIngressController, settingName)
+	time.Sleep(5 * time.Second)
+	ingressCreate1 := (integrationtest.FakeIngress{
+		Name:        ingressName1,
+		Namespace:   ns,
+		ClassName:   ingClassName,
+		DnsNames:    []string{"foo.com"},
+		ServiceName: "avisvc",
+	}).Ingress()
+	_, err := KubeClient.NetworkingV1().Ingresses(ns).Create(context.TODO(), ingressCreate1, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(settingModelName)
+		return found
+	}, 40*time.Second).Should(gomega.Equal(true))
+
+	g.Eventually(func() int {
+		if found, aviSettingModel := objects.SharedAviGraphLister().Get(settingModelName); found {
+			if settingNodes := aviSettingModel.(*avinodes.AviObjectGraph).GetAviVS(); len(settingNodes) == 1 {
+				return len(settingNodes[0].PoolRefs)
+			}
+		}
+		return 0
+	}, 40*time.Second).Should(gomega.Equal(1))
+	_, aviSettingModel := objects.SharedAviGraphLister().Get(settingModelName)
+	settingNodes := aviSettingModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(settingNodes[0].PoolRefs[0].Name).Should(gomega.Equal("cluster--my-infrasetting-foo.com_foo-default-foo-with-class"))
+
+	ingressCreate2 := (integrationtest.FakeIngress{
+		Name:        ingressName2,
+		Namespace:   ns,
+		ClassName:   ingClassName,
+		DnsNames:    []string{"bar.com"},
+		ServiceName: "avisvc",
+	}).Ingress()
+	_, err = KubeClient.NetworkingV1().Ingresses(ns).Create(context.TODO(), ingressCreate2, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(settingModelName)
+		return found
+	}, 40*time.Second).Should(gomega.Equal(true))
+
+	g.Eventually(func() int {
+		if found, aviSettingModel := objects.SharedAviGraphLister().Get(settingModelName); found {
+			if settingNodes := aviSettingModel.(*avinodes.AviObjectGraph).GetAviVS(); len(settingNodes) == 1 {
+				return len(settingNodes[0].PoolRefs)
+			}
+		}
+		return 0
+	}, 40*time.Second).Should(gomega.Equal(2))
+	_, aviSettingModel = objects.SharedAviGraphLister().Get(settingModelName)
+	settingNodes = aviSettingModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(settingNodes[0].PoolRefs[1].Name).Should(gomega.Equal("cluster--my-infrasetting-bar.com_foo-default-bar-with-class"))
+
+	err = KubeClient.NetworkingV1().Ingresses(ns).Delete(context.TODO(), ingressName1, metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("Couldn't DELETE the Ingress %v", err)
+	}
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(settingModelName)
+		return found
+	}, 40*time.Second).Should(gomega.Equal(true))
+
+	g.Eventually(func() int {
+		if found, aviSettingModel := objects.SharedAviGraphLister().Get(settingModelName); found {
+			if settingNodes := aviSettingModel.(*avinodes.AviObjectGraph).GetAviVS(); len(settingNodes) == 1 {
+				return len(settingNodes[0].PoolRefs)
+			}
+		}
+		return 0
+	}, 40*time.Second).Should(gomega.Equal(1))
+	_, aviSettingModel = objects.SharedAviGraphLister().Get(settingModelName)
+	settingNodes = aviSettingModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(settingNodes[0].PoolRefs[0].Name).Should(gomega.Equal("cluster--my-infrasetting-bar.com_foo-default-bar-with-class"))
+
+	err = KubeClient.NetworkingV1().Ingresses(ns).Delete(context.TODO(), ingressName2, metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("Couldn't DELETE the Ingress %v", err)
+	}
+	VerifyPoolDeletionFromVsNode(g, settingModelName)
+
+	integrationtest.TeardownAviInfraSetting(t, settingName)
+	TearDownTestForIngress(t, modelName, settingModelName)
+	integrationtest.TeardownIngressClass(t, ingClassName)
+	VerifyPoolDeletionFromVsNode(g, settingModelName)
+}
+
+func TestAddIngressClassWithInfraSettingMultipleIngressDedicated(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modelName1 := "admin/cluster--my-infrasetting-foo.com-L7-dedicated"
+	modelName2 := "admin/cluster--my-infrasetting-bar.com-L7-dedicated"
+
+	ingClassName, ns, settingName := "avi-lb", "default", "my-infrasetting"
+	ingressName1, ingressName2 := "foo-with-class", "bar-with-class"
+
+	SetUpTestForIngress(t, modelName1, modelName2)
+	integrationtest.RemoveDefaultIngressClass()
+	defer integrationtest.AddDefaultIngressClass()
+
+	integrationtest.SetupAviInfraSetting(t, settingName, "DEDICATED")
+	integrationtest.SetupIngressClass(t, ingClassName, lib.AviIngressController, settingName)
+	time.Sleep(5 * time.Second)
+
+	ingressCreate1 := (integrationtest.FakeIngress{
+		Name:        ingressName1,
+		Namespace:   ns,
+		ClassName:   ingClassName,
+		DnsNames:    []string{"foo.com"},
+		ServiceName: "avisvc",
+	}).Ingress()
+	_, err := KubeClient.NetworkingV1().Ingresses(ns).Create(context.TODO(), ingressCreate1, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+
+	g.Eventually(func() int {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName1)
+		if aviModel == nil {
+			return 0
+		}
+		nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return len(nodes)
+	}, 10*time.Second).Should(gomega.Equal(1))
+
+	ingressCreate2 := (integrationtest.FakeIngress{
+		Name:        ingressName2,
+		Namespace:   ns,
+		ClassName:   ingClassName,
+		DnsNames:    []string{"bar.com"},
+		ServiceName: "avisvc",
+	}).Ingress()
+	_, err = KubeClient.NetworkingV1().Ingresses(ns).Create(context.TODO(), ingressCreate2, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+
+	g.Eventually(func() int {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName2)
+		if aviModel == nil {
+			return 0
+		}
+		nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return len(nodes)
+	}, 10*time.Second).Should(gomega.Equal(1))
+
+	err = KubeClient.NetworkingV1().Ingresses(ns).Delete(context.TODO(), ingressName1, metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("Couldn't DELETE the Ingress %v", err)
+	}
+
+	err = KubeClient.NetworkingV1().Ingresses(ns).Delete(context.TODO(), ingressName2, metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("Couldn't DELETE the Ingress %v", err)
+	}
+
+	mcache := cache.SharedAviObjCache()
+	vsKey1 := cache.NamespaceName{Namespace: "admin", Name: "cluster--my-infrasetting-foo.com-L7-dedicated"}
+	vsKey2 := cache.NamespaceName{Namespace: "admin", Name: "cluster--my-infrasetting-bar.com-L7-dedicated"}
+	// verify removal of VS.
+	g.Eventually(func() bool {
+		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey1)
+		return found
+	}, 50*time.Second).Should(gomega.Equal(false))
+	g.Eventually(func() bool {
+		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey2)
+		return found
+	}, 50*time.Second).Should(gomega.Equal(false))
+
+	integrationtest.TeardownAviInfraSetting(t, settingName)
+	integrationtest.TeardownIngressClass(t, ingClassName)
+	TearDownTestForIngress(t, modelName1, modelName2)
 }

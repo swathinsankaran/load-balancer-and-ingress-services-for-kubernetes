@@ -58,11 +58,17 @@ func (rest *RestOperations) CleanupVS(key string, skipVS bool) {
 
 func (rest *RestOperations) DequeueNodes(key string) {
 	utils.AviLog.Infof("key: %s, msg: start rest layer sync.", key)
-
+	lib.DecrementQueueCounter(utils.GraphLayer)
 	// Got the key from the Graph Layer - let's fetch the model
 	ok, avimodelIntf := objects.SharedAviGraphLister().Get(key)
 	if !ok {
 		utils.AviLog.Warnf("key: %s, msg: no model found for the key", key)
+	}
+	if key == lib.IstioModel {
+		avimodel := avimodelIntf.(*nodes.AviObjectGraph)
+		utils.AviLog.Infof("key: %s, msg: processing istio object", key)
+		rest.IstioCU(key, avimodel)
+		return
 	}
 	namespace, name := utils.ExtractNamespaceObjectName(key)
 	vsKey := avicache.NamespaceName{Namespace: namespace, Name: name}
@@ -101,12 +107,6 @@ func (rest *RestOperations) DequeueNodes(key string) {
 			return
 		}
 		utils.AviLog.Debugf("key: %s, msg: VS create/update.", key)
-		if key == lib.IstioModel {
-			utils.AviLog.Infof("key: %s, msg: processing istio object", key)
-			rest.IstioCU(key, avimodel)
-			return
-		}
-
 		if strings.Contains(name, "-EVH") && lib.IsEvhEnabled() {
 			if len(avimodel.GetAviEvhVS()) != 1 {
 				utils.AviLog.Warnf("key: %s, msg: virtualservice in the model is not equal to 1:%v", key, avimodel.GetAviEvhVS())
@@ -129,10 +129,11 @@ func (rest *RestOperations) IstioCU(key string, avimodel *nodes.AviObjectGraph) 
 	var restOps []*utils.RestOp
 	var pkiSuccess, sslSuccess bool
 
-	pkiKey := avicache.NamespaceName{Namespace: lib.GetTenant(), Name: lib.GetIstioPKIProfileName()}
-	sslKey := avicache.NamespaceName{Namespace: lib.GetTenant(), Name: lib.GetIstioWorkloadCertificateName()}
 	pkiNode, sslNode := avimodel.GetIstioNodes()
-	pkiCacheObj, ok := rest.cache.PKIProfileCache.AviCacheGet(lib.GetIstioPKIProfileName())
+	pkiKey := avicache.NamespaceName{Namespace: lib.GetTenant(), Name: pkiNode.Name}
+	sslKey := avicache.NamespaceName{Namespace: lib.GetTenant(), Name: sslNode.Name}
+
+	pkiCacheObj, ok := rest.cache.PKIProfileCache.AviCacheGet(pkiKey)
 	if !ok {
 		restOp := rest.AviPkiProfileBuild(pkiNode, nil)
 		restOps = []*utils.RestOp{restOp}
@@ -146,7 +147,7 @@ func (rest *RestOperations) IstioCU(key string, avimodel *nodes.AviObjectGraph) 
 		}
 	}
 
-	sslCacheObj, ok := rest.cache.SSLKeyCache.AviCacheGet(lib.GetIstioWorkloadCertificateName())
+	sslCacheObj, ok := rest.cache.SSLKeyCache.AviCacheGet(sslKey)
 	if !ok {
 		restOp := rest.AviSSLBuild(sslNode, nil)
 		restOps = []*utils.RestOp{restOp}
@@ -217,7 +218,6 @@ func (rest *RestOperations) vrfCU(key, vrfName string, avimodel *nodes.AviObject
 	utils.AviLog.Debugf("key: %s, msg: Executing rest for vrf %s", key, vrfName)
 	utils.AviLog.Debugf("key: %s, msg: restops %v", key, *restOp)
 	success, _ := rest.ExecuteRestAndPopulateCache(restOps, vrfKey, avimodel, key, false)
-
 	if success && lib.ConfigDeleteSyncChan != nil {
 		vsKeysPending := rest.cache.VsCacheMeta.AviGetAllKeys()
 		utils.AviLog.Infof("key: %s, msg: Number of VS deletion pending: %d", key, len(vsKeysPending))
@@ -257,6 +257,11 @@ func (rest *RestOperations) CheckAndPublishForRetry(err error, publishKey, key s
 			case 400:
 				if strings.Contains(*aviError.Message, lib.NoFreeIPError) {
 					utils.AviLog.Warnf("key: %s, msg: no Free IP available, adding to slow retry queue", key)
+					rest.PublishKeyToSlowRetryLayer(publishKey, key)
+					return true
+				}
+				if strings.Contains(*aviError.Message, lib.VrfContextNotFoundError) {
+					utils.AviLog.Warnf("key: %s, msg: VrfContext not found, adding to slow retry queue", key)
 					rest.PublishKeyToSlowRetryLayer(publishKey, key)
 					return true
 				}
@@ -658,8 +663,12 @@ func (rest *RestOperations) ExecuteRestAndPopulateCache(rest_ops []*utils.RestOp
 						if ok {
 							statuscode := aviError.HttpStatusCode
 							if statuscode != 404 {
-								rest.PublishKeyToSlowRetryLayer(publishKey, key)
-								//Here as it is 404 for specific object in a current child, AKO can go ahead with next child
+								if statuscode == 412 {
+									// concurrent update scenario currently happens for VRFContext only
+									rest.PublishKeyToRetryLayer(publishKey, key)
+								} else {
+									rest.PublishKeyToSlowRetryLayer(publishKey, key)
+								}
 								return false, true
 							} else {
 								rest.AviVsCacheDel(rest_ops[i], aviObjKey, key)
@@ -773,12 +782,14 @@ func (rest *RestOperations) DataScriptDelete(dsToDelete []avicache.NamespaceName
 func (rest *RestOperations) PublishKeyToRetryLayer(parentVsKey string, key string) {
 	fastRetryQueue := utils.SharedWorkQueue().GetQueueByName(lib.FAST_RETRY_LAYER)
 	fastRetryQueue.Workqueue[0].AddRateLimited(parentVsKey)
+	lib.IncrementQueueCounter(lib.FAST_RETRY_LAYER)
 	utils.AviLog.Infof("key: %s, msg: Published key with vs_key to fast path retry queue: %s", key, parentVsKey)
 }
 
 func (rest *RestOperations) PublishKeyToSlowRetryLayer(parentVsKey string, key string) {
 	slowRetryQueue := utils.SharedWorkQueue().GetQueueByName(lib.SLOW_RETRY_LAYER)
 	slowRetryQueue.Workqueue[0].AddRateLimited(parentVsKey)
+	lib.IncrementQueueCounter(lib.SLOW_RETRY_LAYER)
 	utils.AviLog.Infof("key: %s, msg: Published key with vs_key to slow path retry queue: %s", key, parentVsKey)
 }
 

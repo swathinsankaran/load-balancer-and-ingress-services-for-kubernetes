@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	avicache "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
@@ -41,6 +42,10 @@ func ParseOptionsFromMetadata(options []UpdateOptions, bulk bool) ([]string, map
 	updateIngressOptions := make(map[string]UpdateOptions)
 
 	for _, option := range options {
+		if option.ServiceMetadata.InsecureEdgeTermAllow {
+			utils.AviLog.Infof("Skipping update of parent VS annotation since the route :%v has InsecureEdgeTerminationAllow set to true", option.ServiceMetadata.IngressName)
+			continue
+		}
 		if len(option.ServiceMetadata.NamespaceIngressName) > 0 {
 			// secure VSes, service metadata comes from SNI VS.
 			for _, ingressns := range option.ServiceMetadata.NamespaceIngressName {
@@ -170,8 +175,8 @@ func getRoutes(routeNSNames []string, bulk bool, retryNum ...int) map[string]*ro
 		routeList, err := utils.GetInformers().RouteInformer.Lister().List(labels.Set(nil).AsSelector())
 		if err != nil {
 			utils.AviLog.Warnf("Could not get the route object for UpdateStatus: %s", err)
-			// retry get if request timeout
-			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) {
+			// retry get if request timeout or Unauthorized
+			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) || strings.Contains(err.Error(), utils.K8S_UNAUTHORIZED) {
 				return getRoutes(routeNSNames, bulk, retry+1)
 			}
 		}
@@ -195,8 +200,8 @@ func getRoutes(routeNSNames []string, bulk bool, retryNum ...int) map[string]*ro
 		route, err := utils.GetInformers().OshiftClient.RouteV1().Routes(nsNameSplit[0]).Get(context.TODO(), nsNameSplit[1], metav1.GetOptions{})
 		if err != nil {
 			utils.AviLog.Warnf("msg: Could not get the route object for UpdateStatus: %s", err)
-			// retry get if request timeout
-			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) {
+			// retry get if request timeout or Unauthorized
+			if strings.Contains(err.Error(), utils.K8S_ETIMEDOUT) || strings.Contains(err.Error(), utils.K8S_UNAUTHORIZED) {
 				return getRoutes(routeNSNames, bulk, retry+1)
 			}
 			continue
@@ -263,6 +268,28 @@ func UpdateRouteStatusWithErrMsg(key, routeName, namespace, msg string, retryNum
 	return
 }
 
+func routeVsUUIDStatus(key, hostname string, updateOption UpdateOptions) string {
+	vsAnnotations := make(map[string]string)
+	ctrlAnnotationValStr := avicache.GetControllerClusterUUID()
+	for i := 0; i < len(updateOption.ServiceMetadata.HostNames); i++ {
+		// only update for given hostname
+		if updateOption.ServiceMetadata.HostNames[i] == hostname {
+			vsAnnotations[hostname] = updateOption.VirtualServiceUUID
+		}
+	}
+	vsAnnotationsBytes, err := json.Marshal(vsAnnotations)
+	if err != nil {
+		utils.AviLog.Errorf("error in marshalling vs annotations: %v", err)
+		return ""
+	}
+	vsAnnotationsStrStr := string(vsAnnotationsBytes)
+	patchPayload := map[string]string{
+		lib.VSAnnotation:         vsAnnotationsStrStr,
+		lib.ControllerAnnotation: ctrlAnnotationValStr,
+	}
+	return utils.Stringify(patchPayload)
+}
+
 func routeStatusCheck(key string, oldStatus []routev1.RouteIngress, hostname string) bool {
 	for _, status := range oldStatus {
 		if len(status.Conditions) < 1 {
@@ -284,10 +311,6 @@ func routeStatusCheck(key string, oldStatus []routev1.RouteIngress, hostname str
 
 func updateRouteObject(mRoute *routev1.Route, updateOption UpdateOptions, retryNum ...int) error {
 	if len(updateOption.Vip) == 0 {
-		return nil
-	}
-	if updateOption.ServiceMetadata.InsecureEdgeTermAllow {
-		utils.AviLog.Infof("Skipping update of parent VS annotation since the route :%v has InsecureEdgeTerminationAllow set to true", mRoute.Name)
 		return nil
 	}
 
@@ -314,11 +337,15 @@ func updateRouteObject(mRoute *routev1.Route, updateOption UpdateOptions, retryN
 	for _, host := range hostnames {
 		now := metav1.Now()
 		for _, vip := range updateOption.Vip {
+			// In 1.12.1, populate both reason and annotation fields.
+			//So that during upgrade there will not be any issue of GSLB pools going down.
+			reason := routeVsUUIDStatus(key, host, updateOption)
 			condition := routev1.RouteIngressCondition{
 				Message:            vip,
 				Status:             corev1.ConditionTrue,
 				LastTransitionTime: &now,
 				Type:               routev1.RouteAdmitted,
+				Reason:             reason,
 			}
 			rtIngress := routev1.RouteIngress{
 				Host:       host,

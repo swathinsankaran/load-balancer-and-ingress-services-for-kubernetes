@@ -64,6 +64,7 @@ const (
 	SYSTEM_SCTP_PROXY             = "System-SCTP-Proxy"
 	MIXED_NET_PROFILE             = "Mixed-Network-Profile-Internal"
 	DEFAULT_L4_APP_PROFILE        = "System-L4-Application"
+	DEFAULT_L4_SSL_APP_PROFILE    = "System-SSL-Application"
 	DEFAULT_L7_APP_PROFILE        = "System-HTTP"
 	DEFAULT_L7_SECURE_APP_PROFILE = "System-Secure-HTTP"
 	DEFAULT_SHARD_VS_PREFIX       = "Shard-VS-"
@@ -83,6 +84,7 @@ const (
 	FULL_SYNC_INTERVAL            = "FULL_SYNC_INTERVAL"
 	DEFAULT_FILE_SUFFIX           = "avi.log"
 	K8S_ETIMEDOUT                 = "timed out"
+	K8S_UNAUTHORIZED              = "Unauthorized"
 	ADVANCED_L4                   = "ADVANCED_L4"
 	SERVICES_API                  = "SERVICES_API"
 	ENV_CTRL_USERNAME             = "CTRL_USERNAME"
@@ -94,10 +96,9 @@ const (
 	VCF_CLUSTER                   = "VCF_CLUSTER"
 	MCI_ENABLED                   = "MCI_ENABLED"
 	USE_DEFAULT_SECRETS_ONLY      = "USE_DEFAULT_SECRETS_ONLY"
-	CTRL_VERSION_22_1_3           = "22.1.3"
-	CTRL_VERSION_22_1_2           = "22.1.2"
 	Namespace                     = "Namespace"
-	MaxAviVersion                 = "22.1.3"
+	MaxAviVersion                 = "30.2.1"
+	NamespaceNetworkInfo          = "NamespaceNetworkInfos"
 
 	RefreshAuthTokenInterval = 12  //hours
 	AuthTokenExpiry          = 240 //hours

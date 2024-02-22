@@ -33,6 +33,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/jinzhu/copier"
 	avimodels "github.com/vmware/alb-sdk/go/models"
+	k8net "k8s.io/utils/net"
 )
 
 func (rest *RestOperations) AviPoolBuild(pool_meta *nodes.AviPoolNode, cache_obj *avicache.AviPoolCache, key string) *utils.RestOp {
@@ -52,8 +53,8 @@ func (rest *RestOperations) AviPoolBuild(pool_meta *nodes.AviPoolNode, cache_obj
 
 	// set pool placement network if node network details are present and cloud type is CLOUD_VCENTER or CLOUD_NSXT (vlan)
 	if len(pool_meta.NetworkPlacementSettings) != 0 && lib.IsNodeNetworkAllowedCloud() {
-		for network, cidrs := range pool_meta.NetworkPlacementSettings {
-			for _, cidr := range cidrs {
+		for network, nwMap := range pool_meta.NetworkPlacementSettings {
+			for _, cidr := range nwMap.Cidrs {
 				_, ipnet, err := net.ParseCIDR(cidr)
 				if err != nil {
 					utils.AviLog.Warnf("The value of CIDR couldn't be parsed. Failed with error: %v.", err.Error())
@@ -61,7 +62,7 @@ func (rest *RestOperations) AviPoolBuild(pool_meta *nodes.AviPoolNode, cache_obj
 				}
 				addr := ipnet.IP.String()
 				atype := "V4"
-				if !utils.IsV4(addr) {
+				if k8net.IsIPv6CIDR(ipnet) {
 					atype = "V6"
 				}
 
@@ -72,9 +73,13 @@ func (rest *RestOperations) AviPoolBuild(pool_meta *nodes.AviPoolNode, cache_obj
 					break
 				}
 				int32Cidr := int32(intCidr)
-
+				networkRef := "/api/network/?name=" + network
+				if nwMap.NetworkUUID != "" {
+					networkRef = "/api/network/" + nwMap.NetworkUUID
+				}
+				utils.AviLog.Debugf("Pool: %s, Network ref for pool placement setting is: %s", name, networkRef)
 				placementNetworks = append(placementNetworks, &avimodels.PlacementNetwork{
-					NetworkRef: proto.String("/api/network/?name=" + network),
+					NetworkRef: proto.String(networkRef),
 					Subnet: &avimodels.IPAddrPrefix{
 						IPAddr: &avimodels.IPAddr{
 							Addr: &addr,
@@ -168,7 +173,9 @@ func (rest *RestOperations) AviPoolBuild(pool_meta *nodes.AviPoolNode, cache_obj
 		pool.HealthMonitorRefs = append(pool.HealthMonitorRefs, hm)
 	}
 
-	copier.Copy(&pool, &pool_meta.AviPoolGeneratedFields)
+	if err := copier.CopyWithOption(&pool, &pool_meta.AviPoolGeneratedFields, copier.Option{IgnoreEmpty: true}); err != nil {
+		utils.AviLog.Warnf("key: %s, msg: unable to set few parameters in the Pool, err: %v", key, err)
+	}
 
 	// TODO Version should be latest from configmap
 	var path string
@@ -357,8 +364,8 @@ func (rest *RestOperations) AviPoolCacheAdd(rest_op *utils.RestOp, vsKey avicach
 							if pool_cache_obj.ServiceMetadataObj.IsMCIIngress {
 								statusOption.ObjType = lib.MultiClusterIngress
 							}
-							utils.AviLog.Debugf("key: %s Publishing to status queue, options: %v", updateOptions.ServiceMetadata.IngressName, utils.Stringify(statusOption))
-							status.PublishToStatusQueue(updateOptions.ServiceMetadata.IngressName, statusOption)
+							utils.AviLog.Debugf("key: %s Publishing to status queue, options: %v", updateOptions.ServiceMetadata.HostNames[0], utils.Stringify(statusOption))
+							status.PublishToStatusQueue(updateOptions.ServiceMetadata.HostNames[0], statusOption)
 						}
 					}
 				}
@@ -439,8 +446,8 @@ func (rest *RestOperations) DeletePoolIngressStatus(poolKey avicache.NamespaceNa
 				if pool_cache_obj.ServiceMetadataObj.IsMCIIngress {
 					statusOption.ObjType = lib.MultiClusterIngress
 				}
-				utils.AviLog.Debugf("key: %s Publishing to status queue, options: %v", updateOptions.ServiceMetadata.IngressName, utils.Stringify(statusOption))
-				status.PublishToStatusQueue(updateOptions.ServiceMetadata.IngressName, statusOption)
+				utils.AviLog.Debugf("key: %s Publishing to status queue, options: %v", updateOptions.ServiceMetadata.HostNames[0], utils.Stringify(statusOption))
+				status.PublishToStatusQueue(updateOptions.ServiceMetadata.HostNames[0], statusOption)
 			}
 		}
 	}

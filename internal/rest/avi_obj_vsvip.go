@@ -27,7 +27,7 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/status"
-	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
 	"github.com/davecgh/go-spew/spew"
@@ -62,6 +62,7 @@ func (rest *RestOperations) AviVsVipBuild(vsvip_meta *nodes.AviVSVIPNode, vsCach
 	cloudRef := "/api/cloud?name=" + utils.CloudName
 	var dns_info_arr []*avimodels.DNSInfo
 	var path string
+	var networkRef string
 	var rest_op utils.RestOp
 	vipId, ipType, ip6Type := "0", "V4", "V6"
 
@@ -105,7 +106,11 @@ func (rest *RestOperations) AviVsVipBuild(vsvip_meta *nodes.AviVSVIPNode, vsCach
 
 			// This would throw an error for advl4 the error is propagated to the gateway status.
 			if vsvip_meta.IPAddress != "" {
-				vip.IPAddress = &avimodels.IPAddr{Type: &ipType, Addr: &vsvip_meta.IPAddress}
+				if utils.IsV4(vsvip_meta.IPAddress) {
+					vip.IPAddress = &avimodels.IPAddr{Type: &ipType, Addr: &vsvip_meta.IPAddress}
+				} else {
+					vip.Ip6Address = &avimodels.IPAddr{Type: &ip6Type, Addr: &vsvip_meta.IPAddress}
+				}
 			}
 
 			if lib.IsPublicCloud() && lib.GetCloudType() != lib.CLOUD_GCP {
@@ -124,8 +129,13 @@ func (rest *RestOperations) AviVsVipBuild(vsvip_meta *nodes.AviVSVIPNode, vsCach
 							}
 						}
 					}
-					networkRef := "/api/network/?name=" + vsvip_meta.VipNetworks[0].NetworkName
+					// Shouldn't be required but kept for backup purpose
+					networkRef = "/api/network/?name=" + vsvip_meta.VipNetworks[0].NetworkName
+					if len(vsvip_meta.VipNetworks[0].NetworkUUID) != 0 {
+						networkRef = "/api/network/" + vsvip_meta.VipNetworks[0].NetworkUUID
+					}
 					vip.IPAMNetworkSubnet.NetworkRef = &networkRef
+					utils.AviLog.Debugf("Network: %s Network ref in rest layer: %s", vsvip_meta.VipNetworks[0].NetworkName, *vip.IPAMNetworkSubnet.NetworkRef)
 					if vsvip_meta.VipNetworks[0].V6Cidr != "" {
 						lib.UpdateV6(vip, &vsvip_meta.VipNetworks[0])
 					}
@@ -170,7 +180,11 @@ func (rest *RestOperations) AviVsVipBuild(vsvip_meta *nodes.AviVSVIPNode, vsCach
 
 		// configuring static IP, from gateway.Addresses (advl4, svcapi) and service.loadBalancerIP (l4)
 		if vsvip_meta.IPAddress != "" {
-			vip.IPAddress = &avimodels.IPAddr{Type: &ipType, Addr: &vsvip_meta.IPAddress}
+			if utils.IsV4(vsvip_meta.IPAddress) {
+				vip.IPAddress = &avimodels.IPAddr{Type: &ipType, Addr: &vsvip_meta.IPAddress}
+			} else {
+				vip.Ip6Address = &avimodels.IPAddr{Type: &ip6Type, Addr: &vsvip_meta.IPAddress}
+			}
 		}
 
 		// selecting network with user input, in case user input is not provided AKO relies on
@@ -185,8 +199,11 @@ func (rest *RestOperations) AviVsVipBuild(vsvip_meta *nodes.AviVSVIPNode, vsCach
 					vip.IPAMNetworkSubnet = &avimodels.IPNetworkSubnet{}
 				}
 				networkRef := "/api/network/?name=" + vipNetwork.NetworkName
+				if len(vipNetwork.NetworkUUID) != 0 {
+					networkRef = "/api/network/" + vipNetwork.NetworkUUID
+				}
 				vip.IPAMNetworkSubnet.NetworkRef = &networkRef
-
+				utils.AviLog.Debugf("Network: %s Network ref in rest layer: %s", vsvip_meta.VipNetworks[0].NetworkName, *vip.IPAMNetworkSubnet.NetworkRef)
 				// setting IPAMNetworkSubnet.Subnet value in case subnetCIDR is provided
 				if vipNetwork.Cidr == "" && vipNetwork.V6Cidr == "" {
 					utils.AviLog.Warnf("key: %s, msg: Incomplete values provided for CIDR, will not use IPAMNetworkSubnet in vsvip", key)
@@ -202,7 +219,6 @@ func (rest *RestOperations) AviVsVipBuild(vsvip_meta *nodes.AviVSVIPNode, vsCach
 						mask6, _ = strconv.Atoi(ip6PrefixSlice[1])
 					}
 					if (lib.IsPublicCloud() && lib.GetCloudType() == lib.CLOUD_GCP) || (!lib.IsWCP()) {
-						vip.IPAMNetworkSubnet = &avimodels.IPNetworkSubnet{}
 						if vipNetwork.Cidr != "" {
 							vip.IPAMNetworkSubnet.Subnet = &avimodels.IPAddrPrefix{
 								IPAddr: &avimodels.IPAddr{Type: &ipType, Addr: &ipPrefixSlice[0]},
@@ -378,7 +394,7 @@ func (rest *RestOperations) AviVsVipDel(uuid string, tenant string, key string) 
 		Tenant: tenant,
 		Model:  "VsVip",
 	}
-	utils.AviLog.Info(spew.Sprintf("key: %s, msg: VSVIP DELETE Restop %v ", key,
+	utils.AviLog.Infof(spew.Sprintf("key: %s, msg: VSVIP DELETE Restop %v ", key,
 		utils.Stringify(rest_op)))
 	return &rest_op
 }
@@ -392,7 +408,7 @@ func (rest *RestOperations) AviVsVipPut(uuid string, vsvipObj *avimodels.VsVip, 
 		Tenant: tenant,
 		Model:  "VsVip",
 	}
-	utils.AviLog.Info(spew.Sprintf("key: %s, msg: VSVIP PUT Restop %v ", key,
+	utils.AviLog.Infof(spew.Sprintf("key: %s, msg: VSVIP PUT Restop %v ", key,
 		utils.Stringify(rest_op)))
 	return &rest_op
 }
@@ -598,13 +614,13 @@ func (rest *RestOperations) AviVsVipCacheAdd(rest_op *utils.RestOp, vsKey avicac
 		}
 
 		k := avicache.NamespaceName{Namespace: rest_op.Tenant, Name: name}
+		oldVsVipCache, oldVsVipFound := rest.cache.VSVIPCache.AviCacheGet(k)
 		rest.cache.VSVIPCache.AviCacheAdd(k, &vsvip_cache_obj)
 		// Update the VS object
 		vs_cache, ok := rest.cache.VsCacheMeta.AviCacheGet(vsKey)
 		if ok {
 			vs_cache_obj, found := vs_cache.(*avicache.AviVsCache)
 			if found {
-				oldVsVipCache, oldVsVipFound := rest.cache.VSVIPCache.AviCacheGet(k)
 				var oldVsVips, oldVsFips, oldVsV6ips []string
 				if oldVsVipFound {
 					oldVsVipCacheObj, ok := oldVsVipCache.(*avicache.AviVSVIPCache)
@@ -668,7 +684,7 @@ func (rest *RestOperations) AviVsVipCacheAdd(rest_op *utils.RestOp, vsKey avicac
 				// rest.StatusUpdateForVS(vs_cache_obj, key)
 			}
 		}
-		utils.AviLog.Info(spew.Sprintf("key: %s, msg: added vsvip cache k %v val %v", key, k,
+		utils.AviLog.Infof(spew.Sprintf("key: %s, msg: added vsvip cache k %v val %v", key, k,
 			vsvip_cache_obj))
 
 	}
@@ -692,7 +708,7 @@ func (rest *RestOperations) AviVsVipCacheDel(rest_op *utils.RestOp, vsKey avicac
 	return nil
 }
 
-func networkNamesToVips(vipNetworks []akov1alpha1.AviInfraSettingVipNetwork, enablePublicIP *bool) []*avimodels.Vip {
+func networkNamesToVips(vipNetworks []akov1beta1.AviInfraSettingVipNetwork, enablePublicIP *bool) []*avimodels.Vip {
 	var vipList []*avimodels.Vip
 	autoAllocate := true
 

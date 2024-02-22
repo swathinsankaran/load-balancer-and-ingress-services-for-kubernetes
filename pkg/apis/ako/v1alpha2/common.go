@@ -29,7 +29,7 @@ type BackendProperties struct {
 	LbAlgorithm                      *string              `json:"lbAlgorithm,omitempty"`
 	LbAlgorithmConsistentHashHdr     *string              `json:"lbAlgorithmConsistentHashHdr,omitempty"`
 	LbAlgorithmHash                  *string              `json:"lbAlgorithmHash,omitempty"`
-	MinServersUp                     *int32               `json:"minServersUp,omitempty"`
+	MinServersUp                     *uint32              `json:"minServersUp,omitempty"`
 	PkiProfileRef                    *string              `json:"pkiProfileRef,omitempty"`
 	Port                             *int                 `json:"port"`
 	Protocol                         *string              `json:"protocol"`
@@ -38,9 +38,9 @@ type BackendProperties struct {
 }
 
 type FullClientLogs struct {
-	Duration *int32 `json:"duration,omitempty"`
-	Enabled  *bool  `json:"enabled"`
-	Throttle *int32 `json:"throttle,omitempty"`
+	Duration *uint32 `json:"duration,omitempty"`
+	Enabled  *bool   `json:"enabled"`
+	Throttle *uint32 `json:"throttle,omitempty"`
 }
 
 type JWTValidationParams struct {
@@ -105,5 +105,11 @@ type SAMLSPConfig struct {
 	SigningSslKeyAndCertificateRef *string `json:"signingSslKeyAndCertificateRef,omitempty"`
 	SingleSignonURL                *string `json:"singleSignonURL"`
 	UseIdpSessionTimeout           *bool   `json:"useIdpSessionTimeout,omitempty"`
+}
+
+type Service struct {
+	EnableSsl *bool   `json:"enableSsl,omitempty"`
+	Port      *uint32 `json:"port"`
+	Protocol  *string `json:"protocol"`
 }
 

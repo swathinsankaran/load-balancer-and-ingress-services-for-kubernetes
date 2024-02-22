@@ -23,7 +23,7 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/status"
-	akov1alpha1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1alpha1"
+	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -36,9 +36,15 @@ func DequeueIngestion(key string, fullsync bool) {
 	var ingressFound, routeFound, mciFound bool
 	var ingressNames, routeNames, mciNames []string
 	utils.AviLog.Infof("key: %s, msg: starting graph Sync", key)
+	lib.DecrementQueueCounter(utils.ObjectIngestionLayer)
 	sharedQueue := utils.SharedWorkQueue().GetQueueByName(utils.GraphLayer)
 
 	objType, namespace, name := lib.ExtractTypeNameNamespace(key)
+
+	if objType == lib.L7Rule {
+		return
+	}
+
 	if objType == utils.Pod {
 		handlePod(key, namespace, name, fullsync)
 	}
@@ -68,6 +74,7 @@ func DequeueIngestion(key string, fullsync bool) {
 		if ok {
 			PublishKeyToRestLayer(lib.IstioModel, key, sharedQueue)
 		}
+		return
 	}
 	schema, valid := ConfigDescriptor().GetByType(objType)
 	if valid {
@@ -149,7 +156,7 @@ func DequeueIngestion(key string, fullsync bool) {
 	}
 
 	// Push Services from InfraSetting updates. Valid for annotation based approach.
-	if objType == lib.AviInfraSetting && !lib.UseServicesAPI() {
+	if objType == lib.AviInfraSetting && !lib.UseServicesAPI() && !lib.IsWCP() {
 		svcNames, svcFound := schema.GetParentServices(name, namespace, key)
 		if svcFound && utils.CheckIfNamespaceAccepted(namespace) {
 			for _, svcNSNameKey := range svcNames {
@@ -161,14 +168,13 @@ func DequeueIngestion(key string, fullsync bool) {
 	// L4Rule CRD processing.
 	if objType == lib.L4Rule {
 
+		if !utils.CheckIfNamespaceAccepted(namespace) {
+			utils.AviLog.Debugf("key: %s, msg: namespace of l4rule is not in accepted state", key)
+			return
+		}
 		svcNames, found := schema.GetParentServices(name, namespace, key)
 		if !found {
 			utils.AviLog.Debugf("key: %s, msg: no service found with L4Rule annotation", key)
-			return
-		}
-
-		if !utils.CheckIfNamespaceAccepted(namespace) {
-			utils.AviLog.Debugf("key: %s, msg: namespace of l4rule is not in accepted state", key)
 			return
 		}
 
@@ -210,8 +216,8 @@ func DequeueIngestion(key string, fullsync bool) {
 				return
 			}
 
-			// Do not handle service update if it belongs to unaccepted namespace
-			if svcObj.Spec.Type == utils.LoadBalancer && !lib.GetLayer7Only() && utils.CheckIfNamespaceAccepted(namespace) {
+			// Do not handle service update if it belongs to unaccepted namespace or if associated LBService is under different LBClass
+			if svcObj.Spec.Type == utils.LoadBalancer && !lib.GetLayer7Only() && utils.CheckIfNamespaceAccepted(namespace) && lib.ValidateSvcforClass(key, svcObj) {
 				// This endpoint update affects a LB service.
 				aviModelGraph := NewAviObjectGraph()
 				if sharedVipKey, ok := svcObj.Annotations[lib.SharedVipSvcLBAnnotation]; ok && sharedVipKey != "" {
@@ -238,7 +244,7 @@ func DequeueIngestion(key string, fullsync bool) {
 	// handle the services APIs
 	if (lib.IsWCP() && objType == utils.L4LBService) ||
 		(lib.UseServicesAPI() && (objType == utils.Service || objType == utils.L4LBService)) ||
-		((lib.IsWCP() || lib.UseServicesAPI()) && (objType == lib.Gateway || objType == lib.GatewayClass || objType == utils.Endpoints || objType == lib.AviInfraSetting)) {
+		((lib.IsWCP() || lib.UseServicesAPI()) && (objType == lib.Gateway || objType == lib.GatewayClass || objType == utils.Endpoints || objType == lib.AviInfraSetting || objType == utils.NamespaceNetworkInfo)) {
 		if !valid && objType == utils.L4LBService {
 			// Required for advl4 schemas.
 			schema, _ = ConfigDescriptor().GetByType(utils.Service)
@@ -263,9 +269,11 @@ func DequeueIngestion(key string, fullsync bool) {
 				} else {
 					aviModelGraph := NewAviObjectGraph()
 					aviModelGraph.BuildAdvancedL4Graph(namespace, gwName, key, false)
-					ok := saveAviModel(modelName, aviModelGraph, key)
-					if ok && len(aviModelGraph.GetOrderedNodes()) != 0 && !fullsync {
-						PublishKeyToRestLayer(modelName, key, sharedQueue)
+					if len(aviModelGraph.GetOrderedNodes()) > 0 {
+						ok := saveAviModel(modelName, aviModelGraph, key)
+						if ok && !fullsync {
+							PublishKeyToRestLayer(modelName, key, sharedQueue)
+						}
 					}
 				}
 			}
@@ -330,7 +338,7 @@ func handleHostRuleForSharedVS(key string, fullsync bool) {
 				objects.SharedCRDLister().UpdateFQDNHostruleMapping(fqdn, namespace+"/"+hrName)
 				fqdnType = string(hostrule.Spec.VirtualHost.FqdnType)
 				if fqdnType == "" {
-					fqdnType = string(akov1alpha1.Exact)
+					fqdnType = string(akov1beta1.Exact)
 				}
 				objects.SharedCRDLister().UpdateFQDNFQDNTypeMapping(fqdn, fqdnType)
 			}
@@ -568,6 +576,10 @@ func handleL4SharedVipService(namespacedVipKey, key string, fullsync bool) {
 	for i, serviceNSName := range serviceNSNames {
 		svcNSName := strings.Split(serviceNSName, "/")
 		svcObj, err := utils.GetInformers().ServiceInformer.Lister().Services(svcNSName[0]).Get(svcNSName[1])
+		if !lib.ValidateSvcforClass(key, svcObj) {
+			isShareVipKeyDelete = true
+			break
+		}
 		if err != nil {
 			utils.AviLog.Debugf("key: %s, msg: there was an error in retrieving the service", key)
 			isShareVipKeyDelete = true
@@ -644,9 +656,11 @@ func handleL4SharedVipService(namespacedVipKey, key string, fullsync bool) {
 		aviModelGraph := NewAviObjectGraph()
 		vipKey := strings.Split(namespacedVipKey, "/")[1]
 		aviModelGraph.BuildAdvancedL4Graph(namespace, vipKey, key, true)
-		ok := saveAviModel(modelName, aviModelGraph, key)
-		if ok && len(aviModelGraph.GetOrderedNodes()) != 0 && !fullsync {
-			PublishKeyToRestLayer(modelName, key, sharedQueue)
+		if len(aviModelGraph.GetOrderedNodes()) > 0 {
+			ok := saveAviModel(modelName, aviModelGraph, key)
+			if ok && !fullsync {
+				PublishKeyToRestLayer(modelName, key, sharedQueue)
+			}
 		}
 	}
 }
@@ -675,6 +689,11 @@ func handleL4Service(key string, fullsync bool) {
 				return
 			}
 		}
+		svcObj, _ := utils.GetInformers().ServiceInformer.Lister().Services(namespace).Get(name)
+		if svcObj.Spec.Type == utils.LoadBalancer && !lib.ValidateSvcforClass(key, svcObj) {
+			return
+		}
+
 		utils.AviLog.Infof("key: %s, msg: service is of type loadbalancer. Will create dedicated VS nodes", key)
 		aviModelGraph := NewAviObjectGraph()
 		aviModelGraph.BuildL4LBGraph(namespace, name, key)
@@ -821,6 +840,7 @@ func processNodeObj(key, nodename string, sharedQueue *utils.WorkerQueue, fullsy
 func PublishKeyToRestLayer(modelName string, key string, sharedQueue *utils.WorkerQueue) {
 	bkt := utils.Bkt(modelName, sharedQueue.NumWorkers)
 	sharedQueue.Workqueue[bkt].AddRateLimited(modelName)
+	lib.IncrementQueueCounter(utils.GraphLayer)
 	utils.AviLog.Infof("key: %s, msg: Published key with modelName: %s", key, modelName)
 }
 
@@ -919,7 +939,7 @@ func DeriveShardVS(hostname string, key string, routeIgrObj RouteIngressModel) (
 		newShardSize = oldShardSize
 		newInfraPrefix = oldInfraPrefix
 	} else if newSetting != nil {
-		if newSetting.Spec.L7Settings != (akov1alpha1.AviInfraL7Settings{}) {
+		if newSetting.Spec.L7Settings != (akov1beta1.AviInfraL7Settings{}) {
 			newShardSize = lib.ShardSizeMap[newSetting.Spec.L7Settings.ShardSize]
 		}
 		newInfraPrefix = newSetting.Name
@@ -954,7 +974,7 @@ func DerivePassthroughVS(hostname string, key string, routeIgrObj RouteIngressMo
 		newShardSize = oldShardSize
 		newInfraPrefix = oldInfraPrefix
 	} else if newSetting != nil {
-		if newSetting.Spec.L7Settings != (akov1alpha1.AviInfraL7Settings{}) {
+		if newSetting.Spec.L7Settings != (akov1beta1.AviInfraL7Settings{}) {
 			newShardSize = lib.ShardSizeMap[newSetting.Spec.L7Settings.ShardSize]
 		}
 		newInfraPrefix = newSetting.Name
