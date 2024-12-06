@@ -281,6 +281,8 @@ authtoken = "<authtoken>"
 print(base64.b64encode(authtoken.encode("ascii")))
 ```
 
+**Note:** From release v1.12.1 onwards, AKO supports reading Avi Controller credentials including `certificateAuthorityData` from existing `avi-secret` from the namespace in which AKO is installed. If `username` and either `password` or `authtoken` are not specified, avi-secret will not be created as part of Helm installation. AKO will assume that avi-secret already exists in the namespace in which the AKO Helm release is installed and will reference it. 
+
 ### avicredentials.certificateAuthorityData
 
 This field allows setting the rootCA of the Avi controller, that AKO uses to verify the server certificate provided by the Avi Controller during the TLS handshake. This also enables AKO to connect securely over SSL with the Avi Controller, which is not possible in case the field is not provided.
@@ -341,3 +343,7 @@ Enable Gateway API in the featureGate to use this field.
 ### GatewayAPI.image.repository
 
 If you are using a private container registry and you'd like to override the default dockerhub settings, then this field can be edited with the private registry name.
+
+### featureGates.EnableEndpointSlice
+
+Enable this flag to use EndpointSlices instead of Endpoints in AKO. This also supports graceful shutdown of servers. Enabled by default from AKO 1.13.1.

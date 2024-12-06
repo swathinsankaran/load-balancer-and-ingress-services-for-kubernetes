@@ -180,6 +180,9 @@ func (v *AviVsNode) CalculateForGraphChecksum() uint32 {
 	for _, l4pol := range v.L4PolicyRefs {
 		checksumStringSlice = append(checksumStringSlice, fmt.Sprint(l4pol.GetCheckSum()))
 	}
+	for _, stringGroup := range v.StringGroupRefs {
+		checksumStringSlice = append(checksumStringSlice, fmt.Sprint(stringGroup.GetCheckSum()))
+	}
 
 	return utils.Hash(strings.Join(checksumStringSlice, ":"))
 }
@@ -210,7 +213,9 @@ func (v *AviEvhVsNode) CalculateForGraphChecksum() uint32 {
 	for _, vsvip := range v.VSVIPRefs {
 		checksumStringSlice = append(checksumStringSlice, fmt.Sprint(vsvip.GetCheckSum()))
 	}
-
+	for _, stringGroup := range v.StringGroupRefs {
+		checksumStringSlice = append(checksumStringSlice, fmt.Sprint(stringGroup.GetCheckSum()))
+	}
 	return utils.Hash(strings.Join(checksumStringSlice, ":"))
 }
 
@@ -253,12 +258,16 @@ func (o *AviObjectGraph) RemovePGNodeRefs(pgName string, vsNode *AviVsNode) {
 
 }
 
-func (o *AviObjectGraph) RemoveHTTPRefsFromSni(httpPol, hppMap string, sniNode *AviVsNode) {
-
+func (o *AviObjectGraph) RemoveHTTPRefsStringGroupsFromSni(httpPol, hppMap string, sniNode *AviVsNode) {
+	var stringGroupToRemove []string
 	for i, pol := range sniNode.HttpPolicyRefs {
 		if pol.Name == httpPol {
 			for j, hppmap := range sniNode.HttpPolicyRefs[i].HppMap {
 				if hppmap.Name == hppMap {
+					if len(sniNode.HttpPolicyRefs[i].HppMap[j].StringGroupRefs) > 0 {
+						sgName := strings.Split(sniNode.HttpPolicyRefs[i].HppMap[j].StringGroupRefs[0], "=")[1]
+						stringGroupToRemove = append(stringGroupToRemove, sgName)
+					}
 					sniNode.HttpPolicyRefs[i].HppMap = append(sniNode.HttpPolicyRefs[i].HppMap[:j], sniNode.HttpPolicyRefs[i].HppMap[j+1:]...)
 					break
 				}
@@ -266,6 +275,14 @@ func (o *AviObjectGraph) RemoveHTTPRefsFromSni(httpPol, hppMap string, sniNode *
 			if len(pol.HppMap) == 0 {
 				utils.AviLog.Debugf("Removing http pol ref: %s", httpPol)
 				sniNode.HttpPolicyRefs = append(sniNode.HttpPolicyRefs[:i], sniNode.HttpPolicyRefs[i+1:]...)
+				break
+			}
+		}
+	}
+	for index, sgNode := range sniNode.StringGroupRefs {
+		for _, sgName := range stringGroupToRemove {
+			if *sgNode.Name == sgName {
+				sniNode.StringGroupRefs = append(sniNode.StringGroupRefs[:index], sniNode.StringGroupRefs[index+1:]...)
 				break
 			}
 		}
@@ -413,6 +430,7 @@ type AviVsNode struct {
 	Dedicated             bool
 	IsL4VS                bool
 	Secure                bool
+	StringGroupRefs       []*AviStringGroupNode
 
 	AviVsNodeCommonFields
 
@@ -630,6 +648,22 @@ func (v *AviVsNode) SetNetworkSecurityPolicyRef(networkSecurityPolicyRef *string
 	v.NetworkSecurityPolicyRef = networkSecurityPolicyRef
 }
 
+func (v *AviVsNode) GetTenant() string {
+	return v.Tenant
+}
+
+func (v *AviVsNode) GetStringGroupRefs() []*AviStringGroupNode {
+	return v.StringGroupRefs
+}
+
+func (v *AviVsNode) SetStringGroupRefs(stringGroupRefs []*AviStringGroupNode) {
+	v.StringGroupRefs = stringGroupRefs
+}
+
+func (v *AviVsNode) GetPaths() []string {
+	return v.Paths
+}
+
 func (o *AviObjectGraph) GetAviVS() []*AviVsNode {
 	var aviVs []*AviVsNode
 	for _, model := range o.modelNodes {
@@ -715,46 +749,62 @@ func (o *AviVsNode) GetPGForVSByName(pgName string) *AviPoolGroupNode {
 	return nil
 }
 
-func (o *AviVsNode) ReplaceSniPoolInSNINode(newPoolNode *AviPoolNode, key string) {
+func (o *AviVsNode) ReplaceSniPoolInSNINode(newPoolNode *AviPoolNode, key string, isPoolNameLenExceedAviLimit bool) {
 	for i, pool := range o.PoolRefs {
-		if pool.Name == newPoolNode.Name {
+		if pool.Name == newPoolNode.Name || pool.Name == lib.GetEncodedSniPGPoolNameforRegex(newPoolNode.Name) {
 			o.PoolRefs = append(o.PoolRefs[:i], o.PoolRefs[i+1:]...)
-			o.PoolRefs = append(o.PoolRefs, newPoolNode)
+			if !isPoolNameLenExceedAviLimit {
+				// Do not append if length exceeds
+				o.PoolRefs = append(o.PoolRefs, newPoolNode)
+			}
 			utils.AviLog.Infof("key: %s, msg: replaced sni pool in model: %s Pool name: %s", key, o.Name, pool.Name)
 			return
 		}
 	}
 	// If we have reached here it means we haven't found a match. Just append the pool.
-	o.PoolRefs = append(o.PoolRefs, newPoolNode)
+	if !isPoolNameLenExceedAviLimit {
+		o.PoolRefs = append(o.PoolRefs, newPoolNode)
+	}
 }
 
-func (o *AviVsNode) ReplaceSniPGInSNINode(newPGNode *AviPoolGroupNode, key string) {
+func (o *AviVsNode) ReplaceSniPGInSNINode(newPGNode *AviPoolGroupNode, key string, isPGNameLenExceedAviLimit bool) {
 	for i, pg := range o.PoolGroupRefs {
-		if pg.Name == newPGNode.Name {
+		if pg.Name == newPGNode.Name || pg.Name == lib.GetEncodedSniPGPoolNameforRegex(newPGNode.Name) {
 			o.PoolGroupRefs = append(o.PoolGroupRefs[:i], o.PoolGroupRefs[i+1:]...)
-			o.PoolGroupRefs = append(o.PoolGroupRefs, newPGNode)
-			utils.AviLog.Infof("key: %s, msg: replaced sni pg in model: %s Pool name: %s", key, o.Name, pg.Name)
+			if !isPGNameLenExceedAviLimit {
+				// add only when length is not exceed
+				o.PoolGroupRefs = append(o.PoolGroupRefs, newPGNode)
+			}
+			utils.AviLog.Infof("key: %s, msg: replaced sni pg in model: %s PG name: %s", key, o.Name, pg.Name)
 			return
 		}
 	}
 	// If we have reached here it means we haven't found a match. Just append.
-	o.PoolGroupRefs = append(o.PoolGroupRefs, newPGNode)
+	if !isPGNameLenExceedAviLimit {
+		//append if len < limit
+		o.PoolGroupRefs = append(o.PoolGroupRefs, newPGNode)
+	}
 }
 
-func (o *AviVsNode) ReplaceSniHTTPRefInSNINode(httpPGPath AviHostPathPortPoolPG, httpPolName, key string) {
+func (o *AviVsNode) ReplaceSniHTTPRefInSNINode(httpPGPath AviHostPathPortPoolPG, httpPolName, key string, isHPPNameLengthExceedAviLimit bool) {
 	for i, http := range o.HttpPolicyRefs {
 		if http.Name == httpPolName {
 			for j, hppMap := range o.HttpPolicyRefs[i].HppMap {
 				if hppMap.Name == httpPGPath.Name {
 					o.HttpPolicyRefs[i].HppMap = append(o.HttpPolicyRefs[i].HppMap[:j], o.HttpPolicyRefs[i].HppMap[j+1:]...)
-					o.HttpPolicyRefs[i].HppMap = append(o.HttpPolicyRefs[i].HppMap, httpPGPath)
-
+					if !isHPPNameLengthExceedAviLimit {
+						// Do not append if length exceed
+						o.HttpPolicyRefs[i].HppMap = append(o.HttpPolicyRefs[i].HppMap, httpPGPath)
+					}
 					utils.AviLog.Infof("key: %s, msg: replaced SNI httpmap in model: %s Pool name: %s", key, o.Name, hppMap.Name)
 					return
 				}
 			}
 			// If we have reached here it means we haven't found a match. Just append.
-			o.HttpPolicyRefs[i].HppMap = append(o.HttpPolicyRefs[i].HppMap, httpPGPath)
+			if !isHPPNameLengthExceedAviLimit {
+				// Do not add if length exceeds
+				o.HttpPolicyRefs[i].HppMap = append(o.HttpPolicyRefs[i].HppMap, httpPGPath)
+			}
 		}
 	}
 }
@@ -816,6 +866,10 @@ func (o *AviVsNode) AddFQDNAliasesToHTTPPolicy(hosts []string, key string) {
 	// Update the hosts in the redirect policy of parent VS
 	for _, policy := range o.HttpPolicyRefs {
 		for j := range policy.RedirectPorts {
+			// do not add host to the redirect rule for app-root which has RedirectPath populated
+			if policy.RedirectPorts[j].RedirectPath != "" {
+				continue
+			}
 			uniqueHosts := sets.NewString(policy.RedirectPorts[j].Hosts...)
 			uniqueHosts.Insert(hosts...)
 			policy.RedirectPorts[j].Hosts = make([]string, uniqueHosts.Len())
@@ -1169,16 +1223,19 @@ func (v *AviHttpPolicySetNode) CopyNode() AviModelNode {
 }
 
 type AviHostPathPortPoolPG struct {
-	Name          string
-	Checksum      uint32
-	Host          []string
-	Path          []string
-	Port          uint32
-	Pool          string
-	PoolGroup     string
-	MatchCriteria string
-	Protocol      string
-	IngName       string
+	Name            string
+	Checksum        uint32
+	Host            []string
+	Path            []string
+	Port            uint32
+	Pool            string
+	PoolGroup       string
+	MatchCriteria   string
+	Protocol        string
+	IngName         string
+	MatchCase       string
+	StringGroupRefs []string
+	SvcPort         int
 }
 
 func (v *AviHostPathPortPoolPG) GetCheckSum() uint32 {
@@ -1189,18 +1246,24 @@ func (v *AviHostPathPortPoolPG) GetCheckSum() uint32 {
 
 func (v *AviHostPathPortPoolPG) CalculateCheckSum() {
 	var checksum uint32
-	sort.Strings(v.Path)
+	if v.Path != nil {
+		sort.Strings(v.Path)
+	}
 	v.Host = nil // Host in http policy is no longer required. TODO: complete removal of its reference from everywhere.
 	checksum = checksum + utils.Hash(utils.Stringify(v))
 	v.Checksum = checksum
 }
 
 type AviRedirectPort struct {
-	Name         string
-	Hosts        []string
-	RedirectPort int32
-	StatusCode   string
-	VsPort       int32
+	Name          string
+	Hosts         []string
+	RedirectPort  int32
+	StatusCode    string
+	VsPort        int32
+	Protocol      string
+	Path          string
+	RedirectPath  string
+	MatchCriteria string
 }
 type AviHTTPSecurity struct {
 	Name          string
@@ -1419,6 +1482,7 @@ type AviHTTPDataScriptNode struct {
 	CloudConfigCksum uint32
 	PoolGroupRefs    []string
 	ProtocolParsers  []string
+	StringGroups     []string
 	*DataScript
 }
 
@@ -1463,6 +1527,16 @@ func (o *AviObjectGraph) GetAviHTTPDSNode() []*AviHTTPDataScriptNode {
 		}
 	}
 	return aviDS
+}
+
+func (o *AviObjectGraph) GetAviHTTPDSNodeByName(dataScriptName string) *AviHTTPDataScriptNode {
+	for _, model := range o.modelNodes {
+		ds, ok := model.(*AviHTTPDataScriptNode)
+		if ok && ds.Name == dataScriptName {
+			return ds
+		}
+	}
+	return nil
 }
 
 type DataScript struct {
@@ -1545,6 +1619,7 @@ type AviPoolCommonFields struct {
 	PkiProfileRef                    *string
 	SslProfileRef                    *string
 	SslKeyAndCertificateRef          *string
+	EnableHttp2                      *bool
 }
 
 func (v *AviPoolNode) GetCheckSum() uint32 {
@@ -1607,6 +1682,9 @@ func (v *AviPoolNode) CalculateCheckSum() {
 		checksumStringSlice = append(checksumStringSlice, utils.Stringify(v.ServiceMetadata.HostNames))
 	}
 
+	if v.EnableHttp2 != nil {
+		checksumStringSlice = append(checksumStringSlice, utils.Stringify(*v.EnableHttp2))
+	}
 	chksumStr := fmt.Sprint(strings.Join(checksumStringSlice, delim))
 
 	checksum := utils.Hash(chksumStr)
@@ -1688,6 +1766,7 @@ type AviPoolMetaServer struct {
 	Ip         avimodels.IPAddr
 	ServerNode string
 	Port       int32
+	Enabled    *bool
 }
 
 type IngressHostPathSvc struct {
@@ -1751,7 +1830,7 @@ func NewSecureHostNameMapProp() SecureHostNameMapProp {
 	return hostNameMap
 }
 
-func (h *SecureHostNameMapProp) GetPathsForHostName(hostname string) []string {
+func (h *SecureHostNameMapProp) GetPathsForHostName() []string {
 	var paths []string
 	for _, v := range h.HostNameMap {
 		paths = append(paths, v.paths...)
@@ -1759,7 +1838,7 @@ func (h *SecureHostNameMapProp) GetPathsForHostName(hostname string) []string {
 	return paths
 }
 
-func (h *SecureHostNameMapProp) GetIngressesForHostName(hostname string) []string {
+func (h *SecureHostNameMapProp) GetIngressesForHostName() []string {
 	var ingresses []string
 	for k := range h.HostNameMap {
 		ingresses = append(ingresses, k)
@@ -1767,7 +1846,7 @@ func (h *SecureHostNameMapProp) GetIngressesForHostName(hostname string) []strin
 	return ingresses
 }
 
-func (h *SecureHostNameMapProp) GetSecretsForHostName(hostname string) []string {
+func (h *SecureHostNameMapProp) GetSecretsForHostName() []string {
 	var secrets []string
 	for _, v := range h.HostNameMap {
 		secrets = append(secrets, v.secretName)
@@ -1778,4 +1857,59 @@ func (h *SecureHostNameMapProp) GetSecretsForHostName(hostname string) []string 
 type HostNamePathSecrets struct {
 	secretName string
 	paths      []string
+}
+
+type AviStringGroupNode struct {
+	CloudConfigCksum uint32
+	*avimodels.StringGroup
+}
+
+func (v *AviStringGroupNode) GetCheckSum() uint32 {
+	// Calculate checksum and return
+	v.CalculateCheckSum()
+	return v.CloudConfigCksum
+}
+
+func (v *AviStringGroupNode) CalculateCheckSum() {
+	// A sum of fields for this StringGroup.
+	checksum := lib.StringGroupChecksum(v.Kv, nil, v.LongestMatch, false)
+	v.CloudConfigCksum = checksum
+}
+
+func (v *AviStringGroupNode) GetNodeType() string {
+	return lib.StringGroupNode
+}
+
+func (v *AviStringGroupNode) CopyNode() AviModelNode {
+	newNode := AviStringGroupNode{}
+	bytes, err := json.Marshal(v)
+	if err != nil {
+		utils.AviLog.Warnf("Unable to marshal AviStringGroupNode: %s", err)
+	}
+	err = json.Unmarshal(bytes, &newNode)
+	if err != nil {
+		utils.AviLog.Warnf("Unable to unmarshal AviStringGroupNode: %s", err)
+	}
+	return &newNode
+}
+
+func (o *AviObjectGraph) GetAviStringGroupNode() []*AviStringGroupNode {
+	var aviSG []*AviStringGroupNode
+	for _, model := range o.modelNodes {
+		sg, ok := model.(*AviStringGroupNode)
+		if ok {
+			aviSG = append(aviSG, sg)
+		}
+	}
+	return aviSG
+}
+
+func (o *AviObjectGraph) GetAviStringGroupNodeByName(stringGroupName string) *AviStringGroupNode {
+	for _, model := range o.modelNodes {
+		sg, ok := model.(*AviStringGroupNode)
+		if ok && *sg.StringGroup.Name == stringGroupName {
+			return sg
+		}
+	}
+	return nil
 }

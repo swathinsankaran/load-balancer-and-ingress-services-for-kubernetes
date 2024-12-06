@@ -283,6 +283,16 @@ spec:
               configMapKeyRef:
                 name: avi-k8s-config
                 key: enablePrometheus
+          - name: ENDPOINTSLICES_ENABLED
+            valueFrom:
+              configMapKeyRef:
+                name: avi-k8s-config
+                key: enableEndpointSlice
+          - name: FQDN_REUSE_POLICY
+            valueFrom:
+              configMapKeyRef:
+                name: avi-k8s-config
+                key: fqdnReusePolicy
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           livenessProbe:
@@ -385,6 +395,13 @@ spec:
                 name: avi-k8s-config
                 key: nodeValue
           {{ end }}
+          {{ if .Values.NetworkSettings.nsxtT1LR }}
+          - name: NSXT_T1_LR
+            valueFrom:
+              configMapKeyRef:
+                name: avi-k8s-config
+                key: nsxtT1LR
+          {{ end }}
           {{ if .Values.persistentVolumeClaim }}
           - name: USE_PVC
             value: "true"
@@ -401,6 +418,11 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.namespace
+          - name: ENDPOINTSLICES_ENABLED
+            valueFrom:
+              configMapKeyRef:
+                name: avi-k8s-config
+                key: enableEndpointSlice
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
         {{ end }}

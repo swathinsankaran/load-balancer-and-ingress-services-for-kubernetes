@@ -106,9 +106,13 @@ func InitializeAKC() {
 	if err != nil {
 		isPrimaryAKO = true
 	}
+	akoControlConfig.SetEndpointSlicesEnabled(lib.GetEndpointSliceEnabled())
 	akoControlConfig.SetAKOInstanceFlag(isPrimaryAKO)
 	akoControlConfig.SetAKOBlockedNSList(lib.GetGlobalBlockedNSList())
 	akoControlConfig.SetControllerVRFContext(lib.GetControllerVRFContext())
+	akoControlConfig.SetAKOPrometheusFlag(lib.IsPrometheusEnabled())
+	akoControlConfig.SetAKOFQDNReusePolicy(strings.ToLower(os.Getenv("FQDN_REUSE_POLICY")))
+
 	var crdClient *crd.Clientset
 	var advl4Client *advl4.Clientset
 	var svcAPIClient *svcapi.Clientset
@@ -123,18 +127,7 @@ func InitializeAKC() {
 	if err != nil {
 		utils.AviLog.Fatalf("Error building AKO CRD v1beta1 clientset: %s", err.Error())
 	}
-	akoControlConfig.Setv1beta1CRDClientset(v1beta1crdClient)
 
-	// This is kept as MCI and Service Import uses v1alpha1
-	// In Next release, MCI and serviceImport should be taken out
-	crdClient, err = crd.NewForConfig(cfg)
-	if err != nil {
-		utils.AviLog.Fatalf("Error building AKO CRD clientset: %s", err.Error())
-	}
-	akoControlConfig.SetCRDClientset(crdClient)
-	if err != nil {
-		utils.AviLog.Fatalf("Error building AKO CRD clientset: %s", err.Error())
-	}
 	if lib.IsWCP() {
 		advl4Client, err = advl4.NewForConfig(cfg)
 		if err != nil {
@@ -151,6 +144,15 @@ func InitializeAKC() {
 			akoControlConfig.SetServicesAPIClientset(svcAPIClient)
 		}
 
+		// This is kept as MCI and Service Import uses v1alpha1
+		// In Next release, MCI and serviceImport should be taken out
+		crdClient, err = crd.NewForConfig(cfg)
+		if err != nil {
+			utils.AviLog.Fatalf("Error building AKO CRD clientset: %s", err.Error())
+		}
+		akoControlConfig.SetCRDClientset(crdClient)
+
+		akoControlConfig.Setv1beta1CRDClientset(v1beta1crdClient)
 		v1alpha2crdClient, err := v1alpha2crd.NewForConfig(cfg)
 		if err != nil {
 			utils.AviLog.Fatalf("Error building AKO CRD v1alpha2 clientset: %s", err.Error())
@@ -170,11 +172,24 @@ func InitializeAKC() {
 	}
 
 	akoControlConfig.SetEventRecorder(lib.AKOEventComponent, kubeClient, false)
-	pod, err := kubeClient.CoreV1().Pods(utils.GetAKONamespace()).Get(context.TODO(), os.Getenv("POD_NAME"), metav1.GetOptions{})
-	if err != nil {
-		utils.AviLog.Warnf("Error getting AKO pod details, %s.", err.Error())
+
+	// POD_NAME is not set in case of a WCP cluster
+	if os.Getenv("POD_NAME") == "" {
+		pods, err := kubeClient.CoreV1().Pods(utils.GetAKONamespace()).List(context.TODO(), metav1.ListOptions{Limit: 1})
+		if err != nil {
+			utils.AviLog.Warnf("Error getting AKO pod details, %s.", err.Error())
+		} else {
+			for _, pod := range pods.Items {
+				akoControlConfig.SaveAKOPodObjectMeta(&pod)
+			}
+		}
+	} else {
+		pod, err := kubeClient.CoreV1().Pods(utils.GetAKONamespace()).Get(context.TODO(), os.Getenv("POD_NAME"), metav1.GetOptions{})
+		if err != nil {
+			utils.AviLog.Warnf("Error getting AKO pod details, %s.", err.Error())
+		}
+		akoControlConfig.SaveAKOPodObjectMeta(pod)
 	}
-	akoControlConfig.SaveAKOPodObjectMeta(pod)
 
 	// Check for kubernetes apiserver version compatibility with AKO version.
 	if serverVersionInfo, err := kubeClient.Discovery().ServerVersion(); err != nil {
@@ -273,14 +288,15 @@ func InitializeAKC() {
 		lib.ShutdownApi()
 	}
 
-	aviRestClientPool := avicache.SharedAVIClients()
+	aviRestClientPool := avicache.SharedAVIClients(lib.GetTenant())
 	if aviRestClientPool == nil {
 		utils.AviLog.Fatalf("Avi client not initialized")
 	}
 
-	if lib.IsPrometheusEnabled() {
+	if akoControlConfig.GetAKOAKOPrometheusFlag() {
 		lib.RegisterPromMetrics()
 	}
+
 	if aviRestClientPool != nil && !avicache.IsAviClusterActive(aviRestClientPool.AviClient[0]) {
 		akoControlConfig.PodEventf(corev1.EventTypeWarning, lib.AKOShutdown, "Avi Controller Cluster state is not Active")
 		utils.AviLog.Fatalf("Avi Controller Cluster state is not Active, shutting down AKO")

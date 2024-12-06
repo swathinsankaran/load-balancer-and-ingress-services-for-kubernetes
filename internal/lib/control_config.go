@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -39,8 +40,9 @@ import (
 	v1beta1akocrd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/clientset/versioned"
 	v1beta1akoinformer "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/informers/externalversions/ako/v1beta1"
 
+	"github.com/vmware/alb-sdk/go/clients"
+
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/clients"
 
 	advl4crd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/service-apis/client/clientset/versioned"
 	advl4informer "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/service-apis/client/informers/externalversions/apis/v1alpha1pre1"
@@ -157,6 +159,15 @@ type akoControlConfig struct {
 
 	//Controller VRF Context is stored
 	controllerVRFContext string
+
+	//Prometheus enabled or not
+	isPrometheusEnabled bool
+
+	//endpointSlices Enabled
+	isEndpointSlicesEnabled bool
+
+	//fqdnReusePolicy is set to Strict/InterNamespaceAllowed according to whether AKO allows FQDN sharing across namespaces
+	fqdnReusePolicy string
 }
 
 var akoControlConfigInstance *akoControlConfig
@@ -193,6 +204,22 @@ func (c *akoControlConfig) SetAKOInstanceFlag(flag bool) {
 func (c *akoControlConfig) GetAKOInstanceFlag() bool {
 	return c.primaryaAKO
 }
+
+func (c *akoControlConfig) SetAKOPrometheusFlag(flag bool) {
+	c.isPrometheusEnabled = flag
+}
+
+func (c *akoControlConfig) GetAKOAKOPrometheusFlag() bool {
+	return c.isPrometheusEnabled
+}
+
+func (c *akoControlConfig) SetEndpointSlicesEnabled(flag bool) {
+	c.isEndpointSlicesEnabled = flag
+}
+func (c *akoControlConfig) GetEndpointSlicesEnabled() bool {
+	return c.isEndpointSlicesEnabled
+}
+
 func (c *akoControlConfig) SetAKOBlockedNSList(nsList []string) {
 	sort.Strings(nsList)
 	val := strings.Join(nsList, ":")
@@ -334,6 +361,27 @@ func (c *akoControlConfig) SetControllerVRFContext(v string) {
 	c.controllerVRFContext = v
 }
 
+func (c *akoControlConfig) SetAKOFQDNReusePolicy(FQDNPolicy string) {
+	// Empty or SNI deployment--> Allow across namespace
+	if FQDNPolicy == "" || !IsEvhEnabled() {
+		FQDNPolicy = FQDNReusePolicyOpen
+	}
+
+	if FQDNPolicy != FQDNReusePolicyOpen && FQDNPolicy != FQDNReusePolicyStrict {
+		// if not one of it, set it to open
+		FQDNPolicy = FQDNReusePolicyOpen
+	}
+	c.fqdnReusePolicy = FQDNPolicy
+	utils.AviLog.Infof("AKO FQDN reuse policy is: %s", c.fqdnReusePolicy)
+}
+
+// This utility returns FQDN Reuse policy of AKO.
+// Strict --> FQDN restrict to one namespace
+// InternamespaceAllowed --> FQDN can be spanned across multiple namespaces
+func (c *akoControlConfig) GetAKOFQDNReusePolicy() string {
+	return c.fqdnReusePolicy
+}
+
 func initControllerVersion() string {
 	version := os.Getenv("CTRL_VERSION")
 	if version == "" {
@@ -413,7 +461,15 @@ func (c *akoControlConfig) PodEventf(eventType, reason, message string, formatAr
 		}
 	}
 }
+func (c *akoControlConfig) IngressEventf(ingMeta metav1.ObjectMeta, eventType, reason, message string, formatArgs ...string) {
 
+	if len(formatArgs) > 0 {
+		c.EventRecorder().Eventf(&networkingv1.Ingress{ObjectMeta: ingMeta}, eventType, reason, message, formatArgs)
+	} else {
+		c.EventRecorder().Event(&networkingv1.Ingress{ObjectMeta: ingMeta}, eventType, reason, message)
+	}
+
+}
 func GetResponseFromURI(client *clients.AviClient, uri string) (models.SystemConfiguration, error) {
 	response := models.SystemConfiguration{}
 	err := AviGet(client, uri, &response)

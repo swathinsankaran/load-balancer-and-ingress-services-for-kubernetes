@@ -36,6 +36,15 @@ func DequeueIngestion(key string, fullsync bool) {
 	if !valid {
 		return
 	}
+	if objType == lib.HTTPRoute {
+		httpRoute, err := akogatewayapilib.AKOControlConfig().GatewayApiInformers().HTTPRouteInformer.Lister().HTTPRoutes(namespace).Get(name)
+		if err == nil {
+			utils.AviLog.Debugf("key: %s, msg: Successfully retrieved the HTTPRoute object %s", key, name)
+			if !IsHTTPRouteValid(key, httpRoute) {
+				return
+			}
+		}
+	}
 
 	gatewayNsNameList, found := schema.GetGateways(namespace, name, key)
 	if !found {
@@ -48,12 +57,27 @@ func DequeueIngestion(key string, fullsync bool) {
 		handleGateway(namespace, name, fullsync, key)
 	}
 
-	routeTypeNsNameList, found := schema.GetRoutes(namespace, name, key)
-	if !found {
-		utils.AviLog.Errorf("key: %s, msg: got error while getting object", key, objType)
-		return
+	if objType == utils.Service {
+		_, err := utils.GetInformers().ServiceInformer.Lister().Services(namespace).Get(name)
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				objects.SharedClusterIpLister().Delete(namespace + "/" + name)
+			} else {
+				utils.AviLog.Errorf("key: %s, msg: got error while getting service object", key)
+				return
+			}
+		}
+		objects.SharedClusterIpLister().Save(namespace+"/"+name, name)
 	}
 
+	var routeTypeNsNameList []string
+	if !(objType == lib.Gateway && fullsync) {
+		routeTypeNsNameList, found = schema.GetRoutes(namespace, name, key)
+		if !found {
+			utils.AviLog.Errorf("key: %s, msg: got error while getting object %s", key, objType)
+			return
+		}
+	}
 	utils.AviLog.Debugf("key: %s, msg: processing gateways %v and routes %v", key, gatewayNsNameList, routeTypeNsNameList)
 	for _, gatewayNsName := range gatewayNsNameList {
 
@@ -61,14 +85,40 @@ func DequeueIngestion(key string, fullsync bool) {
 		modelName := lib.GetModelName(lib.GetTenant(), akogatewayapilib.GetGatewayParentName(parentNs, parentName))
 
 		modelFound, modelIntf := objects.SharedAviGraphLister().Get(modelName)
-		if !modelFound || modelIntf == nil {
-			utils.AviLog.Errorf("key: %s, msg: no model found: %s", key, modelName)
+		// Seq: GW first and the secret created.
+		modelNil := !modelFound || modelIntf == nil
+		if objType == utils.Secret && modelNil {
+			handleGateway(parentNs, parentName, fullsync, key)
+			modelFound, modelIntf = objects.SharedAviGraphLister().Get(modelName)
+			modelNil = !modelFound || modelIntf == nil
+			if modelNil {
+				utils.AviLog.Warnf("key: %s, msg: no model found: %s", key, modelName)
+				continue
+			}
+			// Fetch routes for a gateway
+			routeTypeNsNameList, found = GatewayToRoutes(parentNs, parentName, key)
+			if !found {
+				utils.AviLog.Errorf("key: %s, msg: got error while getting route objects for gateway %s/%s", key, parentNs, parentName)
+				continue
+			}
+			utils.AviLog.Infof("key: %s, msg: Routes for gateway %s/%s are: %v", key, parentNs, parentName, utils.Stringify(routeTypeNsNameList))
+		} else if modelNil {
+			utils.AviLog.Warnf("key: %s, msg: no model found: %s", key, modelName)
 			continue
 		}
 
 		model := &AviObjectGraph{modelIntf.(*nodes.AviObjectGraph)}
 		if objType == utils.Secret {
-			handleSecrets(parentNs, parentName, key, model)
+			vsToDelete := handleSecrets(parentNs, parentName, key, model)
+			if vsToDelete {
+				utils.AviLog.Warnf("key: %s, msg: No valid listener on Gateway %s/%s. Removing Parent VS from Controller", key, parentNs, parentName)
+				objects.SharedAviGraphLister().Save(modelName, nil)
+				if !fullsync {
+					sharedQueue := utils.SharedWorkQueue().GetQueueByName(utils.GraphLayer)
+					nodes.PublishKeyToRestLayer(modelName, key, sharedQueue)
+					return
+				}
+			}
 		}
 		for _, routeTypeNsName := range routeTypeNsNameList {
 			objType, namespace, name := lib.ExtractTypeNameNamespace(routeTypeNsName)
@@ -78,7 +128,7 @@ func DequeueIngestion(key string, fullsync bool) {
 			if err != nil {
 				if k8serrors.IsNotFound(err) {
 					utils.AviLog.Infof("key: %s, msg: deleting configurations corresponding to route %s", key, routeTypeNsName)
-					model.ProcessRouteDeletion(key, routeModel, fullsync)
+					model.ProcessRouteDeletion(key, gatewayNsName, routeModel, fullsync)
 				}
 				continue
 			}
@@ -87,13 +137,14 @@ func DequeueIngestion(key string, fullsync bool) {
 
 			switch objType {
 			case lib.HTTPRoute:
-				model.ProcessL7Routes(key, routeModel, gatewayNsName, childVSes)
+				model.ProcessL7Routes(key, routeModel, gatewayNsName, childVSes, fullsync)
 			default:
 				utils.AviLog.Warnf("key: %s, msg: route of type %s not supported", key, objType)
 				continue
 			}
 			model.DeleteStaleChildVSes(key, routeModel, childVSes, fullsync)
 		}
+		model.AddDefaultHTTPPolicySet(key)
 
 		// Only add this node to the list of models if the checksum has changed.
 		modelChanged := saveAviModel(modelName, model.AviObjectGraph, key)
@@ -103,7 +154,7 @@ func DequeueIngestion(key string, fullsync bool) {
 		}
 	}
 }
-func handleSecrets(gatewayNamespace string, gatewayName string, key string, object *AviObjectGraph) {
+func handleSecrets(gatewayNamespace string, gatewayName string, key string, object *AviObjectGraph) bool {
 	_, _, secretName := lib.ExtractTypeNameNamespace(key)
 	utils.AviLog.Infof("key: %s, msg: Processing secret update %s has been added.", key, secretName)
 	cs := utils.GetInformers().ClientSet
@@ -111,7 +162,7 @@ func handleSecrets(gatewayNamespace string, gatewayName string, key string, obje
 	gatewayObj, err := akogatewayapilib.AKOControlConfig().GatewayApiInformers().GatewayInformer.Lister().Gateways(gatewayNamespace).Get(gatewayName)
 	if err != nil {
 		utils.AviLog.Errorf("key: %s, msg: unable to get the gateway object. err: %s", key, err)
-		return
+		return false
 	}
 	secretObj, err := cs.CoreV1().Secrets(gatewayNamespace).Get(context.TODO(), secretName, metav1.GetOptions{})
 	encodedCertNameIndexMap := make(map[string][]int)
@@ -125,11 +176,13 @@ func handleSecrets(gatewayNamespace string, gatewayName string, key string, obje
 	}
 	if err != nil || secretObj == nil {
 		utils.AviLog.Warnf("key: %s, msg: secret %s has been deleted, err: %s", key, secretName, err)
-		DeleteTLSNode(key, object, gatewayObj, secretObj, encodedCertNameIndexMap)
+		vsToDelete := DeleteTLSNode(key, object, gatewayObj, secretObj, encodedCertNameIndexMap)
+		return vsToDelete
 	} else {
 		utils.AviLog.Infof("key: %s, msg: secret %s has been added.", key, secretName)
 		AddTLSNode(key, object, gatewayObj, secretObj, encodedCertNameIndexMap)
 	}
+	return false
 }
 func handleGateway(namespace, name string, fullsync bool, key string) {
 	utils.AviLog.Debugf("key: %s, msg: processing gateway: %s", key, name)
@@ -150,6 +203,9 @@ func handleGateway(namespace, name string, fullsync bool, key string) {
 		}
 		utils.AviLog.Debugf("key: %s, msg: gateway not found: %s/%s", key, namespace, name)
 		if modelFound {
+			// As gateway is not present, we need to remove mapping.
+			gwNsName := namespace + "/" + name
+			akogatewayapiobjects.GatewayApiLister().DeleteGatewayFromStore(gwNsName)
 			objects.SharedAviGraphLister().Save(modelName, nil)
 			if !fullsync {
 				sharedQueue := utils.SharedWorkQueue().GetQueueByName(utils.GraphLayer)
@@ -212,28 +268,32 @@ func saveAviModel(modelName string, aviGraph *nodes.AviObjectGraph, key string) 
 	return true
 }
 
-func (o *AviObjectGraph) ProcessRouteDeletion(key string, routeModel RouteModel, fullsync bool) {
+func (o *AviObjectGraph) ProcessRouteDeletion(key, parentNsName string, routeModel RouteModel, fullsync bool) {
 
 	parentNode := o.GetAviEvhVS()
+	routeTypeNsName := routeModel.GetType() + "/" + routeModel.GetNamespace() + "/" + routeModel.GetName()
 
-	found, childVSNames := akogatewayapiobjects.GatewayApiLister().GetRouteToChildVS(routeModel.GetType() + "/" + routeModel.GetNamespace() + "/" + routeModel.GetName())
-	if !found {
-		utils.AviLog.Warnf("key: %s, msg: no child vs mapped to this route %s", key, routeModel.GetName())
-		return
+	found, childVSNames := akogatewayapiobjects.GatewayApiLister().GetRouteToChildVS(routeTypeNsName)
+
+	if found {
+		utils.AviLog.Infof("key: %s, msg: child VSes retrieved for deletion %v", key, childVSNames)
+
+		for _, childVSName := range childVSNames {
+			removed := nodes.RemoveEvhInModel(childVSName, parentNode, key)
+			if removed {
+				akogatewayapiobjects.GatewayApiLister().DeleteRouteChildVSMappings(routeTypeNsName, childVSName)
+			}
+		}
 	}
-	utils.AviLog.Infof("key: %s, msg: child VSes retrieved for deletion %v", key, childVSNames)
 
-	for _, childVSName := range childVSNames {
-		nodes.RemoveEvhInModel(childVSName, parentNode, key)
-	}
-	akogatewayapiobjects.GatewayApiLister().DeleteRouteToChildVS(routeModel.GetType() + "/" + routeModel.GetNamespace() + "/" + routeModel.GetName())
-
+	updateHostname(key, parentNsName, parentNode[0])
 	modelName := lib.GetTenant() + "/" + parentNode[0].Name
 	ok := saveAviModel(modelName, o.AviObjectGraph, key)
 	if ok && len(o.AviObjectGraph.GetOrderedNodes()) != 0 && !fullsync {
 		sharedQueue := utils.SharedWorkQueue().GetQueueByName(utils.GraphLayer)
 		nodes.PublishKeyToRestLayer(modelName, key, sharedQueue)
 	}
+
 }
 
 func (o *AviObjectGraph) DeleteStaleChildVSes(key string, routeModel RouteModel, childVSes map[string]struct{}, fullsync bool) {
@@ -245,8 +305,10 @@ func (o *AviObjectGraph) DeleteStaleChildVSes(key string, routeModel RouteModel,
 	for _, childVSName := range storedChildVSes {
 		if _, ok := childVSes[childVSName]; !ok {
 			utils.AviLog.Infof("key: %s, msg: child VS retrieved for deletion %v", key, childVSName)
-			nodes.RemoveEvhInModel(childVSName, parentNode, key)
-			akogatewayapiobjects.GatewayApiLister().DeleteRouteChildVSMappings(routeModel.GetType()+"/"+routeModel.GetNamespace()+"/"+routeModel.GetName(), childVSName)
+			removed := nodes.RemoveEvhInModel(childVSName, parentNode, key)
+			if removed {
+				akogatewayapiobjects.GatewayApiLister().DeleteRouteChildVSMappings(routeModel.GetType()+"/"+routeModel.GetNamespace()+"/"+routeModel.GetName(), childVSName)
+			}
 		}
 	}
 }

@@ -953,13 +953,13 @@ func (c *AviController) SetupServiceImportEventHandlers(numWorkers uint32) {
 	c.informers.ServiceImportInformer.Informer().AddEventHandler(serviceImportEventHandler)
 }
 
-func checkRefsOnController(key string, refMap map[string]string) error {
+func checkRefsOnController(key string, refMap map[string]string, tenant string) error {
 	for k, value := range refMap {
 		if k == "" {
 			continue
 		}
 
-		if err := checkRefOnController(key, value, k); err != nil {
+		if err := checkRefOnController(key, value, k, tenant); err != nil {
 			return err
 		}
 	}
@@ -992,10 +992,10 @@ var refModelMap = map[string]string{
 }
 
 // checkRefOnController checks whether a provided ref on the controller
-func checkRefOnController(key, refKey, refValue string) error {
+func checkRefOnController(key, refKey, refValue, tenant string) error {
 	// assign the last avi client for ref checks
 	aviClientLen := lib.GetshardSize()
-	clients := avicache.SharedAVIClients()
+	clients := avicache.SharedAVIClients(tenant)
 	uri := fmt.Sprintf("/api/%s?name=%s&fields=name,type,labels,created_by", refModelMap[refKey], refValue)
 
 	// For public clouds, check using network UUID in AWS, normal network API for GCP, skip altogether for Azure.
@@ -1094,7 +1094,7 @@ func checkForL4SSLAppProfile(key, refValue string) (bool, error) {
 	// assign the last avi client for ref checks
 	refKey := "AppProfile"
 	aviClientLen := lib.GetshardSize()
-	clients := avicache.SharedAVIClients()
+	clients := avicache.SharedAVIClients(lib.GetTenant())
 	uri := fmt.Sprintf("/api/%s?name=%s&fields=name,type,labels,created_by", refModelMap[refKey], refValue)
 
 	result, err := lib.AviGetCollectionRaw(clients.AviClient[aviClientLen], uri)
@@ -1122,9 +1122,11 @@ func checkForL4SSLAppProfile(key, refValue string) (bool, error) {
 	}
 	if appProfType, ok := item["type"].(string); ok {
 		if appProfType == lib.AllowedL4SSLApplicationProfile {
+			utils.AviLog.Infof("key: %s, msg: Ref found for %s/%s", key, refModelMap[refKey], refValue)
 			return true, nil
 		}
 		if appProfType == lib.AllowedL4ApplicationProfile {
+			utils.AviLog.Infof("key: %s, msg: Ref found for %s/%s", key, refModelMap[refKey], refValue)
 			return false, nil
 		}
 	}
@@ -1140,7 +1142,7 @@ func checkForNetworkProfileTypeTCP(key, refValue string) (bool, error) {
 	// assign the last avi client for ref checks
 	refKey := "NetworkProfile"
 	aviClientLen := lib.GetshardSize()
-	clients := avicache.SharedAVIClients()
+	clients := avicache.SharedAVIClients(lib.GetTenant())
 	uri := fmt.Sprintf("/api/%s?name=%s&fields=name,profile,labels,created_by", refModelMap[refKey], refValue)
 
 	result, err := lib.AviGetCollectionRaw(clients.AviClient[aviClientLen], uri)
@@ -1187,7 +1189,7 @@ func addSeGroupLabel(key, segName string) {
 	}
 
 	// assign the last avi client for ref checks
-	clients := avicache.SharedAVIClients()
+	clients := avicache.SharedAVIClients(lib.GetTenant())
 	aviClientLen := lib.GetshardSize()
 
 	// configure labels on SeGroup if not present already.
@@ -1202,12 +1204,13 @@ func addSeGroupLabel(key, segName string) {
 
 func SetAviInfrasettingVIPNetworks(name, segMgmtNetwork, infraSEGName string, netAviInfra []akov1beta1.AviInfraSettingVipNetwork) {
 	// assign the last avi client for ref checks
-	clients := avicache.SharedAVIClients()
+	clients := avicache.SharedAVIClients(lib.GetTenant())
 	aviClientLen := lib.GetshardSize()
 	network := netAviInfra
 	var err error
-	if lib.GetCloudType() == lib.CLOUD_VCENTER {
-		if infraSEGName == "" && segMgmtNetwork == "" {
+	if lib.GetCloudType() == lib.CLOUD_VCENTER || lib.GetCloudType() == lib.CLOUD_NONE {
+		// SEG mgmt network is required to find out host overlap. Not applicable for No Access cloud.
+		if lib.GetCloudType() == lib.CLOUD_VCENTER && infraSEGName == "" && segMgmtNetwork == "" {
 			segMgmtNetwork = avicache.GetCMSEGManagementNetwork(clients.AviClient[aviClientLen])
 		}
 		network, err = avicache.PopulateVipNetworkwithUUID(segMgmtNetwork, clients.AviClient[aviClientLen], netAviInfra)
@@ -1224,7 +1227,7 @@ func SetAviInfrasettingVIPNetworks(name, segMgmtNetwork, infraSEGName string, ne
 
 func SetAviInfrasettingNodeNetworks(name, segMgmtNetwork, infraSEGName string, netAviInfra []akov1beta1.AviInfraSettingNodeNetwork) {
 	// assign the last avi client for ref checks
-	clients := avicache.SharedAVIClients()
+	clients := avicache.SharedAVIClients(lib.GetTenant())
 	aviClientLen := lib.GetshardSize()
 	nodeNetorkList := make(map[string]lib.NodeNetworkMap)
 	var err error
@@ -1242,8 +1245,8 @@ func SetAviInfrasettingNodeNetworks(name, segMgmtNetwork, infraSEGName string, n
 		}
 	}
 
-	if lib.GetCloudType() == lib.CLOUD_VCENTER {
-		if infraSEGName == "" && segMgmtNetwork == "" {
+	if lib.GetCloudType() == lib.CLOUD_VCENTER || lib.GetCloudType() == lib.CLOUD_NONE {
+		if lib.GetCloudType() == lib.CLOUD_VCENTER && infraSEGName == "" && segMgmtNetwork == "" {
 			segMgmtNetwork = avicache.GetCMSEGManagementNetwork(clients.AviClient[aviClientLen])
 		}
 		ret := avicache.FetchNodeNetworks(segMgmtNetwork, clients.AviClient[aviClientLen], &err, nodeNetorkList)
@@ -1261,7 +1264,7 @@ func SetAviInfrasettingNodeNetworks(name, segMgmtNetwork, infraSEGName string, n
 func GetSEGManagementNetwork(name string) string {
 	mgmtNetwork := ""
 	// assign the last avi client for ref checks
-	clients := avicache.SharedAVIClients()
+	clients := avicache.SharedAVIClients(lib.GetTenant())
 	aviClientLen := lib.GetshardSize()
 	seg, err := avicache.GetAviSeGroup(clients.AviClient[aviClientLen], name)
 	if err == nil {

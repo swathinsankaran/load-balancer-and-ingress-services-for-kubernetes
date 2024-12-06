@@ -15,11 +15,17 @@
 package lib
 
 import (
+	"fmt"
+
+	"os"
+	"strings"
+
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 )
 
@@ -28,9 +34,17 @@ func InformersToRegister(kclient *kubernetes.Clientset) ([]string, error) {
 	// Services, Endpoints, Secrets, ConfigMaps.
 	allInformers := []string{
 		utils.ServiceInformer,
-		utils.EndpointInformer,
 		utils.SecretInformer,
 		utils.ConfigMapInformer,
+	}
+
+	if lib.AKOControlConfig().GetEndpointSlicesEnabled() {
+		allInformers = append(allInformers, utils.EndpointSlicesInformer)
+	} else if lib.GetServiceType() != lib.NodePortLocal {
+		allInformers = append(allInformers, utils.EndpointInformer)
+	}
+	if lib.GetServiceType() == lib.NodePortLocal {
+		allInformers = append(allInformers, utils.PodInformer)
 	}
 
 	return allInformers, nil
@@ -45,20 +59,35 @@ func GetGatewayParentName(namespace, gwName string) string {
 
 // child vs name format - ako-gw-clustername--encoded value of ako-gw-clustername--parentNs-parentName-routeNs-routeName-encodedMatch
 func GetChildName(parentNs, parentName, routeNs, routeName, matchName string) string {
-	name := parentNs + "-" + parentName + "-" + routeNs + "-" + routeName + "-" + utils.Stringify(utils.Hash(matchName))
+	name := parentNs + "-" + parentName + "-" + routeNs + "-" + routeName
+	if matchName != "" {
+		name = fmt.Sprintf("%s-%s", name, utils.Stringify(utils.Hash(matchName)))
+	}
 	return lib.Encode(name, lib.EVHVS)
 }
 
 func GetPoolName(parentNs, parentName, routeNs, routeName, matchName, backendNs, backendName, backendPort string) string {
-	name := parentNs + "-" + parentName + "-" + routeNs + "-" + routeName + "-" + utils.Stringify(utils.Hash(matchName)) + "-" + backendNs + "-" + backendName + "-" + backendPort
+	name := parentNs + "-" + parentName + "-" + routeNs + "-" + routeName + "-"
+	if matchName != "" {
+		name = fmt.Sprintf("%s%s-", name, utils.Stringify(utils.Hash(matchName)))
+	}
+	name = fmt.Sprintf("%s%s-%s-%s", name, backendNs, backendName, backendPort)
 	return lib.Encode(name, lib.Pool)
 }
 
 func GetPoolGroupName(parentNs, parentName, routeNs, routeName, matchName string) string {
-	name := parentNs + "-" + parentName + "-" + routeNs + "-" + routeName + "-" + utils.Stringify(utils.Hash(matchName))
+	name := parentNs + "-" + parentName + "-" + routeNs + "-" + routeName
+	if matchName != "" {
+		// TODO: Test it out
+		name = fmt.Sprintf("%s-%s", name, utils.Stringify(utils.Hash(matchName)))
+	}
 	return lib.Encode(name, lib.PG)
 }
 
+func GetHTTPRuleName(parentNs, parentName, routeNs, routeName, matchName string) string {
+	name := parentNs + "-" + parentName + "-" + routeNs + "-" + routeName + "-" + utils.Stringify(utils.Hash(matchName))
+	return lib.Encode(name, lib.HPPMAP)
+}
 func CheckGatewayClassController(controllerName string) bool {
 	return controllerName == lib.AviIngressController
 }
@@ -98,6 +127,9 @@ func FindPortName(serviceName, ns string, servicePort int32, key string) string 
 	utils.AviLog.Warnf("key: %s, msg: Port name not found in service obj: %v", key, svcObj)
 	return ""
 }
+func GetT1LRPath() string {
+	return os.Getenv("NSXT_T1_LR")
+}
 
 func FindTargetPort(serviceName, ns string, svcPort int32, key string) intstr.IntOrString {
 	// Query the service and obtain the targetPort
@@ -118,4 +150,43 @@ func FindTargetPort(serviceName, ns string, svcPort int32, key string) intstr.In
 		}
 	}
 	return intstr.IntOrString{}
+}
+func IsListenerInvalid(gwStatus *gatewayv1.GatewayStatus, listenerIndex int) bool {
+	if len(gwStatus.Listeners) > int(listenerIndex) && gwStatus.Listeners[listenerIndex].Conditions[0].Type == string(gatewayv1.ListenerConditionAccepted) && gwStatus.Listeners[listenerIndex].Conditions[0].Status == "False" {
+		return true
+	}
+	return false
+}
+func VerifyHostnameSubdomainMatch(hostname string) bool {
+	// Check if a hostname is valid or not by verifying if it has a prefix that
+	// matches any of the sub-domains.
+	subDomains := nodes.GetDefaultSubDomain()
+	if len(subDomains) == 0 {
+		// No IPAM DNS configured, we simply pass the hostname
+		return true
+	} else {
+		for _, subd := range subDomains {
+			if strings.HasSuffix(hostname, subd) {
+				return true
+			}
+		}
+	}
+	utils.AviLog.Warnf("Didn't find match for hostname :%s Available sub-domains:%s", hostname, subDomains)
+	return false
+}
+
+func ProtocolToRoute(proto string) string {
+	innerMap := map[string]string{
+		"HTTP":  lib.HTTPRoute,
+		"HTTPS": lib.HTTPRoute,
+		"TCP":   lib.TCPRoute,
+		"TLS":   lib.TLSRoute,
+		"UDP":   lib.UDPRoute,
+	}
+
+	return innerMap[proto]
+}
+
+func GetDefaultHTTPPSName() string {
+	return Prefix + lib.GetClusterName() + "--" + lib.DefaultPSName
 }

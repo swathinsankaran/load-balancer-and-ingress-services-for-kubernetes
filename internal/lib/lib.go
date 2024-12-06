@@ -27,21 +27,20 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/api"
 	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/clients"
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/session"
-
 	"github.com/Masterminds/semver"
 	routev1 "github.com/openshift/api/route/v1"
 	oshiftclient "github.com/openshift/client-go/route/clientset/versioned"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/vmware/alb-sdk/go/clients"
 	"github.com/vmware/alb-sdk/go/models"
+	"github.com/vmware/alb-sdk/go/session"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
@@ -51,6 +50,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
 	k8net "k8s.io/utils/net"
+
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 )
 
 var ShardSchemeMap = map[string]string{
@@ -79,18 +80,21 @@ type CRDMetadata struct {
 }
 
 type ServiceMetadataObj struct {
-	NamespaceIngressName  []string    `json:"namespace_ingress_name"`
-	IngressName           string      `json:"ingress_name"`
-	Namespace             string      `json:"namespace"`
-	HostNames             []string    `json:"hostnames"`
-	NamespaceServiceName  []string    `json:"namespace_svc_name"` // []string{ns/name}
-	CRDStatus             CRDMetadata `json:"crd_status"`
-	PoolRatio             uint32      `json:"pool_ratio"`
-	PassthroughParentRef  string      `json:"passthrough_parent_ref"`
-	PassthroughChildRef   string      `json:"passthrough_child_ref"`
-	Gateway               string      `json:"gateway"` // ns/name
-	InsecureEdgeTermAllow bool        `json:"insecureedgetermallow"`
-	IsMCIIngress          bool        `json:"is_mci_ingress"`
+	NamespaceIngressName       []string            `json:"namespace_ingress_name"`
+	IngressName                string              `json:"ingress_name"`
+	Namespace                  string              `json:"namespace"`
+	HostNames                  []string            `json:"hostnames"`
+	NamespaceServiceName       []string            `json:"namespace_svc_name"` // []string{ns/name}
+	CRDStatus                  CRDMetadata         `json:"crd_status"`
+	PoolRatio                  uint32              `json:"pool_ratio"`
+	PassthroughParentRef       string              `json:"passthrough_parent_ref"`
+	PassthroughChildRef        string              `json:"passthrough_child_ref"`
+	Gateway                    string              `json:"gateway"`   // ns/name
+	HTTPRoute                  string              `json:"httproute"` // ns/name
+	InsecureEdgeTermAllow      bool                `json:"insecureedgetermallow"`
+	IsMCIIngress               bool                `json:"is_mci_ingress"`
+	FQDNReusePolicy            string              `json:"fqdn_reuse_policy"`
+	HostToNamespaceIngressName map[string][]string `json:"host_namespace_ingress_name"`
 }
 
 type ServiceMetadataMappingObjType string
@@ -192,17 +196,17 @@ func RegisterPromMetrics() *prometheus.Registry {
 }
 
 func IncrementQueueCounter(queueName string) {
-	if IsPrometheusEnabled() {
+	if AKOControlConfig().GetAKOAKOPrometheusFlag() {
 		ObjectsInQueue.With(prometheus.Labels{"queuename": queueName}).Inc()
 	}
 }
 func DecrementQueueCounter(queueName string) {
-	if IsPrometheusEnabled() {
+	if AKOControlConfig().GetAKOAKOPrometheusFlag() {
 		ObjectsInQueue.With(prometheus.Labels{"queuename": queueName}).Dec()
 	}
 }
 func IncrementRestOpCouter(restOpMethod, objName string) {
-	if IsPrometheusEnabled() {
+	if AKOControlConfig().GetAKOAKOPrometheusFlag() {
 		TotalRestOp.Inc()
 		RestOpPerKeyType.With(prometheus.Labels{"type": restOpMethod, "key": objName}).Inc()
 	}
@@ -211,6 +215,7 @@ func IncrementRestOpCouter(restOpMethod, objName string) {
 type VSNameMetadata struct {
 	Name      string
 	Dedicated bool
+	Tenant    string
 }
 
 var NamePrefix string
@@ -269,7 +274,7 @@ func GetNSXTTransportZone() string {
 	return NsxTTzType
 }
 
-func GetFqdns(vsName, key string, subDomains []string, shardSize uint32) ([]string, string) {
+func GetFqdns(vsName, key, tenant string, subDomains []string, shardSize uint32) ([]string, string) {
 	var fqdns []string
 	var fqdn string
 
@@ -298,12 +303,12 @@ func GetFqdns(vsName, key string, subDomains []string, shardSize uint32) ([]stri
 		}
 		if GetL4FqdnFormat() == AutoFQDNDefault {
 			// Generate the FQDN based on the logic: <svc_name>.<namespace>.<sub-domain>
-			fqdn = vsName + "." + GetTenant() + "." + subdomain
+			fqdn = vsName + "." + tenant + "." + subdomain
 		} else if GetL4FqdnFormat() == AutoFQDNFlat {
 			// Generate the FQDN based on the logic: <svc_name>-<namespace>.<sub-domain>
-			fqdn = vsName + "-" + GetTenant() + "." + subdomain
+			fqdn = vsName + "-" + tenant + "." + subdomain
 		}
-		objects.SharedCRDLister().UpdateFQDNSharedVSModelMappings(fqdn, GetModelName(GetTenant(), vsName))
+		objects.SharedCRDLister().UpdateFQDNSharedVSModelMappings(fqdn, GetModelName(tenant, vsName))
 		utils.AviLog.Infof("key: %s, msg: Configured the shared VS with default fqdn as: %s", key, fqdn)
 		fqdns = append(fqdns, fqdn)
 	}
@@ -437,8 +442,8 @@ func GetL4PoolName(svcName, namespace, protocol string, port int32) string {
 	return Encode(poolName, L4Pool)
 }
 
-func GetAdvL4PoolName(svcName, namespace, gwName string, port int32) string {
-	poolName := NamePrefix + namespace + "-" + svcName + "-" + gwName + "--" + strconv.Itoa(int(port))
+func GetAdvL4PoolName(svcName, namespace, gwName, protocol string, port int32) string {
+	poolName := NamePrefix + namespace + "-" + svcName + "-" + gwName + "-" + protocol + "--" + strconv.Itoa(int(port))
 	return Encode(poolName, L4AdvPool)
 }
 
@@ -540,6 +545,18 @@ func GetSniPoolName(ingName, namespace, host, path, infrasetting string, dedicat
 	return poolName
 }
 
+func GetEncodedSniPGPoolNameforRegex(poolName string) string {
+	hash := sha1.Sum([]byte(poolName))
+	encodedStr := GetNamePrefix() + hex.EncodeToString(hash[:])
+	return encodedStr
+}
+
+func GetEncodedStringGroupName(host, path string) string {
+	hash := sha1.Sum([]byte(host + path))
+	encodedStr := GetAKOUser() + "-" + hex.EncodeToString(hash[:])
+	return encodedStr
+}
+
 func GetSniHttpPolName(namespace, host, infrasetting string) string {
 
 	if infrasetting != "" {
@@ -547,6 +564,7 @@ func GetSniHttpPolName(namespace, host, infrasetting string) string {
 	}
 	return Encode(NamePrefix+namespace+"-"+host, HTTPPS)
 }
+
 func GetSniHppMapName(ingName, namespace, host, path, infrasetting string, dedicatedVS bool) string {
 	path = strings.ReplaceAll(path, "/", "_")
 	hppmap := NamePrefix
@@ -619,26 +637,21 @@ func GetEvhPGName(ingName, namespace, host, path, infrasetting string, dedicated
 
 func IsSecretK8sSecretRef(secret string) bool {
 	re := regexp.MustCompile(fmt.Sprintf(`^%s.*`, DummySecretK8s))
-	if re.MatchString(secret) {
-		return true
-	}
-	return false
+	return re.MatchString(secret)
 }
 
 func IsSecretAviCertRef(secret string) bool {
 	re := regexp.MustCompile(fmt.Sprintf(`^%s.*`, DummySecret))
-	if re.MatchString(secret) {
-		return true
-	}
-	return false
+	return re.MatchString(secret)
 }
 
 func GetTLSKeyCertNodeName(infrasetting, sniHostName, secretName string) string {
 	if IsSecretK8sSecretRef(secretName) {
-		secretName = strings.Split(secretName, "/")[2]
-		if secretName == GetDefaultSecretForRoutes() {
-			return Encode(secretName, TLSKeyCert)
-		}
+		secretNameSlice := strings.Split(secretName, "/")
+		secretName = secretNameSlice[len(secretNameSlice)-1]
+	}
+	if secretName == GetDefaultSecretForRoutes() || secretName == GetDefaultSecretForRoutes()+"-alt" {
+		return Encode(NamePrefix+secretName, TLSKeyCert)
 	}
 	namePrefix := NamePrefix
 	if infrasetting != "" {
@@ -686,6 +699,13 @@ func GetVrf() string {
 		return utils.GlobalVRF
 	}
 	return VRFContext
+}
+
+func GetVPCMode() bool {
+	if vpcMode, _ := strconv.ParseBool(os.Getenv("VPC_MODE")); vpcMode {
+		return true
+	}
+	return false
 }
 
 func GetAdminTenant() string {
@@ -754,14 +774,12 @@ func GetAkoApiServerPort() string {
 	return "8080"
 }
 
-// TODO: Can be optimized by setting up variable at bootup and then do GET for that
-// instead of fetching each time.
 func IsPrometheusEnabled() bool {
 	if ok, _ := strconv.ParseBool(os.Getenv("PROMETHEUS_ENABLED")); ok {
-		utils.AviLog.Debugf("Prometheus is enabled")
+		utils.AviLog.Infof("Prometheus is enabled")
 		return true
 	}
-	utils.AviLog.Debugf("Prometheus is not enabled")
+	utils.AviLog.Infof("Prometheus is not enabled")
 	return false
 }
 
@@ -776,28 +794,35 @@ func GetVipNetworkList() []akov1beta1.AviInfraSettingVipNetwork {
 	return VipNetworkList
 }
 
+var vipInfraSyncMap sync.Map
+
 func SetVipInfraNetworkList(infraName string, vipNetworks []akov1beta1.AviInfraSettingVipNetwork) {
-	if VipInfraNetworkList == nil {
-		VipInfraNetworkList = make(map[string][]akov1beta1.AviInfraSettingVipNetwork)
-	}
-	VipInfraNetworkList[infraName] = vipNetworks
+	vipInfraSyncMap.Store(infraName, vipNetworks)
 }
 
 func GetVipInfraNetworkList(infraName string) []akov1beta1.AviInfraSettingVipNetwork {
-	return VipInfraNetworkList[infraName]
+	val, present := vipInfraSyncMap.Load(infraName)
+	if present {
+		return val.([]akov1beta1.AviInfraSettingVipNetwork)
+	}
+	utils.AviLog.Warnf("Key: Error in fetching VIP network associated with AviInfrasetting %s. Using VIP network from configmap", infraName)
+	return utils.GetVipNetworkList()
 }
 
 var NodeInfraNetworkList map[string]map[string]NodeNetworkMap
+var nodeInfraSyncMap sync.Map
 
 func SetNodeInfraNetworkList(name string, nodeNetworks map[string]NodeNetworkMap) {
-	if NodeInfraNetworkList == nil {
-		NodeInfraNetworkList = make(map[string]map[string]NodeNetworkMap)
-	}
-	NodeInfraNetworkList[name] = nodeNetworks
+	nodeInfraSyncMap.Store(name, nodeNetworks)
 }
 
 func GetNodeInfraNetworkList(name string) map[string]NodeNetworkMap {
-	return NodeInfraNetworkList[name]
+	val, present := nodeInfraSyncMap.Load(name)
+	if present {
+		return val.(map[string]NodeNetworkMap)
+	}
+	utils.AviLog.Warnf("Key: Error in fetching node network list associated with AviInfrasetting %s. Using node network list from configmap", name)
+	return GetNodeNetworkMap()
 }
 
 func GetVipNetworkListEnv() ([]akov1beta1.AviInfraSettingVipNetwork, error) {
@@ -832,6 +857,14 @@ func GetGlobalBgpPeerLabels() []string {
 		utils.AviLog.Warnf("Unable to fetch the BGP Peer labels from environment variables.")
 	}
 	return bgpPeerLabels
+}
+
+func GetEndpointSliceEnabled() bool {
+	flag, err := strconv.ParseBool(os.Getenv("ENDPOINTSLICES_ENABLED"))
+	if err != nil {
+		flag = false
+	}
+	return flag
 }
 
 func GetGlobalBlockedNSList() []string {
@@ -930,6 +963,17 @@ func GetDomain() string {
 	return ""
 }
 
+func GetHostnameforSubdomain(subdomain string) string {
+	if subdomain == "" || GetDomain() == "" {
+		return ""
+	}
+	if strings.HasPrefix(GetDomain(), ".") {
+		return subdomain + GetDomain()
+	} else {
+		return subdomain + "." + GetDomain()
+	}
+}
+
 // This utility returns a true/false depending on whether
 // the user requires advanced L4 functionality
 func GetAdvancedL4() bool {
@@ -961,23 +1005,8 @@ func FetchSEGroupWithMarkerSet(client *clients.AviClient, overrideUri ...NextPag
 	var result session.AviCollectionResult
 	result, err := AviGetCollectionRaw(client, uri)
 	if err != nil {
-		if aviError, ok := err.(session.AviError); ok && aviError.HttpStatusCode == 403 {
-			//SE in provider context no read access
-			utils.AviLog.Debugf("Switching to admin context from  %s", GetTenant())
-			SetAdminTenant := session.SetTenant(GetAdminTenant())
-			SetTenant := session.SetTenant(GetTenant())
-			SetAdminTenant(client.AviSession)
-			defer SetTenant(client.AviSession)
-			result, err = AviGetCollectionRaw(client, uri)
-			if err != nil {
-				utils.AviLog.Errorf("Get uri %v returned err %v", uri, err)
-				return err, ""
-
-			}
-		} else {
-			utils.AviLog.Errorf("Get uri %v returned err %v", uri, err)
-			return err, ""
-		}
+		utils.AviLog.Errorf("Get uri %v returned err %v", uri, err)
+		return err, ""
 	}
 
 	elems := make([]json.RawMessage, result.Count)
@@ -1075,11 +1104,7 @@ func GetClusterName() string {
 	if IsWCP() {
 		return GetClusterIDSplit()
 	}
-	clusterName := os.Getenv(CLUSTER_NAME)
-	if clusterName != "" {
-		return clusterName
-	}
-	return ""
+	return os.Getenv(CLUSTER_NAME)
 }
 
 func SetClusterID(clusterID string) {
@@ -1090,13 +1115,9 @@ func GetClusterID() string {
 	if utils.IsVCFCluster() {
 		return ClusterID
 	}
-	clusterID := os.Getenv(CLUSTER_ID)
 	// The clusterID is an internal field only in the advanced L4 mode and we expect the format to be: domain-c8:3fb16b38-55f0-49fb-997d-c117487cd98d
 	// We want to truncate this string to just have the uuid.
-	if clusterID != "" {
-		return clusterID
-	}
-	return ""
+	return os.Getenv(CLUSTER_ID)
 }
 
 func GetClusterIDSplit() string {
@@ -1244,6 +1265,22 @@ func DSChecksum(pgrefs []string, markers []*models.RoleFilterMatchLabel, populat
 	return checksum
 }
 
+func StringGroupChecksum(keyvalue []*models.KeyValue, markers []*models.RoleFilterMatchLabel, longestMatch *bool, populateCache bool) uint32 {
+	var checksum uint32
+	if populateCache {
+		if markers != nil {
+			checksum += ObjectLabelChecksum(markers)
+		}
+		return checksum
+	}
+	checksum += GetClusterLabelChecksum()
+	checksum += utils.Hash(utils.Stringify(keyvalue))
+	if longestMatch != nil {
+		checksum += utils.Hash(utils.Stringify(*longestMatch))
+	}
+	return checksum
+}
+
 func GetAnalyticsPolicyChecksum(analyticsPolicy *models.AnalyticsPolicy) uint32 {
 	return utils.Hash(utils.Stringify(analyticsPolicy)) + GetClusterLabelChecksum()
 }
@@ -1363,13 +1400,15 @@ func InformersToRegister(kclient *kubernetes.Clientset, oclient *oshiftclient.Cl
 	// Services, Endpoints, Secrets, ConfigMaps and Namespaces.
 	allInformers := []string{
 		utils.ServiceInformer,
-		utils.EndpointInformer,
 		utils.SecretInformer,
 		utils.ConfigMapInformer,
 		utils.NSInformer,
 	}
-
-	// AKO must watch over Pods in case of NodePortLocal, to get Antrea annotation values.
+	if AKOControlConfig().GetEndpointSlicesEnabled() {
+		allInformers = append(allInformers, utils.EndpointSlicesInformer)
+	} else if GetServiceType() != NodePortLocal {
+		allInformers = append(allInformers, utils.EndpointInformer)
+	}
 	if GetServiceType() == NodePortLocal {
 		allInformers = append(allInformers, utils.PodInformer)
 	}
@@ -1876,8 +1915,8 @@ func RefreshAuthToken(kc kubernetes.Interface) {
 			utils.AviLog.Errorf("Failed to parse token object")
 			return
 		}
-		layout := "2006-01-02T15:04:05.000000+00:00"
-		expiryTime, err := time.Parse(layout, expiry)
+		expiryTime, err := time.Parse(time.RFC3339, expiry)
+
 		if err != nil {
 			utils.AviLog.Errorf("Unable to parse token expiry time, err: %+v", err)
 			return
@@ -2202,18 +2241,18 @@ func GetIPFromNode(node *v1.Node) (string, string) {
 
 	if cniPlugin == CALICO_CNI {
 		if v4enabled {
-			if nodeIP, ok := node.Annotations["projectcalico.org/IPv4Address"]; ok {
+			if nodeIP, ok := node.Annotations[CalicoIPv4AddressAnnotation]; ok {
 				nodeV4 = strings.Split(nodeIP, "/")[0]
 			}
 		}
 		if v6enabled {
-			if nodeIP, ok := node.Annotations["projectcalico.org/IPv6Address"]; ok {
+			if nodeIP, ok := node.Annotations[CalicoIPv6AddressAnnotation]; ok {
 				nodeV6 = strings.Split(nodeIP, "/")[0]
 			}
 		}
 
 	} else if cniPlugin == ANTREA_CNI {
-		if nodeIPstr, ok := node.Annotations["node.antrea.io/transport-addresses"]; ok {
+		if nodeIPstr, ok := node.Annotations[AntreaTransportAddressAnnotation]; ok {
 			nodeIPlist := strings.Split(nodeIPstr, ",")
 			for _, nodeIP := range nodeIPlist {
 				if v4enabled && utils.IsV4(nodeIP) {
@@ -2246,4 +2285,13 @@ func init() {
 		seGroupToUse = DEFAULT_SE_GROUP
 	}
 	SEGroupName = seGroupToUse
+}
+
+func ValidServiceType(service *v1.Service) bool {
+	switch service.Spec.Type {
+	case v1.ServiceTypeLoadBalancer, v1.ServiceTypeClusterIP, v1.ServiceTypeNodePort:
+		return true
+	default:
+		return false
+	}
 }

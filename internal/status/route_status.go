@@ -238,8 +238,13 @@ func UpdateRouteStatusWithErrMsg(key, routeName, namespace, msg string, retryNum
 		Type:               routev1.RouteAdmitted,
 	}
 
+	routeHost := mRoute.Spec.Host
+	if routeHost == "" {
+		routeHost = lib.GetHostnameforSubdomain(mRoute.Spec.Subdomain)
+	}
+
 	rtIngress := routev1.RouteIngress{
-		Host:       mRoute.Spec.Host,
+		Host:       routeHost,
 		RouterName: lib.AKOUser,
 		Conditions: []routev1.RouteIngressCondition{
 			condition,
@@ -268,7 +273,7 @@ func UpdateRouteStatusWithErrMsg(key, routeName, namespace, msg string, retryNum
 	return
 }
 
-func routeVsUUIDStatus(key, hostname string, updateOption UpdateOptions) string {
+func routeVsUUIDStatus(key, hostname, namespace string, updateOption UpdateOptions) string {
 	vsAnnotations := make(map[string]string)
 	ctrlAnnotationValStr := avicache.GetControllerClusterUUID()
 	for i := 0; i < len(updateOption.ServiceMetadata.HostNames); i++ {
@@ -286,6 +291,7 @@ func routeVsUUIDStatus(key, hostname string, updateOption UpdateOptions) string 
 	patchPayload := map[string]string{
 		lib.VSAnnotation:         vsAnnotationsStrStr,
 		lib.ControllerAnnotation: ctrlAnnotationValStr,
+		lib.TenantAnnotation:     updateOption.Tenant,
 	}
 	return utils.Stringify(patchPayload)
 }
@@ -339,7 +345,7 @@ func updateRouteObject(mRoute *routev1.Route, updateOption UpdateOptions, retryN
 		for _, vip := range updateOption.Vip {
 			// In 1.12.1, populate both reason and annotation fields.
 			//So that during upgrade there will not be any issue of GSLB pools going down.
-			reason := routeVsUUIDStatus(key, host, updateOption)
+			reason := routeVsUUIDStatus(key, host, mRoute.Namespace, updateOption)
 			condition := routev1.RouteIngressCondition{
 				Message:            vip,
 				Status:             corev1.ConditionTrue,
@@ -359,8 +365,12 @@ func updateRouteObject(mRoute *routev1.Route, updateOption UpdateOptions, retryN
 	}
 
 	// remove the host from status which is not in spec
+	routeHost := mRoute.Spec.Host
+	if routeHost == "" {
+		routeHost = lib.GetHostnameforSubdomain(mRoute.Spec.Subdomain)
+	}
 	for i := len(mRoute.Status.Ingress) - 1; i >= 0; i-- {
-		if mRoute.Status.Ingress[i].RouterName == lib.AKOUser && mRoute.Spec.Host != mRoute.Status.Ingress[i].Host {
+		if mRoute.Status.Ingress[i].RouterName == lib.AKOUser && routeHost != mRoute.Status.Ingress[i].Host {
 			mRoute.Status.Ingress = append(mRoute.Status.Ingress[:i], mRoute.Status.Ingress[i+1:]...)
 		}
 	}
@@ -397,7 +407,7 @@ func updateRouteObject(mRoute *routev1.Route, updateOption UpdateOptions, retryN
 		utils.AviLog.Debugf("key: %s, msg: No changes detected in route status. old: %+v new: %+v",
 			key, oldRouteStatus.Ingress, mRoute.Status.Ingress)
 	}
-	err = updateRouteAnnotations(updatedRoute, updateOption, mRoute, key, mRoute.Spec.Host)
+	err = updateRouteAnnotations(updatedRoute, updateOption, mRoute, key, routeHost)
 
 	return err
 }
@@ -433,10 +443,9 @@ func updateRouteAnnotations(mRoute *routev1.Route, updateOption UpdateOptions, o
 			delete(vsAnnotations, k)
 		}
 	}
-
 	// compare the VirtualService annotations for this Route object
-	if req := isAnnotationsUpdateRequired(mRoute.Annotations, vsAnnotations); req {
-		if err := patchRouteAnnotations(mRoute, vsAnnotations); err != nil && k8serrors.IsNotFound(err) {
+	if req := isAnnotationsUpdateRequired(mRoute.Annotations, vsAnnotations, updateOption.Tenant, false); req {
+		if err := patchRouteAnnotations(mRoute, vsAnnotations, updateOption.Tenant); err != nil && k8serrors.IsNotFound(err) {
 			utils.AviLog.Errorf("key: %s, msg: error in updating the route annotations: %v", key, err)
 			// fetch updated route and retry for updating annotations
 			mRoutes := getRoutes([]string{mRoute.Namespace + "/" + mRoute.Name}, false)
@@ -454,8 +463,8 @@ func updateRouteAnnotations(mRoute *routev1.Route, updateOption UpdateOptions, o
 	return nil
 }
 
-func patchRouteAnnotations(mRoute *routev1.Route, vsAnnotations map[string]string) error {
-	patchPayloadBytes, err := getAnnotationsPayload(vsAnnotations, mRoute.GetAnnotations())
+func patchRouteAnnotations(mRoute *routev1.Route, vsAnnotations map[string]string, tenant string) error {
+	patchPayloadBytes, err := getAnnotationsPayload(vsAnnotations, tenant)
 	if err != nil {
 		return fmt.Errorf("error in generating payload for vs annotations %v: %v", vsAnnotations, err)
 	}
@@ -580,13 +589,17 @@ func deleteRouteObject(option UpdateOptions, key string, isVSDelete bool, retryN
 
 	utils.AviLog.Infof("key: %s, deleting hostnames %v from Route status %s/%s", key, option.ServiceMetadata.HostNames, option.ServiceMetadata.Namespace, option.ServiceMetadata.IngressName)
 	svcMdataHostname := option.ServiceMetadata.HostNames[0]
+	routeHost := mRoute.Spec.Host
+	if routeHost == "" {
+		routeHost = lib.GetHostnameforSubdomain(mRoute.Spec.Subdomain)
+	}
 	for i := len(mRoute.Status.Ingress) - 1; i >= 0; i-- {
 		if mRoute.Status.Ingress[i].Host != svcMdataHostname {
 			continue
 		}
 		// Check if this host is still present in the spec, if so - don't delete it
 		// NS migration case: if false -> ns invalid event happened so remove status
-		if mRoute.Status.Ingress[i].RouterName == lib.AKOUser && (mRoute.Spec.Host != svcMdataHostname || isVSDelete || !utils.CheckIfNamespaceAccepted(option.ServiceMetadata.Namespace)) {
+		if mRoute.Status.Ingress[i].RouterName == lib.AKOUser && (routeHost != svcMdataHostname || isVSDelete || !utils.CheckIfNamespaceAccepted(option.ServiceMetadata.Namespace)) {
 			mRoute.Status.Ingress = append(mRoute.Status.Ingress[:i], mRoute.Status.Ingress[i+1:]...)
 		} else {
 			utils.AviLog.Debugf("key: %s, msg: skipping status update since host is present in the route: %v", key, svcMdataHostname)
@@ -620,11 +633,11 @@ func deleteRouteObject(option UpdateOptions, key string, isVSDelete bool, retryN
 		}
 	}
 
-	return deleteRouteAnnotation(updatedRoute, option.ServiceMetadata, isVSDelete, mRoute.Spec.Host, key, mRoute)
+	return deleteRouteAnnotation(updatedRoute, option.ServiceMetadata, isVSDelete, routeHost, key, option.Tenant, mRoute)
 }
 
 func deleteRouteAnnotation(routeObj *routev1.Route, svcMeta lib.ServiceMetadataObj, isVSDelete bool,
-	routeHost string, key string, oldRoute *routev1.Route, retryNum ...int) error {
+	routeHost string, key, tenant string, oldRoute *routev1.Route, retryNum ...int) error {
 	if routeObj == nil {
 		routeObj = oldRoute
 	}
@@ -661,11 +674,10 @@ func deleteRouteAnnotation(routeObj *routev1.Route, svcMeta lib.ServiceMetadataO
 			}
 		}
 	}
-
-	if isAnnotationsUpdateRequired(routeObj.Annotations, existingAnnotations) {
-		if err := patchRouteAnnotations(routeObj, existingAnnotations); err != nil && k8serrors.IsNotFound(err) {
+	if isAnnotationsUpdateRequired(routeObj.Annotations, existingAnnotations, tenant, isVSDelete) {
+		if err := patchRouteAnnotations(routeObj, existingAnnotations, tenant); err != nil && k8serrors.IsNotFound(err) {
 			utils.AviLog.Errorf("key: %s, msg: error in updating route annotations: %v, will retry", err)
-			return deleteRouteAnnotation(routeObj, svcMeta, isVSDelete, routeHost, key, oldRoute, retry+1)
+			return deleteRouteAnnotation(routeObj, svcMeta, isVSDelete, routeHost, key, tenant, oldRoute, retry+1)
 		}
 		utils.AviLog.Debugf("key: %s, msg: annotations updated for route", key)
 	}

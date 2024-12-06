@@ -91,6 +91,7 @@ func Initialize() {
 	lib.SetNamePrefix(akogatewaylib.Prefix)
 	//TODO handle leader logic, must not be used with HA
 	lib.AKOControlConfig().SetIsLeaderFlag(true)
+	lib.AKOControlConfig().SetEndpointSlicesEnabled(lib.GetEndpointSliceEnabled())
 
 	gwApiClient, err := gatewayclientset.NewForConfig(cfg)
 	if err != nil {
@@ -134,7 +135,7 @@ func Initialize() {
 		lib.ShutdownApi()
 	}
 
-	aviRestClientPool := avicache.SharedAVIClients()
+	aviRestClientPool := avicache.SharedAVIClients(lib.GetTenant())
 	if aviRestClientPool == nil {
 		utils.AviLog.Fatalf("Avi client not initialized")
 	}

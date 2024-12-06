@@ -40,12 +40,15 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
-var KubeClient *k8sfake.Clientset
-var CRDClient *crdfake.Clientset
-var V1beta1Client *v1beta1crdfake.Clientset
-
-var ctrl *k8s.AviController
-var akoApiServer *api.FakeApiServer
+var (
+	KubeClient           *k8sfake.Clientset
+	CRDClient            *crdfake.Clientset
+	V1beta1Client        *v1beta1crdfake.Clientset
+	endpointSliceEnabled bool
+	ctrl                 *k8s.AviController
+	akoApiServer         *api.FakeApiServer
+	objNameMap           integrationtest.ObjectNameMap
+)
 
 func TestMain(m *testing.M) {
 	os.Setenv("INGRESS_API", "extensionv1")
@@ -60,6 +63,8 @@ func TestMain(m *testing.M) {
 	os.Setenv("POD_NAME", "ako-0")
 
 	akoControlConfig := lib.AKOControlConfig()
+	endpointSliceEnabled = lib.GetEndpointSliceEnabled()
+	akoControlConfig.SetEndpointSlicesEnabled(endpointSliceEnabled)
 	akoControlConfig.SetAKOInstanceFlag(true)
 	KubeClient = k8sfake.NewSimpleClientset()
 	CRDClient = crdfake.NewSimpleClientset()
@@ -77,13 +82,17 @@ func TestMain(m *testing.M) {
 
 	registeredInformers := []string{
 		utils.ServiceInformer,
-		utils.EndpointInformer,
 		utils.IngressInformer,
 		utils.IngressClassInformer,
 		utils.SecretInformer,
 		utils.NSInformer,
 		utils.NodeInformer,
 		utils.ConfigMapInformer,
+	}
+	if akoControlConfig.GetEndpointSlicesEnabled() {
+		registeredInformers = append(registeredInformers, utils.EndpointSlicesInformer)
+	} else {
+		registeredInformers = append(registeredInformers, utils.EndpointInformer)
 	}
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: KubeClient}, registeredInformers)
 	informers := k8s.K8sinformers{Cs: KubeClient}
@@ -128,50 +137,106 @@ func TestMain(m *testing.M) {
 	integrationtest.AddDefaultNamespace()
 
 	go ctrl.InitController(informers, registeredInformers, ctrlCh, stopCh, quickSyncCh, waitGroupMap)
+	objNameMap.InitMap()
 	os.Exit(m.Run())
 }
 
-func SetUpTestForIngress(t *testing.T, modelNames ...string) {
+type IngressTestObject struct {
+	ingressName string
+	namespace   string
+	dnsNames    []string
+	ipAddrs     []string
+	hostnames   []string
+	paths       []string
+	isTLS       bool
+	withSecret  bool
+	secretName  string
+	serviceName string
+	modelNames  []string
+}
+
+func (ing *IngressTestObject) FillParams() {
+	if ing.namespace == "" {
+		ing.namespace = "default"
+	}
+	if len(ing.dnsNames) == 0 {
+		ing.dnsNames = append(ing.dnsNames, "foo.com")
+	}
+	if len(ing.ipAddrs) == 0 {
+		ing.ipAddrs = append(ing.ipAddrs, "8.8.8.8")
+	}
+	if len(ing.hostnames) == 0 {
+		ing.hostnames = append(ing.hostnames, "v1")
+	}
+	if len(ing.paths) == 0 {
+		ing.paths = append(ing.paths, "/foo")
+	}
+}
+
+func SetUpTestForIngress(t *testing.T, svcName string, modelNames ...string) {
 	for _, model := range modelNames {
 		objects.SharedAviGraphLister().Delete(model)
 	}
-	integrationtest.CreateSVC(t, "default", "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
-	integrationtest.CreateEP(t, "default", "avisvc", false, false, "1.1.1")
+	integrationtest.CreateSVC(t, "default", svcName, corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
+	integrationtest.CreateEPorEPS(t, "default", svcName, false, false, "1.1.1")
 }
 
-func TearDownTestForIngress(t *testing.T, modelNames ...string) {
+func TearDownTestForIngress(t *testing.T, svcName string, modelNames ...string) {
 	for _, model := range modelNames {
 		objects.SharedAviGraphLister().Delete(model)
 	}
-	integrationtest.DelSVC(t, "default", "avisvc")
-	integrationtest.DelEP(t, "default", "avisvc")
+	integrationtest.DelSVC(t, "default", svcName)
+	integrationtest.DelEPorEPS(t, "default", svcName)
 }
 
-func SetUpIngressForCacheSyncCheck(t *testing.T, tlsIngress, withSecret bool, modelNames ...string) {
+func SetUpIngressForCacheSyncCheck(t *testing.T, ingTestObj IngressTestObject) {
 	SetupDomain()
-	SetUpTestForIngress(t, modelNames...)
+	SetUpTestForIngress(t, ingTestObj.serviceName, ingTestObj.modelNames...)
 	ingressObject := integrationtest.FakeIngress{
-		Name:        "foo-with-targets",
-		Namespace:   "default",
-		DnsNames:    []string{"foo.com"},
-		Ips:         []string{"8.8.8.8"},
-		HostNames:   []string{"v1"},
-		Paths:       []string{"/foo"},
-		ServiceName: "avisvc",
+		Name:        ingTestObj.ingressName,
+		Namespace:   ingTestObj.namespace,
+		DnsNames:    ingTestObj.dnsNames,
+		Ips:         ingTestObj.ipAddrs,
+		HostNames:   ingTestObj.hostnames,
+		Paths:       ingTestObj.paths,
+		ServiceName: ingTestObj.serviceName,
 	}
-	if withSecret {
-		integrationtest.AddSecret("my-secret", "default", "tlsCert", "tlsKey")
+	if ingTestObj.withSecret {
+		integrationtest.AddSecret(ingTestObj.secretName, ingTestObj.namespace, "tlsCert", "tlsKey")
 	}
-	if tlsIngress {
+	if ingTestObj.isTLS {
 		ingressObject.TlsSecretDNS = map[string][]string{
-			"my-secret": {"foo.com"},
+			ingTestObj.secretName: {"foo.com"},
 		}
 	}
 	ingrFake := ingressObject.Ingress()
-	if _, err := KubeClient.NetworkingV1().Ingresses("default").Create(context.TODO(), ingrFake, metav1.CreateOptions{}); err != nil {
+	if _, err := KubeClient.NetworkingV1().Ingresses(ingTestObj.namespace).Create(context.TODO(), ingrFake, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("error in adding Ingress: %v", err)
 	}
-	integrationtest.PollForCompletion(t, modelNames[0], 5)
+	integrationtest.PollForCompletion(t, ingTestObj.modelNames[0], 5)
+}
+
+func SetUpTestForIngressInNodePortMode(t *testing.T, svcName, model_Name string) {
+	objects.SharedAviGraphLister().Delete(model_Name)
+	integrationtest.CreateSVC(t, "default", svcName, corev1.ProtocolTCP, corev1.ServiceTypeNodePort, false)
+}
+
+func TearDownTestForIngressInNodePortMode(t *testing.T, svcName, model_Name string) {
+	objects.SharedAviGraphLister().Delete(model_Name)
+	integrationtest.DelSVC(t, "default", svcName)
+}
+
+func VerifyIngressDeletion(t *testing.T, g *gomega.WithT, aviModel interface{}, poolCount int) {
+	var nodes []*avinodes.AviVsNode
+	g.Eventually(func() []*avinodes.AviPoolNode {
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return nodes[0].PoolRefs
+	}, 10*time.Second).Should(gomega.HaveLen(poolCount))
+
+	g.Eventually(func() []*avinodes.AviPoolGroupNode {
+		nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+		return nodes[0].PoolGroupRefs
+	}, 10*time.Second).Should(gomega.HaveLen(poolCount))
 }
 
 func SetupDomain() {
@@ -182,18 +247,32 @@ func SetupDomain() {
 	mcache.CloudKeyCache.AviCacheAdd("Default-Cloud", cloudObj)
 }
 
-func TearDownIngressForCacheSyncCheck(t *testing.T, modelName string) {
-	if err := KubeClient.NetworkingV1().Ingresses("default").Delete(context.TODO(), "foo-with-targets", metav1.DeleteOptions{}); err != nil {
+func TearDownIngressForCacheSyncCheck(t *testing.T, secretName, ingressName, svcName, modelName string) {
+	if err := KubeClient.NetworkingV1().Ingresses("default").Delete(context.TODO(), ingressName, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("Couldn't DELETE the Ingress %v", err)
 	}
-	KubeClient.CoreV1().Secrets("default").Delete(context.TODO(), "my-secret", metav1.DeleteOptions{})
-	TearDownTestForIngress(t, modelName)
+	if secretName != "" {
+		KubeClient.CoreV1().Secrets("default").Delete(context.TODO(), secretName, metav1.DeleteOptions{})
+	}
+	TearDownTestForIngress(t, svcName, modelName)
 }
 
 func TestFQDNCountInL7Model(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	modelName := "admin/cluster--foo.com-L7-dedicated"
-	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+	secretName := objNameMap.GenerateName("my-secret")
+	ingressName := objNameMap.GenerateName("foo-with-targets")
+	svcName := objNameMap.GenerateName("avisvc")
+	ingTestObj := IngressTestObject{
+		ingressName: ingressName,
+		isTLS:       true,
+		withSecret:  true,
+		secretName:  secretName,
+		serviceName: svcName,
+		modelNames:  []string{modelName},
+	}
+	ingTestObj.FillParams()
+	SetUpIngressForCacheSyncCheck(t, ingTestObj)
 	g.Eventually(func() int {
 		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 		if aviModel == nil {
@@ -212,14 +291,25 @@ func TestFQDNCountInL7Model(t *testing.T) {
 		g.Expect(fqdn).ShouldNot(gomega.ContainSubstring("L7-dedicated"))
 	}
 
-	TearDownIngressForCacheSyncCheck(t, modelName)
+	TearDownIngressForCacheSyncCheck(t, secretName, ingressName, svcName, modelName)
 }
 
 func TestPortsForInsecureDedicatedShard(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	modelName := "admin/cluster--foo.com-L7-dedicated"
 
-	SetUpIngressForCacheSyncCheck(t, false, false, modelName)
+	ingressName := objNameMap.GenerateName("foo-with-targets")
+	svcName := objNameMap.GenerateName("avisvc")
+
+	ingTestObj := IngressTestObject{
+		ingressName: ingressName,
+		isTLS:       false,
+		withSecret:  false,
+		serviceName: svcName,
+		modelNames:  []string{modelName},
+	}
+	ingTestObj.FillParams()
+	SetUpIngressForCacheSyncCheck(t, ingTestObj)
 	g.Eventually(func() int {
 		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 		nodes, ok := aviModel.(*avinodes.AviObjectGraph)
@@ -233,14 +323,79 @@ func TestPortsForInsecureDedicatedShard(t *testing.T) {
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes[0].PortProto).To(gomega.HaveLen(1))
 	g.Expect(int(nodes[0].PortProto[0].Port)).To(gomega.Equal(80))
-	TearDownIngressForCacheSyncCheck(t, modelName)
+	TearDownIngressForCacheSyncCheck(t, "", ingressName, svcName, modelName)
+}
+
+func TestPlacementNetworkDedicatedNodePort(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	integrationtest.SetNodePortMode()
+	defer integrationtest.SetClusterIPMode()
+	nodeIP := "10.1.1.2"
+	integrationtest.CreateNode(t, "testNodeNP", nodeIP)
+	defer integrationtest.DeleteNode(t, "testNodeNP")
+
+	modelName := "admin/cluster--foo.com-L7-dedicated"
+	ingressName := objNameMap.GenerateName("foo-with-targets")
+	svcName := objNameMap.GenerateName("avisvc")
+	SetUpTestForIngressInNodePortMode(t, svcName, modelName)
+
+	ingrFake := (integrationtest.FakeIngress{
+		Name:        ingressName,
+		Namespace:   "default",
+		DnsNames:    []string{"foo.com"},
+		Ips:         []string{"8.8.8.8"},
+		HostNames:   []string{"v1"},
+		ServiceName: svcName,
+	}).Ingress()
+
+	_, err := KubeClient.NetworkingV1().Ingresses("default").Create(context.TODO(), ingrFake, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+	integrationtest.PollForCompletion(t, modelName, 5)
+
+	g.Eventually(func() int {
+		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+		nodes, ok := aviModel.(*avinodes.AviObjectGraph)
+		if !ok {
+			return 0
+		}
+		return len(nodes.GetAviVS())
+	}, 20*time.Second).Should(gomega.Equal(1))
+
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
+	g.Expect((nodes[0].PoolRefs[0].NetworkPlacementSettings)).To(gomega.HaveLen(1))
+	_, ok := nodes[0].PoolRefs[0].NetworkPlacementSettings["net123"]
+	g.Expect(ok).To(gomega.Equal(true))
+
+	err = KubeClient.NetworkingV1().Ingresses("default").Delete(context.TODO(), ingressName, metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("Couldn't DELETE the Ingress %v", err)
+	}
+	VerifyIngressDeletion(t, g, aviModel, 0)
+	TearDownTestForIngressInNodePortMode(t, svcName, modelName)
 }
 
 func TestPortsForSecureDedicatedShard(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	modelName := "admin/cluster--foo.com-L7-dedicated"
+	secretName := objNameMap.GenerateName("my-secret")
+	ingressName := objNameMap.GenerateName("foo-with-targets")
+	svcName := objNameMap.GenerateName("avisvc")
 
-	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+	ingTestObj := IngressTestObject{
+		ingressName: ingressName,
+		isTLS:       true,
+		withSecret:  true,
+		secretName:  secretName,
+		serviceName: svcName,
+		modelNames:  []string{modelName},
+	}
+	ingTestObj.FillParams()
+	SetUpIngressForCacheSyncCheck(t, ingTestObj)
 	g.Eventually(func() int {
 		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 		nodes, ok := aviModel.(*avinodes.AviObjectGraph)
@@ -263,5 +418,5 @@ func TestPortsForSecureDedicatedShard(t *testing.T) {
 	sort.Ints(ports)
 	g.Expect(ports[0]).To(gomega.Equal(80))
 	g.Expect(ports[1]).To(gomega.Equal(443))
-	TearDownIngressForCacheSyncCheck(t, modelName)
+	TearDownIngressForCacheSyncCheck(t, secretName, ingressName, svcName, modelName)
 }

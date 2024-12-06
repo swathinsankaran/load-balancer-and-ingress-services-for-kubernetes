@@ -27,10 +27,12 @@ import (
 	routev1 "github.com/openshift/api/route/v1"
 	oshiftclient "github.com/openshift/client-go/route/clientset/versioned"
 	corev1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -55,6 +57,8 @@ var ctrlonce sync.Once
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=topology.tanzu.vmware.com,resources=availabilityzones,verbs=get;list;watch
+// +kubebuilder:rbac:groups=crd.nsx.vmware.com,resources=vpcnetworkconfigurations,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ako.vmware.com,resources=aviinfrasettings;aviinfrasettings/status,verbs=get;list;watch;create;update;patch;delete
 
 type AviController struct {
 	worker_id uint32
@@ -94,10 +98,6 @@ func isNodeUpdated(oldNode, newNode *corev1.Node) bool {
 		return true
 	}
 
-	if oldNode.ResourceVersion == newNode.ResourceVersion {
-		return false
-	}
-
 	var oldaddr, newaddr string
 	oldAddrs := oldNode.Status.Addresses
 	newAddrs := newNode.Status.Addresses
@@ -125,6 +125,15 @@ func isNodeUpdated(oldNode, newNode *corev1.Node) bool {
 	}
 
 	if !reflect.DeepEqual(oldNode.Labels, newNode.Labels) {
+		return true
+	}
+
+	cniPlugin := lib.GetCNIPlugin()
+	if (cniPlugin == lib.CALICO_CNI) && (!reflect.DeepEqual(oldNode.Annotations[lib.CalicoIPv4AddressAnnotation], newNode.Annotations[lib.CalicoIPv4AddressAnnotation]) ||
+		!reflect.DeepEqual(oldNode.Annotations[lib.CalicoIPv6AddressAnnotation], newNode.Annotations[lib.CalicoIPv6AddressAnnotation])) {
+		return true
+	}
+	if cniPlugin == lib.ANTREA_CNI && !reflect.DeepEqual(oldNode.Annotations[lib.AntreaTransportAddressAnnotation], newNode.Annotations[lib.AntreaTransportAddressAnnotation]) {
 		return true
 	}
 
@@ -169,7 +178,16 @@ func isNamespaceUpdated(oldNS, newNS *corev1.Namespace) bool {
 	}
 	oldLabelHash := utils.Hash(utils.Stringify(oldNS.Labels))
 	newLabelHash := utils.Hash(utils.Stringify(newNS.Labels))
-	return oldLabelHash != newLabelHash
+	oldTenant := oldNS.Annotations[lib.TenantAnnotation]
+	newTenant := newNS.Annotations[lib.TenantAnnotation]
+	return oldLabelHash != newLabelHash || oldTenant != newTenant
+}
+
+func AddKeyFromNSToIngstionQueue(numWorkers uint32, c *AviController, namespace string, key, msg string) {
+	bkt := utils.Bkt(namespace, numWorkers)
+	c.workqueue[bkt].AddRateLimited(key)
+	lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+	utils.AviLog.Debugf("key: %s, msg : %s for namespace: %s", key, msg, namespace)
 }
 
 func AddIngressFromNSToIngestionQueue(numWorkers uint32, c *AviController, namespace string, msg string) {
@@ -181,9 +199,15 @@ func AddIngressFromNSToIngestionQueue(numWorkers uint32, c *AviController, names
 	for _, ingObj := range ingObjs {
 		key := utils.Ingress + "/" + utils.ObjKey(ingObj)
 		bkt := utils.Bkt(namespace, numWorkers)
-		c.workqueue[bkt].AddRateLimited(key)
-		lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
-		utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
+		toBeAdded := true
+		if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict {
+			toBeAdded, _ = isIngAcceptedWithFQDNRestriction(key, ingObj)
+		}
+		if toBeAdded {
+			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+			utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
+		}
 	}
 }
 
@@ -196,9 +220,15 @@ func AddRoutesFromNSToIngestionQueue(numWorkers uint32, c *AviController, namesp
 	for _, routeObj := range routeObjs {
 		key := utils.OshiftRoute + "/" + utils.ObjKey(routeObj)
 		bkt := utils.Bkt(namespace, numWorkers)
-		c.workqueue[bkt].AddRateLimited(key)
-		lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
-		utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
+		toBeAdded := true
+		if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict {
+			toBeAdded = isRouteAcceptedWithFQDNRestriction(key, routeObj)
+		}
+		if toBeAdded {
+			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+			utils.AviLog.Debugf("key: %s, msg: %s for namespace: %s", key, msg, namespace)
+		}
 	}
 }
 
@@ -306,7 +336,6 @@ func AddNamespaceEventHandler(numWorkers uint32, c *AviController) cache.Resourc
 					utils.DeleteNamespaceFromFilter(ns.GetName())
 				}
 			}
-
 		},
 		UpdateFunc: func(old, cur interface{}) {
 			if c.DisableSync {
@@ -318,10 +347,10 @@ func AddNamespaceEventHandler(numWorkers uint32, c *AviController) cache.Resourc
 				oldNSAccepted := utils.CheckIfNamespaceAccepted(nsOld.GetName(), nsOld.Labels, false)
 				newNSAccepted := utils.CheckIfNamespaceAccepted(nsCur.GetName(), nsCur.Labels, false)
 
-				infraSettingOld := nsOld.Annotations[lib.InfraSettingNameAnnotation]
-				infraSettingNew := nsCur.Annotations[lib.InfraSettingNameAnnotation]
+				oldTenant := nsOld.Annotations[lib.TenantAnnotation]
+				newTenant := nsCur.Annotations[lib.TenantAnnotation]
 
-				if !oldNSAccepted && newNSAccepted || (infraSettingOld != infraSettingNew) {
+				if !oldNSAccepted && newNSAccepted || oldTenant != newTenant {
 					//Case 1: Namespace updated with valid labels
 					//Call ingress/route and service add
 					utils.AddNamespaceToFilter(nsCur.GetName())
@@ -393,9 +422,77 @@ func AddNamespaceAnnotationEventHandler(numWorkers uint32, c *AviController) cac
 			nsOld := old.(*corev1.Namespace)
 			nsCur := cur.(*corev1.Namespace)
 			if isNamespaceUpdated(nsOld, nsCur) {
-				infraSettingOld := nsOld.Annotations[lib.InfraSettingNameAnnotation]
-				infraSettingNew := nsCur.Annotations[lib.InfraSettingNameAnnotation]
-				if infraSettingOld != infraSettingNew {
+				oldTenant := nsOld.Annotations[lib.TenantAnnotation]
+				newTenant := nsCur.Annotations[lib.TenantAnnotation]
+				if oldTenant != newTenant {
+					if lib.AKOControlConfig().CRDInformers().L7RuleInformer != nil {
+						l7RuleObjs, err := lib.AKOControlConfig().CRDInformers().L7RuleInformer.Lister().L7Rules(nsCur.GetName()).List(labels.Set(nil).AsSelector())
+						if err != nil {
+							utils.AviLog.Errorf("Unable to retrieve the l7rules : %s", err)
+						} else {
+							for _, l7RuleObj := range l7RuleObjs {
+								key := lib.L7Rule + "/" + utils.ObjKey(l7RuleObj)
+								if err := c.GetValidator().ValidateL7RuleObj(key, l7RuleObj); err != nil {
+									utils.AviLog.Warnf("key: %s, Error retrieved during validation of l7rule: %v", key, err)
+								}
+							}
+						}
+					}
+					if lib.AKOControlConfig().CRDInformers().HostRuleInformer != nil {
+						hostRuleObjs, err := lib.AKOControlConfig().CRDInformers().HostRuleInformer.Lister().HostRules(nsCur.GetName()).List(labels.Set(nil).AsSelector())
+						if err != nil {
+							utils.AviLog.Errorf("Unable to retrieve the hostrules : %s", err)
+						} else {
+							for _, hostRuleObj := range hostRuleObjs {
+								key := lib.HostRule + "/" + utils.ObjKey(hostRuleObj)
+								if err := c.GetValidator().ValidateHostRuleObj(key, hostRuleObj); err != nil {
+									utils.AviLog.Warnf("key: %s, Error retrieved during validation of HostRule: %v", key, err)
+									AddKeyFromNSToIngstionQueue(numWorkers, c, nsCur.GetName(), key, lib.NsFilterAdd)
+								}
+							}
+						}
+					}
+					if lib.AKOControlConfig().CRDInformers().HTTPRuleInformer != nil {
+						httpRuleObjs, err := lib.AKOControlConfig().CRDInformers().HTTPRuleInformer.Lister().HTTPRules(nsCur.GetName()).List(labels.Set(nil).AsSelector())
+						if err != nil {
+							utils.AviLog.Errorf("Unable to retrieve the httprules : %s", err)
+						} else {
+							for _, httpRuleObj := range httpRuleObjs {
+								key := lib.HTTPRule + "/" + utils.ObjKey(httpRuleObj)
+								if err := c.GetValidator().ValidateHTTPRuleObj(key, httpRuleObj); err != nil {
+									utils.AviLog.Warnf("key: %s, Error retrieved during validation of HTTPRule: %v", key, err)
+								}
+							}
+						}
+					}
+					if lib.AKOControlConfig().CRDInformers().SSORuleInformer != nil {
+						ssoRuleObjs, err := lib.AKOControlConfig().CRDInformers().SSORuleInformer.Lister().SSORules(nsCur.GetName()).List(labels.Set(nil).AsSelector())
+						if err != nil {
+							utils.AviLog.Errorf("Unable to retrieve the ssorules : %s", err)
+						} else {
+							for _, ssoRuleObj := range ssoRuleObjs {
+								key := lib.SSORule + "/" + utils.ObjKey(ssoRuleObj)
+								if err := c.GetValidator().ValidateSSORuleObj(key, ssoRuleObj); err != nil {
+									utils.AviLog.Warnf("key: %s, Error retrieved during validation of SSORule: %v", key, err)
+									AddKeyFromNSToIngstionQueue(numWorkers, c, nsCur.GetName(), key, lib.NsFilterAdd)
+								}
+							}
+						}
+					}
+					if lib.AKOControlConfig().CRDInformers().L4RuleInformer != nil {
+						l4RuleObjs, err := lib.AKOControlConfig().CRDInformers().L4RuleInformer.Lister().L4Rules(nsCur.GetName()).List(labels.Set(nil).AsSelector())
+						if err != nil {
+							utils.AviLog.Errorf("Unable to retrieve the l4rules : %s", err)
+						} else {
+							for _, l4RuleObj := range l4RuleObjs {
+								key := lib.L4Rule + "/" + utils.ObjKey(l4RuleObj)
+								if err := c.GetValidator().ValidateL4RuleObj(key, l4RuleObj); err != nil {
+									utils.AviLog.Warnf("key: %s, Error retrieved during validation of L4Rule: %v", key, err)
+									AddKeyFromNSToIngstionQueue(numWorkers, c, nsCur.GetName(), key, lib.NsFilterAdd)
+								}
+							}
+						}
+					}
 					if utils.GetInformers().IngressInformer != nil {
 						utils.AviLog.Debugf("Adding ingresses for namespaces: %s", nsCur.GetName())
 						AddIngressFromNSToIngestionQueue(numWorkers, c, nsCur.GetName(), lib.NsFilterAdd)
@@ -436,6 +533,13 @@ func AddRouteEventHandler(numWorkers uint32, c *AviController) cache.ResourceEve
 				utils.AviLog.Debugf("key : %s, msg: same resource version returning", key)
 				return
 			}
+
+			if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict && !isRouteAcceptedWithFQDNRestriction(key, route) {
+				// update the status - already host claimed
+				status.UpdateRouteStatusWithErrMsg(key, route.Name, namespace, lib.HostAlreadyClaimed)
+				return
+			}
+
 			bkt := utils.Bkt(namespace, numWorkers)
 			if !lib.HasValidBackends(route.Spec, route.Name, namespace, key) {
 				status.UpdateRouteStatusWithErrMsg(key, route.Name, namespace, lib.DuplicateBackends)
@@ -443,6 +547,7 @@ func AddRouteEventHandler(numWorkers uint32, c *AviController) cache.ResourceEve
 			c.workqueue[bkt].AddRateLimited(key)
 			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
+
 		},
 		DeleteFunc: func(obj interface{}) {
 			if c.DisableSync {
@@ -467,6 +572,14 @@ func AddRouteEventHandler(numWorkers uint32, c *AviController) cache.ResourceEve
 				utils.AviLog.Debugf("key: %s, msg: Route delete event: Namespace: %s didn't qualify filter. Not deleting route", key, namespace)
 				return
 			}
+
+			if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict {
+				routeNamespaceName := objects.RouteNamspaceName{
+					RouteNSRouteName: key,
+					CreationTime:     route.CreationTimestamp,
+				}
+				objects.SharedUniqueNamespaceLister().DeleteHostnameToRoute(route.Spec.Host, routeNamespaceName)
+			}
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
 			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
@@ -486,13 +599,49 @@ func AddRouteEventHandler(numWorkers uint32, c *AviController) cache.ResourceEve
 					utils.AviLog.Debugf("key: %s, msg: Route update event: Namespace: %s didn't qualify filter. Not updating route", key, namespace)
 					return
 				}
+
 				bkt := utils.Bkt(namespace, numWorkers)
 				if !lib.HasValidBackends(newRoute.Spec, newRoute.Name, namespace, key) {
 					status.UpdateRouteStatusWithErrMsg(key, newRoute.Name, namespace, lib.DuplicateBackends)
 				}
-				c.workqueue[bkt].AddRateLimited(key)
-				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
-				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
+				if oldRoute.Spec.Host == newRoute.Spec.Host {
+					// same hosts
+					isAccepted := true
+					if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict {
+						isAccepted = isRouteAcceptedWithFQDNRestriction(key, newRoute)
+					}
+					if isAccepted {
+						c.workqueue[bkt].AddRateLimited(key)
+						lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+						utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
+					}
+				} else {
+					isOldAccepted := true
+					isNewAccepted := true
+					if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict {
+						isOldAccepted = isRouteAcceptedWithFQDNRestriction(key, oldRoute)
+						isNewAccepted = isRouteAcceptedWithFQDNRestriction(key, newRoute)
+					}
+					if !isOldAccepted && !isNewAccepted {
+						// set status
+						// update the status - already host claimed
+						status.UpdateRouteStatusWithErrMsg(key, newRoute.Name, namespace, lib.HostAlreadyClaimed)
+						return
+					}
+					if isOldAccepted {
+						routeNamespaceName := objects.RouteNamspaceName{
+							RouteNSRouteName: key,
+							CreationTime:     oldRoute.CreationTimestamp,
+						}
+						// TODO: Recently host field in route has become optional. There is alternate field needs to be used.
+						// So storing route hostname functionality will undergo changes.
+						objects.SharedUniqueNamespaceLister().DeleteHostnameToRoute(oldRoute.Spec.Host, routeNamespaceName)
+					}
+					c.workqueue[bkt].AddRateLimited(key)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+					utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
+
+				}
 			}
 		},
 	}
@@ -669,6 +818,94 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			},
 		}
 	}
+	// Add EPSInformer
+	epsEventHandler := cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			if c.DisableSync {
+				return
+			}
+			eps := obj.(*discovery.EndpointSlice)
+			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(eps))
+			svcName, ok := eps.Labels[discovery.LabelServiceName]
+			if !ok || svcName == "" {
+				utils.AviLog.Debugf("Endpointslice Add event: Endpointslice does not have backing svc")
+				return
+			}
+			key := utils.Endpointslices + "/" + namespace + "/" + svcName
+			if lib.IsNamespaceBlocked(namespace) {
+				utils.AviLog.Debugf("key: %s, msg: Endpoint Add event: Namespace: %s didn't qualify filter", key, namespace)
+				return
+			}
+			bkt := utils.Bkt(namespace, numWorkers)
+			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+			utils.AviLog.Debugf("key: %s, msg: ADD", key)
+		},
+		DeleteFunc: func(obj interface{}) {
+			if c.DisableSync {
+				return
+			}
+			eps, ok := obj.(*discovery.EndpointSlice)
+			if !ok {
+				// endpoints were deleted but its final state is unrecorded.
+				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+				if !ok {
+					utils.AviLog.Errorf("couldn't get object from tombstone %#v", obj)
+					return
+				}
+				eps, ok = tombstone.Obj.(*discovery.EndpointSlice)
+				if !ok {
+					utils.AviLog.Errorf("Tombstone contained object that is not an Endpointslice: %#v", obj)
+					return
+				}
+			}
+			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(eps))
+			svcName, ok := eps.Labels[discovery.LabelServiceName]
+			if !ok || svcName == "" {
+				utils.AviLog.Debugf("Endpointslice Delete event: Endpointslice does not have backing svc")
+				return
+			}
+			key := utils.Endpointslices + "/" + namespace + "/" + svcName
+			if lib.IsNamespaceBlocked(namespace) {
+				utils.AviLog.Debugf("key: %s, msg: Endpointslice Delete event: Namespace: %s didn't qualify filter", key, namespace)
+				return
+			}
+			bkt := utils.Bkt(namespace, numWorkers)
+			c.workqueue[bkt].AddRateLimited(key)
+			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+			utils.AviLog.Debugf("key: %s, msg: DELETE", key)
+		},
+		UpdateFunc: func(old, cur interface{}) {
+			if c.DisableSync {
+				return
+			}
+			oeps := old.(*discovery.EndpointSlice)
+			ceps := cur.(*discovery.EndpointSlice)
+			if oeps.ResourceVersion != ceps.ResourceVersion {
+				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(ceps))
+				svcName, ok := ceps.Labels[discovery.LabelServiceName]
+				if !ok || svcName == "" {
+					utils.AviLog.Debugf("Endpointslice Delete event: Endpointslice does not have backing svc")
+					return
+				}
+				key := utils.Endpointslices + "/" + namespace + "/" + svcName
+				if lib.IsNamespaceBlocked(namespace) {
+					utils.AviLog.Debugf("key: %s, msg: Endpoint Update event: Namespace: %s didn't qualify filter", key, namespace)
+					return
+				}
+				bkt := utils.Bkt(namespace, numWorkers)
+				c.workqueue[bkt].AddRateLimited(key)
+				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
+			}
+		},
+	}
+	if lib.AKOControlConfig().GetEndpointSlicesEnabled() {
+		c.informers.EpSlicesInformer.Informer().AddEventHandler(epsEventHandler)
+	} else if lib.GetServiceType() != lib.NodePortLocal {
+		c.informers.EpInformer.Informer().AddEventHandler(epEventHandler)
+	}
+
 	svcEventHandler := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if c.DisableSync {
@@ -678,6 +915,11 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(svc))
 			isSvcLb := isServiceLBType(svc)
 			var key string
+			if !lib.ValidServiceType(svc) {
+				key := utils.Service + "/" + utils.ObjKey(svc)
+				utils.AviLog.Warnf("key: %s, msg: Invalid service type: [%s] Currently Allowed: [ClusterIP, NodePort, LoadBalancer]", key, string(svc.Spec.Type))
+				return
+			}
 			if isSvcLb && !lib.GetLayer7Only() {
 				//L4 Namespace sync not applicable for advance L4 and service API
 				key = utils.L4LBService + "/" + utils.ObjKey(svc)
@@ -735,6 +977,11 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 					return
 				}
 			}
+			if !lib.ValidServiceType(svc) {
+				key := utils.Service + "/" + utils.ObjKey(svc)
+				utils.AviLog.Warnf("key: %s, msg: Invalid service type: [%s] Currently Allowed: [ClusterIP, NodePort, LoadBalancer]", key, string(svc.Spec.Type))
+				return
+			}
 			isSvcLb := isServiceLBType(svc)
 			var key string
 			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(svc))
@@ -771,6 +1018,11 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			}
 			oldobj := old.(*corev1.Service)
 			svc := cur.(*corev1.Service)
+			if !lib.ValidServiceType(svc) {
+				key := utils.Service + "/" + utils.ObjKey(svc)
+				utils.AviLog.Warnf("key: %s, msg: Invalid service type: [%s] Currently Allowed: [ClusterIP, NodePort, LoadBalancer]", key, string(svc.Spec.Type))
+				return
+			}
 			if oldobj.ResourceVersion != svc.ResourceVersion || !reflect.DeepEqual(svc.Annotations, oldobj.Annotations) {
 				// Only add the key if the resource versions have changed.
 				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(svc))
@@ -826,9 +1078,6 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 		},
 	}
 
-	if lib.GetServiceType() != lib.NodePortLocal {
-		c.informers.EpInformer.Informer().AddEventHandler(epEventHandler)
-	}
 	c.informers.ServiceInformer.Informer().AddEventHandler(svcEventHandler)
 
 	if lib.GetCNIPlugin() == lib.CALICO_CNI {
@@ -1082,10 +1331,17 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			if !lib.ValidateIngressForClass(key, ingress) {
 				return
 			}
+			if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict {
+				if toBeAdded, _ := isIngAcceptedWithFQDNRestriction(key, ingress); !toBeAdded {
+					utils.AviLog.Warnf("key: %s, msg: Ingress is not added due to conflict in hostname", key)
+					return
+				}
+			}
 			bkt := utils.Bkt(namespace, numWorkers)
 			c.workqueue[bkt].AddRateLimited(key)
 			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: ADD", key)
+
 		},
 		DeleteFunc: func(obj interface{}) {
 			if c.DisableSync {
@@ -1117,10 +1373,18 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				return
 			}
 			objects.SharedResourceVerInstanceLister().Delete(key)
+			// Add validation here
 			bkt := utils.Bkt(namespace, numWorkers)
-			c.workqueue[bkt].AddRateLimited(key)
+
+			if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict {
+				deleteHostnameToRoute(key, ingress)
+			}
+
 			lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 			utils.AviLog.Debugf("key: %s, msg: DELETE", key)
+			// This will enqueue key irrespective of model present or not. Can be optimized.
+			c.workqueue[bkt].AddRateLimited(key)
+
 		},
 		UpdateFunc: func(old, cur interface{}) {
 			if c.DisableSync {
@@ -1136,9 +1400,24 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 					return
 				}
 				bkt := utils.Bkt(namespace, numWorkers)
+
+				if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict {
+					oldIngAccepted, oldHosts := isIngAcceptedWithFQDNRestriction(key, oldobj)
+					newIngAccepted, newHosts := isIngAcceptedWithFQDNRestriction(key, ingress)
+					if !oldIngAccepted && !newIngAccepted {
+						utils.AviLog.Warnf("key: %s, msg: Ingress is not added due to conflict in hostname", key)
+						return
+					}
+
+					if oldIngAccepted && !oldHosts.Equal(newHosts) {
+						deleteHostnameToRoute(key, oldobj)
+					}
+				}
+
 				c.workqueue[bkt].AddRateLimited(key)
 				lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 				utils.AviLog.Debugf("key: %s, msg: UPDATE", key)
+
 			}
 		},
 	}
@@ -1348,15 +1627,19 @@ func checkAviSecretUpdateAndShutdown(secret *corev1.Secret) bool {
 
 func (c *AviController) Start(stopCh <-chan struct{}) {
 	go c.informers.ServiceInformer.Informer().Run(stopCh)
-	go c.informers.EpInformer.Informer().Run(stopCh)
 	go c.informers.NSInformer.Informer().Run(stopCh)
 
 	informersList := []cache.InformerSynced{
-		c.informers.EpInformer.Informer().HasSynced,
 		c.informers.ServiceInformer.Informer().HasSynced,
 		c.informers.NSInformer.Informer().HasSynced,
 	}
-
+	if lib.AKOControlConfig().GetEndpointSlicesEnabled() {
+		go c.informers.EpSlicesInformer.Informer().Run(stopCh)
+		informersList = append(informersList, c.informers.EpSlicesInformer.Informer().HasSynced)
+	} else if lib.GetServiceType() != lib.NodePortLocal {
+		go c.informers.EpInformer.Informer().Run(stopCh)
+		informersList = append(informersList, c.informers.EpInformer.Informer().HasSynced)
+	}
 	if !lib.AviSecretInitialized {
 		go c.informers.SecretInformer.Informer().Run(stopCh)
 		informersList = append(informersList, c.informers.SecretInformer.Informer().HasSynced)
@@ -1389,8 +1672,6 @@ func (c *AviController) Start(stopCh <-chan struct{}) {
 			go c.informers.IngressInformer.Informer().Run(stopCh)
 			informersList = append(informersList, c.informers.IngressInformer.Informer().HasSynced)
 		}
-		go c.dynamicInformers.VCFNetworkInfoInformer.Informer().Run(stopCh)
-		informersList = append(informersList, c.dynamicInformers.VCFNetworkInfoInformer.Informer().HasSynced)
 	}
 
 	// Disable all informers if we are in advancedL4 mode. We expect to only provide L4 load balancing capability for this feature.
@@ -1500,4 +1781,60 @@ func (c *AviController) Run(stopCh <-chan struct{}) error {
 
 func (c *AviController) GetValidator() Validator {
 	return NewValidator()
+}
+func isIngAcceptedWithFQDNRestriction(key string, ingress *networkingv1.Ingress) (bool, sets.Set[string]) {
+	routeNamespaceName := objects.RouteNamspaceName{
+		RouteNSRouteName: key,
+		CreationTime:     ingress.CreationTimestamp,
+	}
+	ingHosts := sets.New[string]()
+	for _, rule := range ingress.Spec.Rules {
+		ingHosts.Insert(rule.Host)
+	}
+	// Current behaviour if one of fqdn is false, not added.
+	isAdded := false
+	for _, host := range sets.List(ingHosts) {
+		isAdded, _, _ = objects.SharedUniqueNamespaceLister().UpdateHostnameToRoute(host, routeNamespaceName)
+		if !isAdded {
+			utils.AviLog.Warnf("key:%s, msg: ingress is not accepted as host %s is already claimed", key, host)
+			err_msg := fmt.Sprintf("Host %s already claimed", host)
+			lib.AKOControlConfig().IngressEventf(ingress.ObjectMeta, corev1.EventTypeWarning, lib.IngressUpdateEvent, err_msg)
+			break
+		}
+	}
+	if !isAdded {
+		utils.AviLog.Warnf("key: %s, msg: Ingress is not added due to hostname conflict", key)
+		// Few hosts might have got added, so we need to remove those from the list.
+		for _, host := range sets.List(ingHosts) {
+			objects.SharedUniqueNamespaceLister().DeleteHostnameToRoute(host, routeNamespaceName)
+		}
+	}
+	return isAdded, ingHosts
+}
+
+func isRouteAcceptedWithFQDNRestriction(key string, route *routev1.Route) bool {
+	routeNamespaceName := objects.RouteNamspaceName{
+		RouteNSRouteName: key,
+		CreationTime:     route.CreationTimestamp,
+	}
+	isAdded := false
+	isAdded, _, _ = objects.SharedUniqueNamespaceLister().UpdateHostnameToRoute(route.Spec.Host, routeNamespaceName)
+	if !isAdded {
+		utils.AviLog.Warnf("key: %s, msg: Route is not added due to hostname conflict", key)
+	}
+	return isAdded
+}
+
+func deleteHostnameToRoute(key string, ingress *networkingv1.Ingress) {
+	routeNamespaceName := objects.RouteNamspaceName{
+		RouteNSRouteName: key,
+		CreationTime:     ingress.CreationTimestamp,
+	}
+	ingHosts := sets.NewString()
+	for _, rule := range ingress.Spec.Rules {
+		ingHosts.Insert(rule.Host)
+	}
+	for _, host := range ingHosts.List() {
+		objects.SharedUniqueNamespaceLister().DeleteHostnameToRoute(host, routeNamespaceName)
+	}
 }

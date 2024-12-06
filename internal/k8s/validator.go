@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strings"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/objects"
@@ -203,8 +204,9 @@ func (l *leader) ValidateHostRuleObj(key string, hostrule *akov1beta1.HostRule) 
 	if hostrule.Spec.VirtualHost.NetworkSecurityPolicy != "" {
 		refData[hostrule.Spec.VirtualHost.NetworkSecurityPolicy] = "NetworkSecurityPolicy"
 	}
+	tenant := lib.GetTenantInNamespace(hostrule.Namespace)
 
-	if err := checkRefsOnController(key, refData); err != nil {
+	if err := checkRefsOnController(key, refData, tenant); err != nil {
 		status.UpdateHostRuleStatus(key, hostrule, status.UpdateCRDStatusOptions{Status: lib.StatusRejected, Error: err.Error()})
 		return err
 	}
@@ -216,6 +218,18 @@ func (l *leader) ValidateHostRuleObj(key string, hostrule *akov1beta1.HostRule) 
 			status.UpdateHostRuleStatus(key, hostrule, status.UpdateCRDStatusOptions{Status: lib.StatusRejected, Error: err.Error()})
 			return err
 		}
+	}
+
+	if strings.Contains(fqdn, lib.ShardVSSubstring) && hostrule.Spec.VirtualHost.UseRegex {
+		err = fmt.Errorf("hostrule useRegex with fqdn %s cannot be applied to shared virtualservices", fqdn)
+		status.UpdateHostRuleStatus(key, hostrule, status.UpdateCRDStatusOptions{Status: lib.StatusRejected, Error: err.Error()})
+		return err
+	}
+
+	if strings.Contains(fqdn, lib.ShardVSSubstring) && hostrule.Spec.VirtualHost.ApplicationRootPath != "" {
+		err = fmt.Errorf("hostrule applicationRootPath with fqdn %s cannot be applied to shared virtualservices", fqdn)
+		status.UpdateHostRuleStatus(key, hostrule, status.UpdateCRDStatusOptions{Status: lib.StatusRejected, Error: err.Error()})
+		return err
 	}
 
 	// No need to update status of hostrule object as accepted since it was accepted before.
@@ -281,8 +295,9 @@ func (l *leader) ValidateHTTPRuleObj(key string, httprule *akov1beta1.HTTPRule) 
 			refData[hm] = "HealthMonitor"
 		}
 	}
+	tenant := lib.GetTenantInNamespace(httprule.Namespace)
 
-	if err := checkRefsOnController(key, refData); err != nil {
+	if err := checkRefsOnController(key, refData, tenant); err != nil {
 		status.UpdateHTTPRuleStatus(key, httprule, status.UpdateCRDStatusOptions{
 			Status: lib.StatusRejected,
 			Error:  err.Error(),
@@ -376,7 +391,7 @@ func (l *leader) ValidateAviInfraSetting(key string, infraSetting *akov1beta1.Av
 			return err
 		}
 	}
-	if err := checkRefsOnController(key, refData); err != nil {
+	if err := checkRefsOnController(key, refData, lib.GetTenant()); err != nil {
 		status.UpdateAviInfraSettingStatus(key, infraSetting, status.UpdateCRDStatusOptions{
 			Status: lib.StatusRejected,
 			Error:  err.Error(),
@@ -390,6 +405,7 @@ func (l *leader) ValidateAviInfraSetting(key string, infraSetting *akov1beta1.Av
 	segMgmtNetworK := ""
 	if infraSetting.Spec.SeGroup.Name != "" {
 		addSeGroupLabel(key, infraSetting.Spec.SeGroup.Name)
+		// Not required for NO access cloud
 		if lib.GetCloudType() == lib.CLOUD_VCENTER {
 			segMgmtNetworK = GetSEGManagementNetwork(infraSetting.Spec.SeGroup.Name)
 		}
@@ -402,6 +418,15 @@ func (l *leader) ValidateAviInfraSetting(key string, infraSetting *akov1beta1.Av
 	if len(infraSetting.Spec.Network.NodeNetworks) > 0 {
 		SetAviInfrasettingNodeNetworks(infraSetting.Name, segMgmtNetworK, infraSetting.Spec.SeGroup.Name, infraSetting.Spec.Network.NodeNetworks)
 	}
+
+	namespaces, err := utils.GetInformers().NSInformer.Informer().GetIndexer().ByIndex(lib.AviSettingNamespaceIndex, infraSetting.GetName())
+	if err == nil && len(namespaces) > 0 {
+		objects.InfraSettingL7Lister().UpdateInfraSettingToNamespaceMapping(infraSetting.GetName(), namespaces)
+	} else {
+		// This handles the case where an NS scoped infrasetting was deleted and later recreated without NS scope.
+		objects.InfraSettingL7Lister().DeleteInfraSettingToNamespaceMapping(infraSetting.GetName())
+	}
+
 	// No need to update status of infra setting object as accepted since it was accepted before.
 	if infraSetting.Status.Status == lib.StatusAccepted {
 		return nil
@@ -551,8 +576,9 @@ func (l *leader) ValidateSSORuleObj(key string, ssoRule *akov1alpha2.SSORule) er
 			refData[*samlConfigObj.SigningSslKeyAndCertificateRef] = "SslKeyCert"
 		}
 	}
+	tenant := lib.GetTenantInNamespace(ssoRule.Namespace)
 
-	if err := checkRefsOnController(key, refData); err != nil {
+	if err := checkRefsOnController(key, refData, tenant); err != nil {
 		status.UpdateSSORuleStatus(key, ssoRule, status.UpdateCRDStatusOptions{Status: lib.StatusRejected, Error: err.Error()})
 		return err
 	}
@@ -705,8 +731,8 @@ func (l *leader) ValidateL4RuleObj(key string, l4Rule *akov1alpha2.L4Rule) error
 			return err
 		}
 	}
-
-	if err := checkRefsOnController(key, refData); err != nil {
+	tenant := lib.GetTenantInNamespace(l4Rule.Namespace)
+	if err := checkRefsOnController(key, refData, tenant); err != nil {
 		status.UpdateL4RuleStatus(key, l4Rule, status.UpdateCRDStatusOptions{
 			Status: lib.StatusRejected,
 			Error:  err.Error(),
@@ -743,7 +769,9 @@ func (l *leader) ValidateL7RuleObj(key string, l7Rule *akov1alpha2.L7Rule) error
 	if l7RuleSpec.TrafficCloneProfileRef != nil {
 		refData[*l7RuleSpec.TrafficCloneProfileRef] = "TrafficCloneProfile"
 	}
-	if err := checkRefsOnController(key, refData); err != nil {
+	tenant := lib.GetTenantInNamespace(l7Rule.Namespace)
+
+	if err := checkRefsOnController(key, refData, tenant); err != nil {
 		status.UpdateL7RuleStatus(key, l7Rule, status.UpdateCRDStatusOptions{
 			Status: lib.StatusRejected,
 			Error:  err.Error(),
@@ -802,6 +830,7 @@ func (f *follower) ValidateAviInfraSetting(key string, infraSetting *akov1beta1.
 		segMgmtNetworK := ""
 		if infraSetting.Spec.SeGroup.Name != "" {
 			addSeGroupLabel(key, infraSetting.Spec.SeGroup.Name)
+			// Not required for no access cloud
 			if lib.GetCloudType() == lib.CLOUD_VCENTER {
 				segMgmtNetworK = GetSEGManagementNetwork(infraSetting.Spec.SeGroup.Name)
 			}

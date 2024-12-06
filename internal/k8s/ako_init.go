@@ -25,6 +25,21 @@ import (
 	"sync"
 	"time"
 
+	routev1 "github.com/openshift/api/route/v1"
+	"github.com/vmware/alb-sdk/go/clients"
+	"github.com/vmware/alb-sdk/go/session"
+	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
+	servicesapi "sigs.k8s.io/service-apis/apis/v1alpha1"
+
 	avicache "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
@@ -34,45 +49,51 @@ import (
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/status"
 	akov1beta1 "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/apis/ako/v1beta1"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/clients"
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/third_party/github.com/vmware/alb-sdk/go/session"
-
-	routev1 "github.com/openshift/api/route/v1"
-	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
-	servicesapi "sigs.k8s.io/service-apis/apis/v1alpha1"
 )
 
 func PopulateCache() error {
-	var err error
-	aviRestClientPool := avicache.SharedAVIClients()
-	aviObjCache := avicache.SharedAviObjCache()
-	// Randomly pickup a client.
-	if aviRestClientPool != nil && len(aviRestClientPool.AviClient) > 0 {
-		_, _, err = aviObjCache.AviObjCachePopulate(aviRestClientPool.AviClient, lib.AKOControlConfig().ControllerVersion(), utils.CloudName)
-		if err != nil {
-			utils.AviLog.Warnf("failed to populate avi cache with error: %v", err.Error())
-			return err
+	tenants := map[string]struct{}{
+		lib.GetTenant(): {},
+	}
+	aviRestClientPool := avicache.SharedAVIClients(lib.GetTenant())
+	if aviRestClientPool == nil || len(aviRestClientPool.AviClient) == 0 {
+		return fmt.Errorf("avi Rest client initialization failed")
+	}
+	err := lib.GetAllTenants(aviRestClientPool.AviClient[0], tenants)
+	if err != nil {
+		return err
+	}
+
+	for tenant := range tenants {
+		aviRestClientPool := avicache.SharedAVIClients(tenant)
+		aviObjCache := avicache.SharedAviObjCache()
+		// Randomly pickup a client.
+		if aviRestClientPool != nil && len(aviRestClientPool.AviClient) > 0 {
+			_, _, err := aviObjCache.AviObjCachePopulate(aviRestClientPool.AviClient, lib.AKOControlConfig().ControllerVersion(), utils.CloudName, tenant)
+			if err != nil {
+				utils.AviLog.Warnf("failed to populate avi cache with error: %v", err.Error())
+				return err
+			}
 		}
-		if err = avicache.SetControllerClusterUUID(aviRestClientPool); err != nil {
+	}
+	aviRestClientPool = avicache.SharedAVIClients(lib.GetTenant())
+	if aviRestClientPool != nil && len(aviRestClientPool.AviClient) > 0 {
+		if err := avicache.SetControllerClusterUUID(aviRestClientPool); err != nil {
 			utils.AviLog.Warnf("Failed to set the controller cluster uuid with error: %v", err)
 		}
 	}
-
 	return nil
 }
 
 func (c *AviController) CleanupStaleVSes() {
-
-	aviRestClientPool := avicache.SharedAVIClients()
+	aviClient := avicache.SharedAVIClients(lib.GetTenant()).AviClient[0]
+	tenants := make(map[string]struct{})
+	err := lib.GetAllTenants(aviClient, tenants)
+	if err != nil {
+		return
+	}
 	aviObjCache := avicache.SharedAviObjCache()
+
 	delModels, err := DeleteConfigFromConfigmap(c.informers.ClientSet)
 	if err != nil {
 		c.DisableSync = true
@@ -82,28 +103,30 @@ func (c *AviController) CleanupStaleVSes() {
 	if delModels {
 		go SetDeleteSyncChannel()
 		parentKeys := aviObjCache.VsCacheMeta.AviCacheGetAllParentVSKeys()
-		DeleteAviObjects(parentKeys, aviObjCache, aviRestClientPool)
+		DeleteAviObjects(parentKeys, aviObjCache)
+		return
 	} else {
 		status.NewStatusPublisher().ResetStatefulSetAnnotation(status.ObjectDeletionStatus)
 	}
 
-	// Delete Stale objects by deleting model for dummy VS
-	if _, err := lib.IsClusterNameValid(); err != nil {
-		utils.AviLog.Errorf("AKO cluster name is invalid.")
-		return
-	}
-	if aviRestClientPool != nil && len(aviRestClientPool.AviClient) > 0 {
+	for tenant := range tenants {
+
+		// Delete Stale objects by deleting model for dummy VS
+		if _, err := lib.IsClusterNameValid(); err != nil {
+			utils.AviLog.Errorf("AKO cluster name is invalid.")
+			return
+		}
+
 		utils.AviLog.Infof("Starting clean up of stale objects")
-		restlayer := rest.NewRestOperations(aviObjCache, aviRestClientPool)
-		staleVSKey := lib.GetTenant() + "/" + lib.DummyVSForStaleData
+		restlayer := rest.NewRestOperations(aviObjCache)
+		staleVSKey := tenant + "/" + lib.DummyVSForStaleData
 		restlayer.CleanupVS(staleVSKey, true)
 		staleCacheKey := avicache.NamespaceName{
 			Name:      lib.DummyVSForStaleData,
-			Namespace: lib.GetTenant(),
+			Namespace: tenant,
 		}
 		aviObjCache.VsCacheMeta.AviCacheDelete(staleCacheKey)
 	}
-
 	vsKeysPending := aviObjCache.VsCacheMeta.AviGetAllKeys()
 	if delModels {
 		//Delete NPL annotations
@@ -116,7 +139,7 @@ func (c *AviController) CleanupStaleVSes() {
 	}
 }
 
-func DeleteAviObjects(parentVSKeys []avicache.NamespaceName, avi_obj_cache *avicache.AviObjCache, avi_rest_client_pool *utils.AviRestClientPool) {
+func DeleteAviObjects(parentVSKeys []avicache.NamespaceName, avi_obj_cache *avicache.AviObjCache) {
 	for _, pvsKey := range parentVSKeys {
 		// Fetch the parent VS cache and update the SNI child
 		vsObj, parentFound := avi_obj_cache.VsCacheMeta.AviCacheGet(pvsKey)
@@ -126,7 +149,7 @@ func DeleteAviObjects(parentVSKeys []avicache.NamespaceName, avi_obj_cache *avic
 			if foundvs {
 				key := pvsKey.Namespace + "/" + pvsKey.Name
 				namespace, _ := utils.ExtractNamespaceObjectName(key)
-				restlayer := rest.NewRestOperations(avi_obj_cache, avi_rest_client_pool)
+				restlayer := rest.NewRestOperations(avi_obj_cache)
 				restlayer.DeleteVSOper(pvsKey, vs_cache_obj, namespace, key, false, false)
 			}
 		}
@@ -240,7 +263,7 @@ func (c *AviController) AddBootupNSEventHandler(stopCh <-chan struct{}, startSyn
 // When the configmap is created, enable sync for other k8s objects. When the configmap is disabled, disable sync.
 func (c *AviController) HandleConfigMap(k8sinfo K8sinformers, ctrlCh chan struct{}, stopCh <-chan struct{}, quickSyncCh chan struct{}) error {
 	cs := k8sinfo.Cs
-	aviClientPool := avicache.SharedAVIClients()
+	aviClientPool := avicache.SharedAVIClients(lib.GetTenant())
 	if aviClientPool == nil || len(aviClientPool.AviClient) < 1 {
 		c.DisableSync = true
 		lib.SetDisableSync(true)
@@ -250,7 +273,7 @@ func (c *AviController) HandleConfigMap(k8sinfo K8sinformers, ctrlCh chan struct
 	}
 	aviclient := aviClientPool.AviClient[0]
 
-	validateUserInput, err := avicache.ValidateUserInput(aviclient)
+	validateUserInput, err := avicache.ValidateUserInput(aviclient, false)
 	if err != nil {
 		utils.AviLog.Errorf("Error while validating input: %s", err.Error())
 		lib.AKOControlConfig().PodEventf(v1.EventTypeWarning, lib.SyncDisabled, "Invalid user input %s", err.Error())
@@ -283,7 +306,7 @@ func (c *AviController) HandleConfigMap(k8sinfo K8sinformers, ctrlCh chan struct
 
 			delModels := delConfigFromData(cm.Data)
 
-			validateUserInput, err := avicache.ValidateUserInput(aviclient)
+			validateUserInput, err := avicache.ValidateUserInput(aviclient, false)
 			if err != nil {
 				utils.AviLog.Errorf("Error while validating input: %s", err.Error())
 				lib.AKOControlConfig().PodEventf(v1.EventTypeWarning, lib.SyncDisabled, "Invalid user input %s", err.Error())
@@ -315,7 +338,7 @@ func (c *AviController) HandleConfigMap(k8sinfo K8sinformers, ctrlCh chan struct
 				return
 			}
 			// if DeleteConfig value has changed, then check if we need to enable/disable sync
-			isValidUserInput, err := avicache.ValidateUserInput(aviclient)
+			isValidUserInput, err := avicache.ValidateUserInput(aviclient, false)
 			if err != nil {
 				utils.AviLog.Errorf("Error while validating input: %s", err.Error())
 			}
@@ -371,8 +394,9 @@ func (c *AviController) ValidAviSecret() bool {
 
 		transport, isSecure := utils.GetHTTPTransportWithCert(caData)
 		options := []func(*session.AviSession) error{
-			session.SetNoControllerStatusCheck,
+			session.DisableControllerStatusCheckOnFailure(true),
 			session.SetTransport(transport),
+			session.SetTimeout(120 * time.Second),
 		}
 		if !isSecure {
 			options = append(options, session.SetInsecure)
@@ -506,15 +530,14 @@ func (c *AviController) InitController(informers K8sinformers, registeredInforme
 	statusQueueParams := utils.WorkerQueue{NumWorkers: numGraphWorkers, WorkqueueName: utils.StatusQueue}
 	graphQueue = utils.SharedWorkQueue(&ingestionQueueParams, &graphQueueParams, &slowRetryQParams, &fastRetryQParams, &statusQueueParams).GetQueueByName(utils.GraphLayer)
 
+	c.addIndexers()
+	c.Start(stopCh)
 	err := PopulateCache()
 	if err != nil {
 		c.DisableSync = true
 		utils.AviLog.Errorf("failed to populate cache, disabling sync")
 		lib.ShutdownApi()
 	}
-
-	c.addIndexers()
-	c.Start(stopCh)
 
 	fullSyncInterval := os.Getenv(utils.FULL_SYNC_INTERVAL)
 	interval, err := strconv.ParseInt(fullSyncInterval, 10, 64)
@@ -647,7 +670,23 @@ func (c *AviController) addIndexers() {
 			},
 		)
 	}
-
+	if lib.AKOControlConfig().GetEndpointSlicesEnabled() {
+		c.informers.EpSlicesInformer.Informer().AddIndexers(
+			cache.Indexers{
+				discovery.LabelServiceName: func(obj interface{}) ([]string, error) {
+					eps, ok := obj.(*discovery.EndpointSlice)
+					if !ok {
+						utils.AviLog.Debugf("error indexing epslice object by service name")
+						return []string{}, nil
+					}
+					if val, ok := eps.Labels[discovery.LabelServiceName]; ok && val != "" {
+						return []string{eps.Namespace + "/" + val}, nil
+					}
+					return []string{}, nil
+				},
+			},
+		)
+	}
 	c.informers.ServiceInformer.Informer().AddIndexers(
 		cache.Indexers{
 			lib.AviSettingServicesIndex: func(obj interface{}) ([]string, error) {
@@ -764,7 +803,7 @@ func (c *AviController) addIndexers() {
 }
 
 func (c *AviController) FullSync() {
-	aviRestClientPool := avicache.SharedAVIClients()
+	aviRestClientPool := avicache.SharedAVIClients(lib.GetTenant())
 	aviObjCache := avicache.SharedAviObjCache()
 
 	// Randomly pickup a client.
@@ -774,7 +813,7 @@ func (c *AviController) FullSync() {
 			aviObjCache.AviCacheRefresh(aviRestClientPool.AviClient[0], utils.CloudName)
 		} else {
 			// In this case we just sync the Gateway status to the LB status
-			restlayer := rest.NewRestOperations(aviObjCache, aviRestClientPool)
+			restlayer := rest.NewRestOperations(aviObjCache)
 			restlayer.SyncObjectStatuses()
 		}
 		allModelsMap := objects.SharedAviGraphLister().GetAll()
@@ -1060,36 +1099,69 @@ func (c *AviController) FullSyncK8s(sync bool) error {
 		}
 		//Ingress Section
 		if utils.GetInformers().IngressInformer != nil {
+			ingObjList := make([]*networkingv1.Ingress, 0)
+			// create list of ingresses.
 			for namespace := range acceptedNamespaces {
 				ingObjs, err := utils.GetInformers().IngressInformer.Lister().Ingresses(namespace).List(labels.Set(nil).AsSelector())
 				if err != nil {
 					utils.AviLog.Errorf("Unable to retrieve the ingresses during full sync: %s", err)
-				} else {
-					for _, ingObj := range ingObjs {
-						key := utils.Ingress + "/" + utils.ObjKey(ingObj)
-						meta, err := meta.Accessor(ingObj)
-						if err == nil {
-							resVer := meta.GetResourceVersion()
-							objects.SharedResourceVerInstanceLister().Save(key, resVer)
-						}
-						utils.AviLog.Debugf("Dequeue for ingress key: %v", key)
-						lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
-						nodes.DequeueIngestion(key, true)
+					continue
+				}
+				ingObjList = append(ingObjList, ingObjs...)
+			}
+			// sort the list as per the timestamp. Sorting logic can be kept irrespective of strict or non-strict policy
+			sort.Slice(ingObjList, func(i, j int) bool { return lib.IngressLessthan(ingObjList[i], ingObjList[j]) })
+
+			for _, ingObj := range ingObjList {
+				key := utils.Ingress + "/" + ingObj.Namespace + "/" + ingObj.Name
+				isValid := true
+
+				if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict {
+					// get the hostnames in the ingress
+					isValid, _ = isIngAcceptedWithFQDNRestriction(key, ingObj)
+				}
+				if isValid {
+					meta, err := meta.Accessor(ingObj)
+					if err == nil {
+						resVer := meta.GetResourceVersion()
+						objects.SharedResourceVerInstanceLister().Save(key, resVer)
 					}
+					utils.AviLog.Debugf("Dequeue for ingress key: %v", key)
+					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
+					nodes.DequeueIngestion(key, true)
+				} else {
+					utils.AviLog.Warnf("key: %s, msg: Ingress is not accepted due to FQDN restriction policy", key)
 				}
 			}
+			// TODO: free ingObjList
 		}
 		//Route Section
 		if utils.GetInformers().RouteInformer != nil {
-			routeObjs, err := utils.GetInformers().RouteInformer.Lister().List(labels.Set(nil).AsSelector())
-			if err != nil {
-				utils.AviLog.Errorf("Unable to retrieve the routes during full sync: %s", err)
-			} else {
-				for _, routeObj := range routeObjs {
-					if _, ok := acceptedNamespaces[routeObj.Namespace]; !ok {
-						continue
+			routeObjList := make([]*routev1.Route, 0)
+			for namespace := range acceptedNamespaces {
+				routeObjs, err := utils.GetInformers().RouteInformer.Lister().Routes(namespace).List(labels.Set(nil).AsSelector())
+				if err != nil {
+					utils.AviLog.Errorf("Unable to retrieve the ingresses during full sync: %s", err)
+					continue
+				}
+				routeObjList = append(routeObjList, routeObjs...)
+			}
+
+			// sort on timestamp
+			sort.Slice(routeObjList, func(i, j int) bool { return lib.RouteLessthan(routeObjList[i], routeObjList[j]) })
+
+			for _, routeObj := range routeObjList {
+				key := utils.OshiftRoute + "/" + utils.ObjKey(routeObj)
+				isValid := true
+
+				if lib.AKOControlConfig().GetAKOFQDNReusePolicy() == lib.FQDNReusePolicyStrict {
+					isValid = isRouteAcceptedWithFQDNRestriction(key, routeObj)
+					if isValid {
+						utils.AviLog.Debugf("Route %s is added to active list. Enqueuing it", key)
 					}
-					key := utils.OshiftRoute + "/" + utils.ObjKey(routeObj)
+				}
+				if isValid {
+					// Enqueue it only in case of valid
 					meta, err := meta.Accessor(routeObj)
 					if err == nil {
 						resVer := meta.GetResourceVersion()
@@ -1098,8 +1170,11 @@ func (c *AviController) FullSyncK8s(sync bool) error {
 					utils.AviLog.Debugf("Dequeue for route key: %v", key)
 					lib.IncrementQueueCounter(utils.ObjectIngestionLayer)
 					nodes.DequeueIngestion(key, true)
+				} else {
+					utils.AviLog.Warnf("key: %s, msg: Route is not accepted due to FQDN restriction policy", key)
 				}
 			}
+			// TODO: Free routelist
 		}
 		if lib.UseServicesAPI() {
 			gatewayObjs, err := lib.AKOControlConfig().SvcAPIInformers().GatewayInformer.Lister().Gateways(metav1.NamespaceAll).List(labels.Set(nil).AsSelector())
@@ -1437,8 +1512,7 @@ func SyncFromNodesLayer(key interface{}, wg *sync.WaitGroup) error {
 		return nil
 	}
 	cache := avicache.SharedAviObjCache()
-	aviclient := avicache.SharedAVIClients()
-	restlayer := rest.NewRestOperations(cache, aviclient)
+	restlayer := rest.NewRestOperations(cache)
 	restlayer.DequeueNodes(keyStr)
 	return nil
 }
@@ -1507,8 +1581,7 @@ func (c *AviController) IstioBootstrap() {
 		newAviModel.AddModelNode(sslNode)
 
 		cache := avicache.SharedAviObjCache()
-		aviclient := avicache.SharedAVIClients()
-		restlayer := rest.NewRestOperations(cache, aviclient)
+		restlayer := rest.NewRestOperations(cache)
 
 		key := utils.Secret + "/" + utils.GetAKONamespace() + "/" + lib.IstioSecret
 		restlayer.IstioCU(key, newAviModel)

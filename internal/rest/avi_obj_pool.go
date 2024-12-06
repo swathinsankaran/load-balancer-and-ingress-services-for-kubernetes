@@ -48,7 +48,7 @@ func (rest *RestOperations) AviPoolBuild(pool_meta *nodes.AviPoolNode, cache_obj
 	cr := lib.AKOUser
 	svc_mdata_json, _ := json.Marshal(&pool_meta.ServiceMetadata)
 	svc_mdata := string(svc_mdata_json)
-	cloudRef := "/api/cloud?name=" + utils.CloudName
+	cloudRef := fmt.Sprintf("/api/cloud?name=%s", utils.CloudName)
 	placementNetworks := []*avimodels.PlacementNetwork{}
 
 	// set pool placement network if node network details are present and cloud type is CLOUD_VCENTER or CLOUD_NSXT (vlan)
@@ -143,6 +143,10 @@ func (rest *RestOperations) AviPoolBuild(pool_meta *nodes.AviPoolNode, cache_obj
 		pool.ApplicationPersistenceProfileRef = pool_meta.ApplicationPersistenceProfileRef
 	}
 
+	if pool_meta.EnableHttp2 != nil {
+		pool.EnableHttp2 = pool_meta.EnableHttp2
+	}
+
 	for i, server := range pool_meta.Servers {
 		port := pool_meta.Port
 		sip := server.Ip
@@ -150,7 +154,8 @@ func (rest *RestOperations) AviPoolBuild(pool_meta *nodes.AviPoolNode, cache_obj
 			port = pool_meta.Servers[i].Port
 		}
 		uuid := fmt.Sprintf("%s:%d", *sip.Addr, port)
-		s := avimodels.Server{IP: &sip, Port: &port, ExternalUUID: &uuid}
+
+		s := avimodels.Server{IP: &sip, Port: &port, ExternalUUID: &uuid, Enabled: server.Enabled}
 		if server.ServerNode != "" {
 			sn := server.ServerNode
 			s.ServerNode = &sn
@@ -283,7 +288,7 @@ func (rest *RestOperations) AviPoolCacheAdd(rest_op *utils.RestOp, vsKey avicach
 
 		var pkiKey avicache.NamespaceName
 		if pkiprof, ok := resp["pki_profile_ref"]; ok && pkiprof != "" {
-			pkiUuid := avicache.ExtractUuid(pkiprof.(string), "pkiprofile-.*.#")
+			pkiUuid := avicache.ExtractUUID(pkiprof.(string), "pkiprofile-.*.#")
 			pkiName, foundPki := rest.cache.PKIProfileCache.AviCacheGetNameByUuid(pkiUuid)
 			if foundPki {
 				pkiKey = avicache.NamespaceName{Namespace: lib.GetTenant(), Name: pkiName.(string)}
@@ -335,6 +340,7 @@ func (rest *RestOperations) AviPoolCacheAdd(rest_op *utils.RestOp, vsKey avicach
 							Key:                key,
 							VirtualServiceUUID: vs_cache_obj.Uuid,
 							VSName:             vs_cache_obj.Name,
+							Tenant:             vs_cache_obj.Tenant,
 						}
 						statusOption := status.StatusOptions{
 							ObjType: utils.L4LBService,
@@ -352,6 +358,7 @@ func (rest *RestOperations) AviPoolCacheAdd(rest_op *utils.RestOp, vsKey avicach
 								Key:                key,
 								VirtualServiceUUID: vs_cache_obj.Uuid,
 								VSName:             vs_cache_obj.Name,
+								Tenant:             vs_cache_obj.Tenant,
 							}
 							statusOption := status.StatusOptions{
 								ObjType: utils.Ingress,
@@ -418,6 +425,7 @@ func (rest *RestOperations) DeletePoolIngressStatus(poolKey avicache.NamespaceNa
 					ServiceMetadata: pool_cache_obj.ServiceMetadataObj,
 					Key:             key,
 					VSName:          vsName,
+					Tenant:          pool_cache_obj.Tenant,
 				}
 				statusOption := status.StatusOptions{
 					ObjType: utils.L4LBService,
@@ -432,6 +440,7 @@ func (rest *RestOperations) DeletePoolIngressStatus(poolKey avicache.NamespaceNa
 					ServiceMetadata: pool_cache_obj.ServiceMetadataObj,
 					Key:             key,
 					VSName:          vsName,
+					Tenant:          pool_cache_obj.Tenant,
 				}
 				statusOption := status.StatusOptions{
 					ObjType: utils.Ingress,

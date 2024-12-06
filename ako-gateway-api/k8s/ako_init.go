@@ -18,11 +18,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -181,6 +183,23 @@ LABEL:
 
 func (c *GatewayController) addIndexers() {
 
+	if lib.AKOControlConfig().GetEndpointSlicesEnabled() {
+		c.informers.EpSlicesInformer.Informer().AddIndexers(
+			cache.Indexers{
+				discovery.LabelServiceName: func(obj interface{}) ([]string, error) {
+					eps, ok := obj.(*discovery.EndpointSlice)
+					if !ok {
+						utils.AviLog.Debugf("Error indexing epslice object by service name")
+						return []string{}, nil
+					}
+					if val, ok := eps.Labels[discovery.LabelServiceName]; ok && val != "" {
+						return []string{eps.Namespace + "/" + val}, nil
+					}
+					return []string{}, nil
+				},
+			},
+		)
+	}
 	gwinformer := akogatewayapilib.AKOControlConfig().GatewayApiInformers()
 	gwinformer.GatewayInformer.Informer().AddIndexers(
 		cache.Indexers{
@@ -223,9 +242,7 @@ func (c *GatewayController) FullSyncK8s(sync bool) error {
 		return err
 	}
 
-	// TODO: sort before calling dequeue
-	// sort by timestamp and name length
-	// as per gateway guidelines
+	var filteredGatewayClasses []*gatewayv1.GatewayClass
 	for _, gwClassObj := range gwClassObjs {
 		key := lib.GatewayClass + "/" + utils.ObjKey(gwClassObj)
 		meta, err := meta.Accessor(gwClassObj)
@@ -234,11 +251,16 @@ func (c *GatewayController) FullSyncK8s(sync bool) error {
 			objects.SharedResourceVerInstanceLister().Save(key, resVer)
 		}
 		if IsGatewayClassValid(key, gwClassObj) {
-			akogatewayapinodes.DequeueIngestion(key, true)
+			filteredGatewayClasses = append(filteredGatewayClasses, gwClassObj)
 		}
+	}
+	for _, filteredGatewayClass := range filteredGatewayClasses {
+		key := lib.GatewayClass + "/" + utils.ObjKey(filteredGatewayClass)
+		akogatewayapinodes.DequeueIngestion(key, true)
 	}
 
 	// Gateway Section
+	var filteredGateways []*gatewayv1.Gateway
 	gatewayObjs, err := akogatewayapilib.AKOControlConfig().GatewayApiInformers().GatewayInformer.Lister().Gateways(metav1.NamespaceAll).List(labels.Set(nil).AsSelector())
 	if err != nil {
 		utils.AviLog.Errorf("Unable to retrieve the gateways during full sync: %s", err)
@@ -252,12 +274,23 @@ func (c *GatewayController) FullSyncK8s(sync bool) error {
 			resVer := meta.GetResourceVersion()
 			objects.SharedResourceVerInstanceLister().Save(key, resVer)
 		}
-		if IsValidGateway(key, gatewayObj) {
-			akogatewayapinodes.DequeueIngestion(key, true)
+		if valid, _ := IsValidGateway(key, gatewayObj); valid {
+			filteredGateways = append(filteredGateways, gatewayObj)
 		}
+	}
+	sort.Slice(filteredGateways, func(i, j int) bool {
+		if filteredGateways[i].GetCreationTimestamp().Unix() == filteredGateways[j].GetCreationTimestamp().Unix() {
+			return filteredGateways[i].Namespace+"/"+filteredGateways[i].Name < filteredGateways[j].Namespace+"/"+filteredGateways[j].Name
+		}
+		return filteredGateways[i].GetCreationTimestamp().Unix() < filteredGateways[j].GetCreationTimestamp().Unix()
+	})
+	for _, filteredGateway := range filteredGateways {
+		key := lib.Gateway + "/" + utils.ObjKey(filteredGateway)
+		akogatewayapinodes.DequeueIngestion(key, true)
 	}
 
 	// HTTPRoute Section
+	var filteredHTTPRoutes []*gatewayv1.HTTPRoute
 	httpRouteObjs, err := akogatewayapilib.AKOControlConfig().GatewayApiInformers().HTTPRouteInformer.Lister().HTTPRoutes(metav1.NamespaceAll).List(labels.Set(nil).AsSelector())
 	if err != nil {
 		utils.AviLog.Errorf("Unable to retrieve the httproutes during full sync: %s", err)
@@ -271,9 +304,19 @@ func (c *GatewayController) FullSyncK8s(sync bool) error {
 			resVer := meta.GetResourceVersion()
 			objects.SharedResourceVerInstanceLister().Save(key, resVer)
 		}
-		if IsHTTPRouteValid(key, httpRouteObj) {
-			akogatewayapinodes.DequeueIngestion(key, true)
+		if IsHTTPRouteConfigValid(key, httpRouteObj) {
+			filteredHTTPRoutes = append(filteredHTTPRoutes, httpRouteObj)
 		}
+	}
+	sort.Slice(filteredHTTPRoutes, func(i, j int) bool {
+		if filteredHTTPRoutes[i].GetCreationTimestamp().Unix() == filteredHTTPRoutes[j].GetCreationTimestamp().Unix() {
+			return filteredHTTPRoutes[i].Namespace+"/"+filteredHTTPRoutes[i].Name < filteredHTTPRoutes[j].Namespace+"/"+filteredHTTPRoutes[j].Name
+		}
+		return filteredHTTPRoutes[i].GetCreationTimestamp().Unix() < filteredHTTPRoutes[j].GetCreationTimestamp().Unix()
+	})
+	for _, filteredHTTPRoute := range filteredHTTPRoutes {
+		key := lib.HTTPRoute + "/" + utils.ObjKey(filteredHTTPRoute)
+		akogatewayapinodes.DequeueIngestion(key, true)
 	}
 
 	// Service Section
@@ -292,6 +335,27 @@ func (c *GatewayController) FullSyncK8s(sync bool) error {
 		}
 		// Not pushing the service to the next layer as it is
 		// not required since we don't create a model out of service
+	}
+	if lib.GetServiceType() == lib.NodePortLocal {
+		podObjs, err := utils.GetInformers().PodInformer.Lister().Pods(metav1.NamespaceAll).List(labels.Everything())
+		if err != nil {
+			utils.AviLog.Errorf("Unable to retrieve the Pods during full sync: %s", err)
+			return err
+		}
+		for _, podObj := range podObjs {
+			podLabel := utils.ObjKey(podObj)
+			key := utils.Pod + "/" + podLabel
+			if _, ok := podObj.GetAnnotations()[lib.NPLPodAnnotation]; !ok {
+				utils.AviLog.Warnf("key : %s, msg: 'nodeportlocal.antrea.io' annotation not found, ignoring the pod", key)
+				continue
+			}
+			meta, err := meta.Accessor(podObj)
+			if err == nil {
+				resVer := meta.GetResourceVersion()
+				objects.SharedResourceVerInstanceLister().Save(key, resVer)
+			}
+			akogatewayapinodes.DequeueIngestion(key, true)
+		}
 	}
 
 	c.publishAllParentVSKeysToRestLayer()
@@ -330,7 +394,7 @@ func (c *GatewayController) publishAllParentVSKeysToRestLayer() {
 }
 
 func (c *GatewayController) FullSync() {
-	aviRestClientPool := avicache.SharedAVIClients()
+	aviRestClientPool := avicache.SharedAVIClients(lib.GetTenant())
 	aviObjCache := avicache.SharedAviObjCache()
 
 	// Randomly pickup a client.
@@ -367,8 +431,7 @@ func SyncFromNodesLayer(key interface{}, wg *sync.WaitGroup) error {
 		return nil
 	}
 	cache := avicache.SharedAviObjCache()
-	aviclient := avicache.SharedAVIClients()
-	restlayer := rest.NewRestOperations(cache, aviclient)
+	restlayer := rest.NewRestOperations(cache)
 	restlayer.DequeueNodes(keyStr)
 	return nil
 }
@@ -417,7 +480,6 @@ func SyncFromStatusQueue(key interface{}, wg *sync.WaitGroup) error {
 
 func (c *GatewayController) cleanupStaleVSes() {
 
-	aviRestClientPool := avicache.SharedAVIClients()
 	aviObjCache := avicache.SharedAviObjCache()
 
 	delModels, err := DeleteConfigFromConfigmap(c.informers.ClientSet)
@@ -429,7 +491,7 @@ func (c *GatewayController) cleanupStaleVSes() {
 	if delModels {
 		go SetDeleteSyncChannel()
 		parentKeys := aviObjCache.VsCacheMeta.AviCacheGetAllParentVSKeys()
-		k8s.DeleteAviObjects(parentKeys, aviObjCache, aviRestClientPool)
+		k8s.DeleteAviObjects(parentKeys, aviObjCache)
 	}
 
 	// Delete Stale objects by deleting model for dummy VS
@@ -437,20 +499,22 @@ func (c *GatewayController) cleanupStaleVSes() {
 		utils.AviLog.Errorf("AKO cluster name is invalid.")
 		return
 	}
-	if aviRestClientPool != nil && len(aviRestClientPool.AviClient) > 0 {
-		utils.AviLog.Infof("Starting clean up of stale objects")
-		restlayer := rest.NewRestOperations(aviObjCache, aviRestClientPool)
-		staleVSKey := lib.GetTenant() + "/" + lib.DummyVSForStaleData
-		restlayer.CleanupVS(staleVSKey, true)
-		staleCacheKey := avicache.NamespaceName{
-			Name:      lib.DummyVSForStaleData,
-			Namespace: lib.GetTenant(),
-		}
-		aviObjCache.VsCacheMeta.AviCacheDelete(staleCacheKey)
+	utils.AviLog.Infof("Starting clean up of stale objects")
+	restlayer := rest.NewRestOperations(aviObjCache)
+	staleVSKey := lib.GetTenant() + "/" + lib.DummyVSForStaleData
+	restlayer.CleanupVS(staleVSKey, true)
+	staleCacheKey := avicache.NamespaceName{
+		Name:      lib.DummyVSForStaleData,
+		Namespace: lib.GetTenant(),
 	}
+	aviObjCache.VsCacheMeta.AviCacheDelete(staleCacheKey)
 
 	vsKeysPending := aviObjCache.VsCacheMeta.AviGetAllKeys()
 
+	if delModels {
+		//Delete NPL annotations
+		k8s.DeleteNPLAnnotations()
+	}
 	if delModels && len(vsKeysPending) == 0 && lib.ConfigDeleteSyncChan != nil {
 		close(lib.ConfigDeleteSyncChan)
 		lib.ConfigDeleteSyncChan = nil
@@ -461,7 +525,7 @@ func (c *GatewayController) cleanupStaleVSes() {
 // When the configmap is created, enable sync for other k8s objects. When the configmap is disabled, disable sync.
 func (c *GatewayController) HandleConfigMap(k8sinfo k8s.K8sinformers, ctrlCh chan struct{}, stopCh <-chan struct{}, quickSyncCh chan struct{}) error {
 	cs := k8sinfo.Cs
-	aviClientPool := avicache.SharedAVIClients()
+	aviClientPool := avicache.SharedAVIClients(lib.GetTenant())
 	if aviClientPool == nil || len(aviClientPool.AviClient) < 1 {
 		c.DisableSync = true
 		lib.SetDisableSync(true)
@@ -489,7 +553,7 @@ func (c *GatewayController) HandleConfigMap(k8sinfo k8s.K8sinformers, ctrlCh cha
 
 			delModels := delConfigFromData(cm.Data)
 
-			validateUserInput, err := avicache.ValidateUserInput(aviclient)
+			validateUserInput, err := avicache.ValidateUserInput(aviclient, true)
 			if err != nil {
 				utils.AviLog.Errorf("Error while validating input: %s", err.Error())
 				akogatewayapilib.AKOControlConfig().PodEventf(corev1.EventTypeWarning, lib.SyncDisabled, "Invalid user input %s", err.Error())
@@ -521,7 +585,7 @@ func (c *GatewayController) HandleConfigMap(k8sinfo k8s.K8sinformers, ctrlCh cha
 				return
 			}
 			// if DeleteConfig value has changed, then check if we need to enable/disable sync
-			isValidUserInput, err := avicache.ValidateUserInput(aviclient)
+			isValidUserInput, err := avicache.ValidateUserInput(aviclient, true)
 			if err != nil {
 				utils.AviLog.Errorf("Error while validating input: %s", err.Error())
 			}

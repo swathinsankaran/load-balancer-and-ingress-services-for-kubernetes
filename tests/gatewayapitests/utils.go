@@ -33,7 +33,6 @@ import (
 	gatewayfake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
 
 	akogatewayapilib "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/lib"
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/cache"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/k8s"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/tests/integrationtest"
@@ -53,14 +52,14 @@ func NewAviFakeClientInstance(kubeclient *k8sfake.Clientset, skipCachePopulation
 				return
 			}
 
-			integrationtest.NormalControllerServer(w, r, "../../avimockobjects")
+			integrationtest.NormalControllerServer(w, r, "../../avimockobjectsgw")
 		}))
 
 		url := strings.Split(integrationtest.AviFakeClientInstance.URL, "https://")[1]
 		os.Setenv("CTRL_IPADDRESS", url)
 		os.Setenv("FULL_SYNC_INTERVAL", "600")
 		// resets avi client pool instance, allows to connect with the new `ts` server
-		cache.AviClientInstance = nil
+		//cache.AviClientInstanceMap = nil
 		k8s.PopulateControllerProperties(kubeclient)
 		if len(skipCachePopulation) == 0 || !skipCachePopulation[0] {
 			k8s.PopulateCache()
@@ -117,23 +116,33 @@ func UnsetListenerTLS(l *gatewayv1.Listener) {
 }
 
 func SetListenerHostname(l *gatewayv1.Listener, hostname string) {
-	l.Hostname = (*gatewayv1.Hostname)(&hostname)
+	if hostname == "" {
+		l.Hostname = nil
+	} else {
+		l.Hostname = (*gatewayv1.Hostname)(&hostname)
+	}
 }
 func UnsetListenerHostname(l *gatewayv1.Listener) {
 	var hname gatewayv1.Hostname
 	l.Hostname = &hname
 }
 
-func GetListenersV1(ports []int32, secrets ...string) []gatewayv1.Listener {
+func GetListenersV1(ports []int32, emptyHostName, samehost bool, secrets ...string) []gatewayv1.Listener {
 	listeners := make([]gatewayv1.Listener, 0, len(ports))
 	for _, port := range ports {
-		hostname := fmt.Sprintf("foo-%d.com", port)
 		listener := gatewayv1.Listener{
 			Name:     gatewayv1.SectionName(fmt.Sprintf("listener-%d", port)),
 			Port:     gatewayv1.PortNumber(port),
 			Protocol: gatewayv1.ProtocolType("HTTPS"),
-			Hostname: (*gatewayv1.Hostname)(&hostname),
 		}
+		if !samehost && !emptyHostName {
+			hostname := fmt.Sprintf("foo-%d.com", port)
+			listener.Hostname = (*gatewayv1.Hostname)(&hostname)
+		} else if samehost {
+			hostname := "foo.com"
+			listener.Hostname = (*gatewayv1.Hostname)(&hostname)
+		}
+
 		if len(secrets) > 0 {
 			certRefs := make([]gatewayv1.SecretObjectReference, 0, len(secrets))
 			for _, secret := range secrets {
@@ -153,7 +162,67 @@ func GetListenersV1(ports []int32, secrets ...string) []gatewayv1.Listener {
 	return listeners
 }
 
-func GetListenerStatusV1(ports []int32, attachedRoutes []int32) []gatewayv1.ListenerStatus {
+func GetListenersOnHostname(hostnames []string) []gatewayv1.Listener {
+	listeners := make([]gatewayv1.Listener, 0, len(hostnames))
+	for i, hostname := range hostnames {
+		hn := hostname
+		listener := gatewayv1.Listener{
+			Name:     gatewayv1.SectionName(fmt.Sprintf("listener-%d", i)),
+			Port:     gatewayv1.PortNumber(8080),
+			Hostname: (*gatewayv1.Hostname)(&hn),
+			Protocol: gatewayv1.ProtocolType("HTTP"),
+		}
+		listeners = append(listeners, listener)
+	}
+	return listeners
+}
+func GetNegativeConditions(ports []int32) *gatewayv1.GatewayStatus {
+	expectedStatus := &gatewayv1.GatewayStatus{
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(gatewayv1.GatewayConditionAccepted),
+				Status:             metav1.ConditionFalse,
+				Message:            "Gateway does not contain any valid listener",
+				ObservedGeneration: 1,
+				Reason:             string(gatewayv1.GatewayReasonListenersNotValid),
+			},
+		},
+		Listeners: GetListenerStatusV1(ports, []int32{0, 0}, true, false),
+	}
+	expectedStatus.Listeners[0].Conditions[0].Reason = string(gatewayv1.ListenerReasonInvalid)
+	expectedStatus.Listeners[0].Conditions[0].Status = metav1.ConditionFalse
+	expectedStatus.Listeners[0].Conditions[0].Message = "Listener is Invalid"
+
+	expectedStatus.Listeners[0].Conditions[1].Reason = string(gatewayv1.ListenerReasonInvalidCertificateRef)
+	expectedStatus.Listeners[0].Conditions[1].Status = metav1.ConditionFalse
+	expectedStatus.Listeners[0].Conditions[1].Message = "Secret does not exist"
+
+	return expectedStatus
+}
+
+func GetPositiveConditions(ports []int32) *gatewayv1.GatewayStatus {
+	expectedStatus := &gatewayv1.GatewayStatus{
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(gatewayv1.GatewayConditionAccepted),
+				Status:             metav1.ConditionTrue,
+				Message:            "Gateway configuration is valid",
+				ObservedGeneration: 1,
+				Reason:             string(gatewayv1.GatewayConditionAccepted),
+			},
+		},
+		Listeners: GetListenerStatusV1(ports, []int32{0, 0}, true, false),
+	}
+	expectedStatus.Listeners[0].Conditions[0].Reason = string(gatewayv1.ListenerReasonAccepted)
+	expectedStatus.Listeners[0].Conditions[0].Status = metav1.ConditionTrue
+	expectedStatus.Listeners[0].Conditions[0].Message = "Listener is valid"
+
+	expectedStatus.Listeners[0].Conditions[1].Reason = string(gatewayv1.ListenerReasonResolvedRefs)
+	expectedStatus.Listeners[0].Conditions[1].Status = metav1.ConditionTrue
+	expectedStatus.Listeners[0].Conditions[1].Message = "Reference is valid"
+	return expectedStatus
+}
+func GetListenerStatusV1(ports []int32, attachedRoutes []int32, getResolvedRefCondition bool, getProgrammedCondition bool) []gatewayv1.ListenerStatus {
 	listeners := make([]gatewayv1.ListenerStatus, 0, len(ports))
 	for i, port := range ports {
 		listener := gatewayv1.ListenerStatus{
@@ -162,13 +231,33 @@ func GetListenerStatusV1(ports []int32, attachedRoutes []int32) []gatewayv1.List
 			AttachedRoutes: attachedRoutes[i],
 			Conditions: []metav1.Condition{
 				{
-					Type:               string(gatewayv1.GatewayConditionAccepted),
+					Type:               string(gatewayv1.ListenerConditionAccepted),
 					Status:             metav1.ConditionTrue,
 					Message:            "Listener is valid",
 					ObservedGeneration: 1,
-					Reason:             string(gatewayv1.GatewayReasonAccepted),
+					Reason:             string(gatewayv1.ListenerReasonAccepted),
 				},
 			},
+		}
+		if getResolvedRefCondition {
+			resolvedRefCondition := &metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionTrue,
+				Message:            "All the references are valid",
+				ObservedGeneration: 1,
+				Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
+			}
+			listener.Conditions = append(listener.Conditions, *resolvedRefCondition)
+		}
+		if getProgrammedCondition {
+			programmedCondition := &metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionProgrammed),
+				Status:             metav1.ConditionTrue,
+				Message:            "Virtual service configured/updated",
+				ObservedGeneration: 1,
+				Reason:             string(gatewayv1.ListenerReasonProgrammed),
+			}
+			listener.Conditions = append(listener.Conditions, *programmedCondition)
 		}
 		listeners = append(listeners, listener)
 	}
@@ -334,6 +423,36 @@ func GetParentReferencesV1(gatewayNames []string, namespace string, ports []int3
 	return parentRefs
 }
 
+func GetParentReferencesFromListeners(listeners []gatewayv1.Listener, gwName, namespace string) []gatewayv1.ParentReference {
+	parentRefs := make([]gatewayv1.ParentReference, 0)
+	for i := range listeners {
+		sectionName := gatewayv1.SectionName(fmt.Sprintf("listener-%d", i))
+		parentRef := gatewayv1.ParentReference{
+			Name:        gatewayv1.ObjectName(gwName),
+			Namespace:   (*gatewayv1.Namespace)(&namespace),
+			SectionName: &sectionName,
+		}
+		parentRefs = append(parentRefs, parentRef)
+
+	}
+	return parentRefs
+}
+
+// created new function to avoid confusion
+func GetParentReferencesV1WithGatewayNameOnly(gatewayNames []string, namespace string) []gatewayv1.ParentReference {
+	parentRefs := make([]gatewayv1.ParentReference, 0)
+	for _, gwName := range gatewayNames {
+
+		parentRef := gatewayv1.ParentReference{
+			Name:      gatewayv1.ObjectName(gwName),
+			Namespace: (*gatewayv1.Namespace)(&namespace),
+		}
+		parentRefs = append(parentRefs, parentRef)
+
+	}
+	return parentRefs
+}
+
 func GetRouteStatusV1(gatewayNames []string, namespace string, ports []int32, conditions map[string][]metav1.Condition) *gatewayv1.RouteStatus {
 	routeStatus := &gatewayv1.RouteStatus{}
 	routeStatus.Parents = make([]gatewayv1.RouteParentStatus, 0, len(gatewayNames)+len(ports))
@@ -433,7 +552,7 @@ func GetHTTPRouteBackendV1(backendRefs []string) gatewayv1.HTTPBackendRef {
 
 }
 
-func GetHTTPRouteRuleV1(paths []string, matchHeaders []string, filterActionMap map[string][]string, backendRefs [][]string) gatewayv1.HTTPRouteRule {
+func GetHTTPRouteRuleV1(paths []string, matchHeaders []string, filterActionMap map[string][]string, backendRefs [][]string, backendRefFilters map[string][]string) gatewayv1.HTTPRouteRule {
 	matches := make([]gatewayv1.HTTPRouteMatch, 0, len(paths))
 	for _, path := range paths {
 		match := GetHTTPRouteMatchV1(path, "PathPrefix", matchHeaders)
@@ -447,8 +566,14 @@ func GetHTTPRouteRuleV1(paths []string, matchHeaders []string, filterActionMap m
 	}
 	backends := make([]gatewayv1.HTTPBackendRef, 0, len(backendRefs))
 	for _, backendRef := range backendRefs {
-		backend := GetHTTPRouteBackendV1(backendRef)
-		backends = append(backends, backend)
+		httpBackend := GetHTTPRouteBackendV1(backendRef)
+		backendFilters := make([]gatewayv1.HTTPRouteFilter, 0, len(filterActionMap))
+		for filterType, actions := range backendRefFilters {
+			filter := GetHTTPRouteFilterV1(filterType, actions)
+			backendFilters = append(backendFilters, filter)
+		}
+		httpBackend.Filters = backendFilters
+		backends = append(backends, httpBackend)
 	}
 	rule := gatewayv1.HTTPRouteRule{}
 	rule.Matches = matches
@@ -543,9 +668,9 @@ func ValidateGatewayStatus(t *testing.T, actualStatus, expectedStatus *gatewayv1
 		g.Expect(actualStatus.Addresses[0]).Should(gomega.Equal(expectedStatus.Addresses[0]))
 	}
 
+	g.Expect(actualStatus.Listeners).To(gomega.HaveLen(len(expectedStatus.Listeners)))
 	ValidateConditions(t, actualStatus.Conditions, expectedStatus.Conditions)
 
-	g.Expect(actualStatus.Listeners).To(gomega.HaveLen(len(expectedStatus.Listeners)))
 	for _, actualListenerStatus := range actualStatus.Listeners {
 		for _, expectedListenerStatus := range expectedStatus.Listeners {
 			if actualListenerStatus.Name == expectedListenerStatus.Name {

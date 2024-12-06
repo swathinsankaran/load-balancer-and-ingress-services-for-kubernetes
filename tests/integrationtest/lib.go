@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,6 +50,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	networking "k8s.io/api/networking/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,6 +78,9 @@ const (
 	EXTDNSANNOTATION    = "custom-fqdn.com"
 	EXTDNSSVC           = "custom-fqdn-svc"
 	INVALID_LB_CLASS    = "not-ako-lb"
+	letterBytes         = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	DefaultRouteCert    = "router-certs-default"
+	DEFAULT_NAMESPACE   = "default"
 )
 
 var KubeClient *k8sfake.Clientset
@@ -952,6 +957,88 @@ func DelSVC(t *testing.T, ns string, Name string) {
 	}
 }
 
+// CreateEPorEPS creates endpoint or endpoint slices based on env
+func CreateEPorEPS(t *testing.T, ns string, Name string, multiPort bool, multiAddress bool, addressPrefix string, multiProtocol ...corev1.Protocol) {
+	if !lib.AKOControlConfig().GetEndpointSlicesEnabled() {
+		CreateEP(t, ns, Name, multiPort, multiAddress, addressPrefix, multiProtocol...)
+		return
+	}
+	addressType := discovery.AddressTypeIPv4
+
+	if addressPrefix == "" {
+		addressPrefix = "1.1.1"
+	}
+	if strings.Contains(addressPrefix, "::") {
+		addressType = discovery.AddressTypeIPv6
+	}
+	//var endpoints discovery.EndpointSlice
+	numPorts, numAddresses := 1, 1
+	if multiPort {
+		numPorts = 3
+	}
+	if len(multiProtocol) != 0 {
+		numPorts = len(multiProtocol)
+	}
+	if multiAddress {
+		numAddresses = 3
+	}
+	svcName := Name
+
+	// // create separate endpoint slice if multiProtocol
+
+	// // mPort := 8080 + i
+	startIndex := 0
+	for i := 0; i < numPorts; i++ {
+		var endpoints []discovery.Endpoint
+		for j := 0; j < numAddresses; j++ {
+			if strings.Contains(addressPrefix, "::") {
+				endpoints = append(endpoints, discovery.Endpoint{
+					Addresses: []string{fmt.Sprintf("%s%d", addressPrefix, j+startIndex+1)},
+				})
+			} else {
+				endpoints = append(endpoints, discovery.Endpoint{Addresses: []string{fmt.Sprintf("%s.%d", addressPrefix, j+startIndex+1)}})
+			}
+			startIndex++
+		}
+		numAddresses--
+		protocol := corev1.ProtocolTCP
+		if len(multiProtocol) != 0 {
+			protocol = multiProtocol[i]
+		}
+		mPort := int32(8080 + i)
+		portName := fmt.Sprintf("foo%d", i)
+		ports := []discovery.EndpointPort{{
+			Protocol: &protocol,
+			Port:     &mPort,
+			Name:     &portName,
+		}}
+		tempName := Name + "-" + randStringBytesRmndr(5)
+		epExample := &discovery.EndpointSlice{
+			AddressType: addressType,
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: ns,
+				Name:      tempName,
+				Labels:    map[string]string{discovery.LabelServiceName: svcName},
+			},
+			Endpoints: endpoints,
+			Ports:     ports,
+		}
+		_, err := KubeClient.DiscoveryV1().EndpointSlices(ns).Create(context.TODO(), epExample, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("error in creating Endpoint: %v", err)
+		}
+
+	}
+	time.Sleep(2 * time.Second)
+}
+func randStringBytesRmndr(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = letterBytes[rand.Int63()%int64(len(letterBytes))]
+	}
+	return string(b)
+}
+
 /*
 CreateEP creates a sample Endpoint object
 if multiPort: False and multiAddress: False
@@ -1034,6 +1121,36 @@ func CreateEP(t *testing.T, ns string, Name string, multiPort bool, multiAddress
 	time.Sleep(2 * time.Second)
 }
 
+func ScaleCreateEPorEPS(t *testing.T, ns string, Name string) {
+	if !lib.AKOControlConfig().GetEndpointSlicesEnabled() {
+		ScaleCreateEP(t, ns, Name)
+		return
+	}
+	portName := "foo"
+	port := int32(8080)
+	protocol := corev1.ProtocolTCP
+	epSlice, err := KubeClient.DiscoveryV1().EndpointSlices(ns).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: discovery.LabelServiceName + "=" + Name,
+	})
+	if len(epSlice.Items) == 0 || err != nil {
+		t.Fatalf("endpoint slice not found. error : %v", err)
+	}
+	epSlice.Items[0].Endpoints = []discovery.Endpoint{
+		{
+			Addresses: []string{"1.2.3.4"},
+		},
+		{
+			Addresses: []string{"1.2.3.5"},
+		},
+	}
+	epSlice.Items[0].Ports = []discovery.EndpointPort{{Name: &portName, Port: &port, Protocol: &protocol}}
+	epSlice.Items[0].ResourceVersion = "2"
+
+	_, err = KubeClient.DiscoveryV1().EndpointSlices(ns).Update(context.TODO(), &epSlice.Items[0], metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("error in creating Endpoint: %v", err)
+	}
+}
 func ScaleCreateEP(t *testing.T, ns string, Name string) {
 	epExample := &corev1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1049,6 +1166,25 @@ func ScaleCreateEP(t *testing.T, ns string, Name string) {
 	_, err := KubeClient.CoreV1().Endpoints(ns).Update(context.TODO(), epExample, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("error in creating Endpoint: %v", err)
+	}
+}
+
+func DelEPorEPS(t *testing.T, ns string, Name string) {
+	if !lib.AKOControlConfig().GetEndpointSlicesEnabled() {
+		DelEP(t, ns, Name)
+		return
+	}
+	epSlice, err := KubeClient.DiscoveryV1().EndpointSlices(ns).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: discovery.LabelServiceName + "=" + Name,
+	})
+	if err != nil {
+		t.Fatalf("error in listing EndpointSlices: %v", err)
+	}
+	for _, es := range epSlice.Items {
+		err := KubeClient.DiscoveryV1().EndpointSlices(es.Namespace).Delete(context.TODO(), es.Name, metav1.DeleteOptions{})
+		if err != nil {
+			t.Fatalf("error in deleting EndpointSlices: %v", err)
+		}
 	}
 }
 
@@ -1130,9 +1266,9 @@ func NewAviFakeClientInstance(kubeclient *k8sfake.Clientset, skipCachePopulation
 		os.Setenv("CTRL_IPADDRESS", url)
 		os.Setenv("FULL_SYNC_INTERVAL", "600")
 		// resets avi client pool instance, allows to connect with the new `ts` server
-		cache.AviClientInstance = nil
+		//cache.AviClientInstance = nil
 		k8s.PopulateControllerProperties(kubeclient)
-		if len(skipCachePopulation) == 0 || skipCachePopulation[0] == false {
+		if len(skipCachePopulation) == 0 || !skipCachePopulation[0] {
 			k8s.PopulateCache()
 		}
 	}
@@ -1332,7 +1468,7 @@ func NormalControllerServer(w http.ResponseWriter, r *http.Request, args ...stri
 				name_split := strings.Split(query_components[0], "=")
 				infraname = name_split[1]
 			} else if len(query_components) == 3 {
-				name_split := strings.Split(query_components[1], "=")
+				name_split := strings.Split(query_components[2], "=")
 				infraname = name_split[1]
 			}
 			json.Unmarshal(data, &resp)
@@ -1423,9 +1559,14 @@ func FeedMockCollectionData(w http.ResponseWriter, r *http.Request, mockFilePath
 				filePath = fmt.Sprintf("%s/%s_mock.json", mockFilePath, splitURL[1])
 			}
 			data, _ = os.ReadFile(filePath)
+			if strings.Contains(r.URL.RawQuery, "gateway") {
+				gwname := strings.Split(strings.Split(r.URL.RawQuery, "&")[0], "=")[1]
+				data = []byte(strings.ReplaceAll(string(data), "01", strings.Split(gwname, "-")[7]))
+			}
 		} else if len(splitURL) == 3 {
 			// with uuid
 			data, _ = os.ReadFile(fmt.Sprintf("%s/%s_uuid_mock.json", mockFilePath, splitURL[1]))
+
 		}
 		w.WriteHeader(http.StatusOK)
 		w.Write(data)
@@ -1475,6 +1616,8 @@ type FakeHostRule struct {
 	GslbFqdn              string
 	NetworkSecurityPolicy string
 	L7Rule                string
+	UseRegex              bool
+	ApplicationRootPath   string
 }
 
 func (hr FakeHostRule) HostRule() *akov1beta1.HostRule {
@@ -1511,6 +1654,8 @@ func (hr FakeHostRule) HostRule() *akov1beta1.HostRule {
 				},
 				NetworkSecurityPolicy: hr.NetworkSecurityPolicy,
 				L7Rule:                hr.L7Rule,
+				UseRegex:              hr.UseRegex,
+				ApplicationRootPath:   hr.ApplicationRootPath,
 			},
 		},
 	}
@@ -1741,6 +1886,7 @@ type FakeHTTPRulePath struct {
 	HealthMonitors []string
 	LbAlgorithm    string
 	Hash           string
+	EnableHTTP2    bool
 }
 
 func (rr FakeHTTPRule) HTTPRule() *akov1beta1.HTTPRule {
@@ -1757,6 +1903,7 @@ func (rr FakeHTTPRule) HTTPRule() *akov1beta1.HTTPRule {
 				Algorithm: p.LbAlgorithm,
 				Hash:      p.Hash,
 			},
+			EnableHttp2: &p.EnableHTTP2,
 		}
 		if p.DestinationCA != "" {
 			rrForPath.TLS.DestinationCA = p.DestinationCA
@@ -1980,6 +2127,13 @@ func SetupIngressClass(t *testing.T, ingclassName, controller, infraSetting stri
 			t.Fatalf("error in adding IngressClass: %v", err)
 		}
 	}
+
+	g := gomega.NewGomegaWithT(t)
+	g.Eventually(func() error {
+		_, err := utils.GetInformers().IngressClassInformer.Lister().Get(ingclassName)
+		return err
+	}, 30*time.Second, 2*time.Second).Should(gomega.BeNil())
+
 }
 
 func AnnotateAKONamespaceWithInfraSetting(t *testing.T, ns, infraSettingName string) {
@@ -2002,6 +2156,34 @@ func AnnotateAKONamespaceWithInfraSetting(t *testing.T, ns, infraSettingName str
 		namespace.Annotations = map[string]string{
 			lib.InfraSettingNameAnnotation: infraSettingName,
 		}
+		_, err = KubeClient.CoreV1().Namespaces().Update(context.TODO(), namespace, metav1.UpdateOptions{})
+		if err != nil {
+			t.Fatalf("Error occurred while Updating namespace: %v", err)
+		}
+	}
+}
+
+func AnnotateNamespaceWithTenant(t *testing.T, ns, tenant string) {
+	namespace, err := KubeClient.CoreV1().Namespaces().Get(context.TODO(), ns, metav1.GetOptions{})
+	if err != nil {
+		namespace := (FakeNamespace{
+			Name:   ns,
+			Labels: map[string]string{},
+		}).Namespace()
+		namespace.ResourceVersion = "1"
+		namespace.Annotations = map[string]string{
+			lib.TenantAnnotation: tenant,
+		}
+		_, err = KubeClient.CoreV1().Namespaces().Create(context.TODO(), namespace, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("Error occurred while Adding namespace: %v", err)
+		}
+	} else {
+		namespace.ResourceVersion = "2"
+		if namespace.Annotations == nil {
+			namespace.Annotations = make(map[string]string)
+		}
+		namespace.Annotations[lib.TenantAnnotation] = tenant
 		_, err = KubeClient.CoreV1().Namespaces().Update(context.TODO(), namespace, metav1.UpdateOptions{})
 		if err != nil {
 			t.Fatalf("Error occurred while Updating namespace: %v", err)
@@ -2052,9 +2234,6 @@ func (infraSetting FakeAviInfraSetting) AviInfraSetting() *akov1beta1.AviInfraSe
 				BgpPeerLabels:  infraSetting.BGPPeerLabels,
 				EnablePublicIP: &infraSetting.EnablePublicIP,
 			},
-			NSXSettings: akov1beta1.AviInfraNSXSettings{
-				T1LR: &infraSetting.T1LR,
-			},
 		},
 	}
 
@@ -2066,6 +2245,10 @@ func (infraSetting FakeAviInfraSetting) AviInfraSetting() *akov1beta1.AviInfraSe
 
 	if infraSetting.ShardSize != "" {
 		setting.Spec.L7Settings.ShardSize = infraSetting.ShardSize
+	}
+
+	if infraSetting.T1LR != "" {
+		setting.Spec.NSXSettings.T1LR = &infraSetting.T1LR
 	}
 
 	return setting
@@ -2346,4 +2529,42 @@ func TeardownL4Rule(t *testing.T, name, namespace string) {
 	if err := lib.AKOControlConfig().V1alpha2CRDClientset().AkoV1alpha2().L4Rules(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("error in deleting L4Rule: %v", err)
 	}
+}
+
+func SetupLicense(license string) {
+	AddMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		url := r.URL.EscapedPath()
+		if strings.Contains(url, "/api/systemconfiguration") {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"default_license_tier": "` + license + `"}`))
+			return
+		}
+		NormalControllerServer(w, r)
+	})
+	// Set the license
+	aviRestClientPool := cache.SharedAVIClients(lib.GetTenant())
+	lib.AKOControlConfig().SetLicenseType(aviRestClientPool.AviClient[0])
+}
+
+type ObjectNameMap struct {
+	nameMap map[string]int
+}
+
+func (o *ObjectNameMap) InitMap() {
+	o.nameMap = make(map[string]int)
+}
+func (o *ObjectNameMap) GenerateName(s string) string {
+	if val, ok := o.nameMap[s]; ok {
+		o.nameMap[s] = val + 1
+	} else {
+		o.nameMap[s] = 1
+	}
+	return s + "-" + strconv.Itoa(o.nameMap[s])
+}
+
+func (o *ObjectNameMap) GetName(s string) string {
+	if _, ok := o.nameMap[s]; !ok {
+		o.nameMap[s] = 1
+	}
+	return s + "-" + strconv.Itoa(o.nameMap[s])
 }

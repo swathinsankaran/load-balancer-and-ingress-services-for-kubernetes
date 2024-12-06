@@ -48,7 +48,19 @@ func TestProfilesAttachedToDedicatedSecureVS(t *testing.T) {
 	})
 
 	modelName := "admin/cluster--foo.com-L7-dedicated"
-	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+	secretName := objNameMap.GenerateName("my-secret")
+	ingressName := objNameMap.GenerateName("foo-with-targets")
+	svcName := objNameMap.GenerateName("avisvc")
+	ingTestObj := IngressTestObject{
+		ingressName: ingressName,
+		isTLS:       true,
+		withSecret:  true,
+		secretName:  secretName,
+		serviceName: svcName,
+		modelNames:  []string{modelName},
+	}
+	ingTestObj.FillParams()
+	SetUpIngressForCacheSyncCheck(t, ingTestObj)
 	g.Eventually(func() int {
 		_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 		nodes, ok := aviModel.(*avinodes.AviObjectGraph)
@@ -58,7 +70,7 @@ func TestProfilesAttachedToDedicatedSecureVS(t *testing.T) {
 		return len(nodes.GetAviVS())
 	}, 30*time.Second).Should(gomega.Equal(1))
 
-	TearDownIngressForCacheSyncCheck(t, modelName)
+	TearDownIngressForCacheSyncCheck(t, secretName, ingressName, svcName, modelName)
 
 	integrationtest.ResetMiddleware()
 

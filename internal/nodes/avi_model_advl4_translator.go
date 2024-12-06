@@ -79,9 +79,23 @@ func (o *AviObjectGraph) ConstructAdvL4VsNode(gatewayName, namespace, key string
 		}
 	}
 
+	infraSetting, err := getL4InfraSetting(key, namespace, nil, &gw.Spec.Class)
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
+			return nil
+		}
+	}
+
+	tenant := lib.GetTenantInNamespace(namespace)
+
+	DeleteStaleTenantModelData(gatewayName, namespace, key, tenant, lib.ADVANCED_L4)
+
+	objects.SharedNamespaceTenantLister().UpdateNamespacedResourceToTenantStore(namespace+"/"+gatewayName, tenant)
+
 	avi_vs_meta := &AviVsNode{
 		Name:   vsName,
-		Tenant: lib.GetTenant(),
+		Tenant: tenant,
 		ServiceMetadata: lib.ServiceMetadataObj{
 			NamespaceServiceName: serviceNSNames,
 			Gateway:              namespace + "/" + gatewayName,
@@ -91,13 +105,6 @@ func (o *AviObjectGraph) ConstructAdvL4VsNode(gatewayName, namespace, key string
 	}
 
 	var vrfcontext string
-	infraSetting, err := getL4InfraSetting(key, namespace, nil, &gw.Spec.Class)
-	if err != nil {
-		if !k8serrors.IsNotFound(err) {
-			utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
-			return nil
-		}
-	}
 	t1lr := lib.GetT1LRPath()
 	if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
 		t1lr = *infraSetting.Spec.NSXSettings.T1LR
@@ -136,7 +143,7 @@ func (o *AviObjectGraph) ConstructAdvL4VsNode(gatewayName, namespace, key string
 
 	vsVipNode := &AviVSVIPNode{
 		Name:        lib.GetL4VSVipName(gatewayName, namespace),
-		Tenant:      lib.GetTenant(),
+		Tenant:      tenant,
 		VrfContext:  vrfcontext,
 		VipNetworks: utils.GetVipNetworkList(),
 	}
@@ -210,9 +217,22 @@ func (o *AviObjectGraph) ConstructSvcApiL4VsNode(gatewayName, namespace, key str
 		}
 	}
 
+	infraSetting, err := getL4InfraSetting(key, namespace, nil, &gw.Spec.GatewayClassName)
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
+			return nil
+		}
+	}
+	tenant := lib.GetTenantInNamespace(namespace)
+
+	DeleteStaleTenantModelData(gatewayName, namespace, key, tenant, lib.ADVANCED_L4)
+
+	objects.SharedNamespaceTenantLister().UpdateNamespacedResourceToTenantStore(namespace+"/"+gatewayName, tenant)
+
 	avi_vs_meta := &AviVsNode{
 		Name:   vsName,
-		Tenant: lib.GetTenant(),
+		Tenant: tenant,
 		ServiceMetadata: lib.ServiceMetadataObj{
 			Gateway:   namespace + "/" + gatewayName,
 			HostNames: fqdns,
@@ -222,13 +242,6 @@ func (o *AviObjectGraph) ConstructSvcApiL4VsNode(gatewayName, namespace, key str
 	}
 
 	var vrfcontext string
-	infraSetting, err := getL4InfraSetting(key, namespace, nil, &gw.Spec.GatewayClassName)
-	if err != nil {
-		if !k8serrors.IsNotFound(err) {
-			utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
-			return nil
-		}
-	}
 	t1lr := lib.GetT1LRPath()
 	if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
 		t1lr = *infraSetting.Spec.NSXSettings.T1LR
@@ -266,7 +279,7 @@ func (o *AviObjectGraph) ConstructSvcApiL4VsNode(gatewayName, namespace, key str
 
 	vsVipNode := &AviVSVIPNode{
 		Name:        lib.GetL4VSVipName(gatewayName, namespace),
-		Tenant:      lib.GetTenant(),
+		Tenant:      tenant,
 		VrfContext:  vrfcontext,
 		FQDNs:       fqdns,
 		VipNetworks: utils.GetVipNetworkList(),
@@ -314,13 +327,19 @@ func (o *AviObjectGraph) ConstructAdvL4PolPoolNodes(vsNode *AviVsNode, gwName, n
 			}
 		}
 		gwClassName = gw.Spec.GatewayClassName
-	} else {
-		gw, err := lib.AKOControlConfig().AdvL4Informers().GatewayInformer.Lister().Gateways(namespace).Get(gwName)
-		if err != nil {
-			utils.AviLog.Warnf("key: %s, msg: GatewayLister returned error : %s", err)
+	}
+
+	infraSetting, err := getL4InfraSetting(key, namespace, nil, &gwClassName)
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
 			return
 		}
-		gwClassName = gw.Spec.Class
+	}
+
+	t1lr := lib.GetT1LRPath()
+	if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
+		t1lr = *infraSetting.Spec.NSXSettings.T1LR
 	}
 
 	var portPoolSet []AviHostPathPortPoolPG
@@ -341,14 +360,14 @@ func (o *AviObjectGraph) ConstructAdvL4PolPoolNodes(vsNode *AviVsNode, gwName, n
 			svcFQDN = getAutoFQDNForService(svcNSName[0], svcNSName[1])
 		}
 
-		poolName := lib.GetAdvL4PoolName(svcNSName[1], namespace, gwName, int32(port))
+		poolName := lib.GetAdvL4PoolName(svcNSName[1], namespace, gwName, portProto[0], int32(port))
 		if lib.UseServicesAPI() {
 			poolName = lib.GetSvcApiL4PoolName(svcNSName[1], namespace, gwName, portProto[0], int32(port))
 		}
 
 		poolNode := &AviPoolNode{
 			Name:     poolName,
-			Tenant:   lib.GetTenant(),
+			Tenant:   vsNode.Tenant,
 			Protocol: portProto[0],
 			PortName: "",
 			ServiceMetadata: lib.ServiceMetadataObj{
@@ -357,18 +376,6 @@ func (o *AviObjectGraph) ConstructAdvL4PolPoolNodes(vsNode *AviVsNode, gwName, n
 			VrfContext: lib.GetVrf(),
 		}
 
-		infraSetting, err := getL4InfraSetting(key, namespace, nil, &gwClassName)
-		if err != nil {
-			if !k8serrors.IsNotFound(err) {
-				utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Gateway %s", key, err.Error())
-				return
-			}
-		}
-
-		t1lr := lib.GetT1LRPath()
-		if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
-			t1lr = *infraSetting.Spec.NSXSettings.T1LR
-		}
 		// Unset the poolnode's vrfcontext.
 		if t1lr != "" {
 			poolNode.T1Lr = t1lr
@@ -434,7 +441,7 @@ func (o *AviObjectGraph) ConstructAdvL4PolPoolNodes(vsNode *AviVsNode, gwName, n
 
 	l4policyNode := &AviL4PolicyNode{
 		Name:       vsNode.Name,
-		Tenant:     lib.GetTenant(),
+		Tenant:     vsNode.Tenant,
 		PortPool:   portPoolSet,
 		AviMarkers: lib.PopulateAdvL4VSNodeMarkers(namespace, gwName),
 	}
@@ -551,16 +558,19 @@ func (o *AviObjectGraph) ConstructSharedVipSvcLBNode(sharedVipKey, namespace, ke
 		vsVipNode.BGPPeerLabels = lib.GetGlobalBgpPeerLabels()
 	}
 
+	t1lr := lib.GetT1LRPath()
+	if t1lr != "" {
+		vsVipNode.VrfContext = ""
+		vsVipNode.T1Lr = t1lr
+		avi_vs_meta.VrfContext = ""
+	}
+
 	// configures VS and VsVip nodes using infraSetting object (via CRD).
 	if serviceObject != nil {
-		infraSetting, err := getL4InfraSetting(key, namespace, serviceObject, nil)
-		if err != nil {
-			if !k8serrors.IsNotFound(err) {
-				utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting %s", key, err.Error())
-				return nil
-			}
+		if infraSetting, err := getL4InfraSetting(key, namespace, serviceObject, nil); err == nil {
+			// This sets vsvipNode.t1lr from aviinfrasetting
+			buildWithInfraSetting(key, namespace, avi_vs_meta, vsVipNode, infraSetting)
 		}
-		buildWithInfraSetting(key, namespace, avi_vs_meta, vsVipNode, infraSetting)
 
 		// Copy the VS properties from L4Rule object
 		if l4Rule, err := getL4Rule(key, serviceObject); err == nil {
@@ -591,6 +601,9 @@ func (o *AviObjectGraph) ConstructSharedVipPolPoolNodes(vsNode *AviVsNode, share
 	var l4Rule *akov1alpha2.L4Rule
 
 	var portPoolSet []AviHostPathPortPoolPG
+	subDomains := GetDefaultSubDomain()
+	t1lr := lib.GetT1LRPath()
+
 	for i, serviceNSName := range serviceNSNames {
 		svcNSName := strings.Split(serviceNSName, "/")
 		svcObj, err := utils.GetInformers().ServiceInformer.Lister().Services(svcNSName[0]).Get(svcNSName[1])
@@ -602,10 +615,11 @@ func (o *AviObjectGraph) ConstructSharedVipPolPoolNodes(vsNode *AviVsNode, share
 		if i == 0 {
 			infraSetting, err = getL4InfraSetting(key, namespace, svcObj, nil)
 			if err != nil {
-				if !k8serrors.IsNotFound(err) {
-					utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Service %s", key, err.Error())
-					return
-				}
+				utils.AviLog.Warnf("key: %s, msg: Error while fetching infrasetting for Service %s", key, err.Error())
+			}
+			// set t1lr from aviinfrasetting
+			if infraSetting != nil && infraSetting.Spec.NSXSettings.T1LR != nil {
+				t1lr = *infraSetting.Spec.NSXSettings.T1LR
 			}
 
 			l4Rule, err = getL4Rule(key, svcObj)
@@ -621,14 +635,14 @@ func (o *AviObjectGraph) ConstructSharedVipPolPoolNodes(vsNode *AviVsNode, share
 			targetPort := listener.TargetPort
 
 			var svcFQDN string
-			if lib.GetL4FqdnFormat() != lib.AutoFQDNDisabled && svcFQDN == "" {
+			if subDomains != nil && lib.GetL4FqdnFormat() != lib.AutoFQDNDisabled {
 				svcFQDN = getAutoFQDNForService(svcNSName[0], svcNSName[1])
 			}
 
 			poolName := lib.GetSvcApiL4PoolName(svcNSName[1], namespace, sharedVipKey, protocol, port)
 			poolNode := &AviPoolNode{
 				Name:     poolName,
-				Tenant:   lib.GetTenant(),
+				Tenant:   vsNode.Tenant,
 				Protocol: protocol,
 				PortName: listener.Name,
 				ServiceMetadata: lib.ServiceMetadataObj{
@@ -681,7 +695,10 @@ func (o *AviObjectGraph) ConstructSharedVipPolPoolNodes(vsNode *AviVsNode, share
 			if lib.IsIstioEnabled() {
 				poolNode.UpdatePoolNodeForIstio()
 			}
-
+			if t1lr != "" {
+				poolNode.T1Lr = t1lr
+				poolNode.VrfContext = ""
+			}
 			vsNode.PoolRefs = append(vsNode.PoolRefs, poolNode)
 			utils.AviLog.Infof("key: %s, msg: evaluated L4 pool values :%v", key, utils.Stringify(poolNode))
 		}
@@ -689,7 +706,7 @@ func (o *AviObjectGraph) ConstructSharedVipPolPoolNodes(vsNode *AviVsNode, share
 
 	l4policyNode := &AviL4PolicyNode{
 		Name:       vsNode.Name,
-		Tenant:     lib.GetTenant(),
+		Tenant:     vsNode.Tenant,
 		PortPool:   portPoolSet,
 		AviMarkers: lib.PopulateAdvL4VSNodeMarkers(namespace, sharedVipKey),
 	}

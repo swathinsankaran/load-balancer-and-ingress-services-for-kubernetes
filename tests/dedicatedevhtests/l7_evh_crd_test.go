@@ -19,6 +19,7 @@ import (
 	"flag"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ var v1alpha2CRDClient *v1alpha2crdfake.Clientset
 var ctrl *k8s.AviController
 var akoApiServer *api.FakeApiServer
 var keyChan chan string
-
+var endpointSliceEnabled bool
 var isVipPerNS = flag.String("isVipPerNS", "false", "is vip per namespace enabled")
 
 func setVipPerNS(vipPerNS string) {
@@ -88,6 +89,8 @@ func TestMain(m *testing.M) {
 	os.Setenv("POD_NAME", "ako-0")
 
 	akoControlConfig := lib.AKOControlConfig()
+	endpointSliceEnabled = lib.GetEndpointSliceEnabled()
+	akoControlConfig.SetEndpointSlicesEnabled(endpointSliceEnabled)
 	KubeClient = k8sfake.NewSimpleClientset()
 	CRDClient = crdfake.NewSimpleClientset()
 	v1beta1CRDClient = v1beta1crdfake.NewSimpleClientset()
@@ -106,13 +109,17 @@ func TestMain(m *testing.M) {
 
 	registeredInformers := []string{
 		utils.ServiceInformer,
-		utils.EndpointInformer,
 		utils.IngressInformer,
 		utils.IngressClassInformer,
 		utils.SecretInformer,
 		utils.NSInformer,
 		utils.NodeInformer,
 		utils.ConfigMapInformer,
+	}
+	if akoControlConfig.GetEndpointSlicesEnabled() {
+		registeredInformers = append(registeredInformers, utils.EndpointSlicesInformer)
+	} else {
+		registeredInformers = append(registeredInformers, utils.EndpointInformer)
 	}
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: KubeClient}, registeredInformers)
 	informers := k8s.K8sinformers{Cs: KubeClient}
@@ -171,7 +178,7 @@ func SetUpTestForIngress(t *testing.T, modelNames ...string) {
 		objects.SharedAviGraphLister().Delete(model)
 	}
 	integrationtest.CreateSVC(t, "default", "avisvc", corev1.ProtocolTCP, corev1.ServiceTypeClusterIP, false)
-	integrationtest.CreateEP(t, "default", "avisvc", false, false, "1.1.1")
+	integrationtest.CreateEPorEPS(t, "default", "avisvc", false, false, "1.1.1")
 }
 
 func TearDownTestForIngress(t *testing.T, modelNames ...string) {
@@ -179,7 +186,7 @@ func TearDownTestForIngress(t *testing.T, modelNames ...string) {
 	// 	objects.SharedAviGraphLister().Delete(model)
 	// }
 	integrationtest.DelSVC(t, "default", "avisvc")
-	integrationtest.DelEP(t, "default", "avisvc")
+	integrationtest.DelEPorEPS(t, "default", "avisvc")
 }
 
 func SetUpIngressForCacheSyncCheck(t *testing.T, tlsIngress, withSecret bool, modelNames ...string) {
@@ -211,6 +218,41 @@ func SetUpIngressForCacheSyncCheck(t *testing.T, tlsIngress, withSecret bool, mo
 
 func TearDownIngressForCacheSyncCheck(t *testing.T, modelName string) {
 	if err := KubeClient.NetworkingV1().Ingresses("default").Delete(context.TODO(), "foo-with-targets", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("Couldn't DELETE the Ingress %v", err)
+	}
+	KubeClient.CoreV1().Secrets("default").Delete(context.TODO(), "my-secret", metav1.DeleteOptions{})
+	TearDownTestForIngress(t, modelName)
+}
+
+func SetUpIngressForCacheSyncCheckMultiPaths(t *testing.T, tlsIngress, withSecret bool, fqdns []string, paths []string, modelNames ...string) {
+	SetupDomain()
+	SetUpTestForIngress(t, modelNames...)
+	ingressObject := integrationtest.FakeIngress{
+		Name:        "app-root-test",
+		Namespace:   "default",
+		DnsNames:    fqdns,
+		Ips:         []string{"8.8.8.8"},
+		HostNames:   []string{"v1"},
+		Paths:       paths,
+		ServiceName: "avisvc",
+	}
+	if withSecret {
+		integrationtest.AddSecret("my-secret", "default", "tlsCert", "tlsKey")
+	}
+	if tlsIngress {
+		ingressObject.TlsSecretDNS = map[string][]string{
+			"my-secret": {"foo.com"},
+		}
+	}
+	ingrFake := ingressObject.Ingress()
+	if _, err := KubeClient.NetworkingV1().Ingresses("default").Create(context.TODO(), ingrFake, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+	integrationtest.PollForCompletion(t, modelNames[0], 5)
+}
+
+func TearDownIngressForCacheSyncCheckPath(t *testing.T, modelName string) {
+	if err := KubeClient.NetworkingV1().Ingresses("default").Delete(context.TODO(), "app-root-test", metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("Couldn't DELETE the Ingress %v", err)
 	}
 	KubeClient.CoreV1().Secrets("default").Delete(context.TODO(), "my-secret", metav1.DeleteOptions{})
@@ -391,7 +433,7 @@ func TestCreateUpdateDeleteSSORuleForEvhInsecure(t *testing.T) {
 	g.Eventually(func() string {
 		ssoRule, _ := v1alpha2CRDClient.AkoV1alpha2().SSORules("default").Get(context.TODO(), srname, metav1.GetOptions{})
 		return ssoRule.Status.Status
-	}, 10*time.Second).Should(gomega.Equal("Accepted"))
+	}, 30*time.Second, 1*time.Second).Should(gomega.Equal("Accepted"))
 
 	// update is not getting reflected on evh nodes immediately. Hence adding a sleep of 5 seconds.
 	time.Sleep(5 * time.Second)
@@ -879,6 +921,526 @@ func TestApplySSLHostRuleToInsecureDedicatedVS(t *testing.T) {
 
 	integrationtest.TeardownHostRule(t, g, vsKey, hrname)
 	integrationtest.VerifyMetadataHostRule(t, g, vsKey, "default/hr-cluster--foo.com-L7-dedicated", false)
+
+	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+
+func TestHostRuleUseRegexSecure(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelName, _ := GetDedicatedModel("foo.com", "default")
+	hrname := "hr-cluster--foo.com-L7-dedicated"
+	fqdn := "foo.com"
+	namespace := "default"
+
+	SetUpIngressForCacheSyncCheck(t, true, true, modelName)
+
+	hostrule := integrationtest.FakeHostRule{
+		Name:      hrname,
+		Namespace: namespace,
+		Fqdn:      fqdn,
+		UseRegex:  true,
+	}
+	hrCreate := hostrule.HostRule()
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules(namespace).Create(context.TODO(), hrCreate, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+
+	vsKey := cache.NamespaceName{Namespace: "admin", Name: "cluster--fc94484f7312a22cfb5bcc517b05649e256c24a8-EVH"}
+	integrationtest.VerifyMetadataHostRule(t, g, vsKey, "default/hr-cluster--foo.com-L7-dedicated", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 30*time.Second).Should(gomega.BeTrue())
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+
+	var evhNode *avinodes.AviEvhVsNode
+	if *isVipPerNS == "true" {
+		evhNode = nodes[0].EvhNodes[0]
+	} else {
+		evhNode = nodes[0]
+	}
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(2))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.BeNil())
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("REGEX_MATCH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCase).Should(gomega.Equal("INSENSITIVE"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Path).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPort).To(gomega.Equal(int32(443)))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPath).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].MatchCriteria).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Hosts[0]).To(gomega.Equal("foo.com"))
+	g.Expect(evhNode.HttpPolicyRefs[1].HppMap).To(gomega.BeNil())
+
+	integrationtest.TeardownHostRule(t, g, vsKey, hrname)
+	time.Sleep(2 * time.Second)
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(2))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.BeNil())
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("BEGINS_WITH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(0))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Path).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPort).To(gomega.Equal(int32(443)))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPath).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].MatchCriteria).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Hosts[0]).To(gomega.Equal("foo.com"))
+	g.Expect(evhNode.HttpPolicyRefs[1].HppMap).To(gomega.BeNil())
+
+	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+
+func TestHostRuleAppRootSecure(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelName, _ := GetDedicatedModel("foo.com", "default")
+	hrname := "hr-cluster--foo.com-L7-dedicated"
+	fqdn := "foo.com"
+	namespace := "default"
+	appRootPath := "/foo"
+
+	SetUpIngressForCacheSyncCheckMultiPaths(t, true, true, []string{fqdn}, []string{"/"}, modelName)
+
+	hostrule := integrationtest.FakeHostRule{
+		Name:                hrname,
+		Namespace:           namespace,
+		Fqdn:                fqdn,
+		ApplicationRootPath: appRootPath,
+	}
+	hrCreate := hostrule.HostRule()
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules(namespace).Create(context.TODO(), hrCreate, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+
+	vsKey := cache.NamespaceName{Namespace: "admin", Name: "cluster--fc94484f7312a22cfb5bcc517b05649e256c24a8-EVH"}
+	integrationtest.VerifyMetadataHostRule(t, g, vsKey, "default/hr-cluster--foo.com-L7-dedicated", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 30*time.Second).Should(gomega.BeTrue())
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+
+	var evhNode *avinodes.AviEvhVsNode
+	if *isVipPerNS == "true" {
+		evhNode = nodes[0].EvhNodes[0]
+	} else {
+		evhNode = nodes[0]
+	}
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(2))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("BEGINS_WITH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].Path[0]).Should(gomega.Equal(appRootPath))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(0))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].Path).To(gomega.Equal("/"))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].RedirectPort).To(gomega.Equal(int32(8080)))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].RedirectPath).To(gomega.Equal(strings.TrimPrefix(appRootPath, "/")))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].MatchCriteria).To(gomega.Equal("EQUALS"))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Path).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPort).To(gomega.Equal(int32(443)))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPath).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].MatchCriteria).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Hosts[0]).To(gomega.Equal("foo.com"))
+	g.Expect(evhNode.HttpPolicyRefs[1].HppMap).To(gomega.BeNil())
+
+	integrationtest.TeardownHostRule(t, g, vsKey, hrname)
+	time.Sleep(2 * time.Second)
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(2))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.BeNil())
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("BEGINS_WITH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].Path[0]).Should(gomega.Equal("/"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(0))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Path).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPort).To(gomega.Equal(int32(443)))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPath).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].MatchCriteria).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Hosts[0]).To(gomega.Equal("foo.com"))
+	g.Expect(evhNode.HttpPolicyRefs[1].HppMap).To(gomega.BeNil())
+
+	TearDownIngressForCacheSyncCheckPath(t, modelName)
+}
+
+func TestHostRuleRegexAppRootSecure(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelName, _ := GetDedicatedModel("foo.com", "default")
+	hrname := "hr-cluster--foo.com-L7-dedicated"
+	fqdn := "foo.com"
+	namespace := "default"
+	appRootPath := "/foo"
+
+	SetUpIngressForCacheSyncCheckMultiPaths(t, true, true, []string{fqdn, fqdn}, []string{"/something(/|$)(.*)", "/"}, modelName)
+
+	hostrule := integrationtest.FakeHostRule{
+		Name:                hrname,
+		Namespace:           namespace,
+		Fqdn:                fqdn,
+		UseRegex:            true,
+		ApplicationRootPath: appRootPath,
+	}
+	hrCreate := hostrule.HostRule()
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules(namespace).Create(context.TODO(), hrCreate, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+
+	vsKey := cache.NamespaceName{Namespace: "admin", Name: "cluster--fc94484f7312a22cfb5bcc517b05649e256c24a8-EVH"}
+	integrationtest.VerifyMetadataHostRule(t, g, vsKey, "default/hr-cluster--foo.com-L7-dedicated", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 30*time.Second).Should(gomega.BeTrue())
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+
+	var evhNode *avinodes.AviEvhVsNode
+	if *isVipPerNS == "true" {
+		evhNode = nodes[0].EvhNodes[0]
+	} else {
+		evhNode = nodes[0]
+	}
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(2))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(2))
+
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("REGEX_MATCH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCase).Should(gomega.Equal("INSENSITIVE"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].Path[0]).To(gomega.Equal("/something(/|$)(.*)"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].MatchCriteria).Should(gomega.Equal("REGEX_MATCH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].MatchCase).Should(gomega.Equal("INSENSITIVE"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].StringGroupRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].Path[0]).To(gomega.Equal(appRootPath))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].Path).To(gomega.Equal("/"))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].RedirectPort).To(gomega.Equal(int32(8080)))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].RedirectPath).To(gomega.Equal(strings.TrimPrefix(appRootPath, "/")))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].MatchCriteria).To(gomega.Equal("EQUALS"))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Path).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPort).To(gomega.Equal(int32(443)))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPath).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].MatchCriteria).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Hosts[0]).To(gomega.Equal("foo.com"))
+	g.Expect(evhNode.HttpPolicyRefs[1].HppMap).To(gomega.BeNil())
+
+	integrationtest.TeardownHostRule(t, g, vsKey, hrname)
+	time.Sleep(2 * time.Second)
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(2))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.BeNil())
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(2))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("BEGINS_WITH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].Path[0]).To(gomega.Equal("/something(/|$)(.*)"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(0))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].MatchCriteria).Should(gomega.Equal("BEGINS_WITH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].Path[0]).To(gomega.Equal("/"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].StringGroupRefs).To(gomega.HaveLen(0))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Path).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPort).To(gomega.Equal(int32(443)))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].RedirectPath).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].MatchCriteria).To(gomega.Equal(""))
+	g.Expect(evhNode.HttpPolicyRefs[1].RedirectPorts[0].Hosts[0]).To(gomega.Equal("foo.com"))
+	g.Expect(evhNode.HttpPolicyRefs[1].HppMap).To(gomega.BeNil())
+
+	TearDownIngressForCacheSyncCheckPath(t, modelName)
+}
+
+func TestHostRuleUseRegexInsecure(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelName, _ := GetDedicatedModel("foo.com", "default")
+	hrname := "hr-cluster--foo.com-L7-dedicated"
+	fqdn := "foo.com"
+	namespace := "default"
+
+	SetUpIngressForCacheSyncCheck(t, false, false, modelName)
+
+	hostrule := integrationtest.FakeHostRule{
+		Name:      hrname,
+		Namespace: namespace,
+		Fqdn:      fqdn,
+		UseRegex:  true,
+	}
+	hrCreate := hostrule.HostRule()
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules(namespace).Create(context.TODO(), hrCreate, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+
+	vsKey := cache.NamespaceName{Namespace: "admin", Name: "cluster--fc94484f7312a22cfb5bcc517b05649e256c24a8-EVH"}
+	integrationtest.VerifyMetadataHostRule(t, g, vsKey, "default/hr-cluster--foo.com-L7-dedicated", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 30*time.Second).Should(gomega.BeTrue())
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+
+	var evhNode *avinodes.AviEvhVsNode
+	if *isVipPerNS == "true" {
+		evhNode = nodes[0].EvhNodes[0]
+	} else {
+		evhNode = nodes[0]
+	}
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.BeNil())
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("REGEX_MATCH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCase).Should(gomega.Equal("INSENSITIVE"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(1))
+
+	integrationtest.TeardownHostRule(t, g, vsKey, hrname)
+	time.Sleep(2 * time.Second)
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.BeNil())
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("BEGINS_WITH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(0))
+
+	TearDownIngressForCacheSyncCheck(t, modelName)
+}
+
+func TestHostRuleAppRootInsecure(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelName, _ := GetDedicatedModel("foo.com", "default")
+	hrname := "hr-cluster--foo.com-L7-dedicated"
+	fqdn := "foo.com"
+	namespace := "default"
+	appRootPath := "/foo"
+
+	SetUpIngressForCacheSyncCheckMultiPaths(t, false, false, []string{fqdn}, []string{"/"}, modelName)
+
+	hostrule := integrationtest.FakeHostRule{
+		Name:                hrname,
+		Namespace:           namespace,
+		Fqdn:                fqdn,
+		ApplicationRootPath: appRootPath,
+	}
+	hrCreate := hostrule.HostRule()
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules(namespace).Create(context.TODO(), hrCreate, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+
+	vsKey := cache.NamespaceName{Namespace: "admin", Name: "cluster--fc94484f7312a22cfb5bcc517b05649e256c24a8-EVH"}
+	integrationtest.VerifyMetadataHostRule(t, g, vsKey, "default/hr-cluster--foo.com-L7-dedicated", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 30*time.Second).Should(gomega.BeTrue())
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+
+	var evhNode *avinodes.AviEvhVsNode
+	if *isVipPerNS == "true" {
+		evhNode = nodes[0].EvhNodes[0]
+	} else {
+		evhNode = nodes[0]
+	}
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("BEGINS_WITH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].Path[0]).Should(gomega.Equal(appRootPath))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(0))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].Path).To(gomega.Equal("/"))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].RedirectPort).To(gomega.Equal(int32(8080)))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].RedirectPath).To(gomega.Equal(strings.TrimPrefix(appRootPath, "/")))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].MatchCriteria).To(gomega.Equal("EQUALS"))
+
+	integrationtest.TeardownHostRule(t, g, vsKey, hrname)
+	time.Sleep(2 * time.Second)
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.BeNil())
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("BEGINS_WITH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].Path[0]).Should(gomega.Equal("/"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(0))
+
+	TearDownIngressForCacheSyncCheckPath(t, modelName)
+}
+
+func TestHostRuleRegexAppRootInsecure(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelName, _ := GetDedicatedModel("foo.com", "default")
+	hrname := "hr-cluster--foo.com-L7-dedicated"
+	fqdn := "foo.com"
+	namespace := "default"
+	appRootPath := "/foo"
+
+	SetUpIngressForCacheSyncCheckMultiPaths(t, false, false, []string{fqdn, fqdn}, []string{"/something(/|$)(.*)", "/"}, modelName)
+
+	hostrule := integrationtest.FakeHostRule{
+		Name:                hrname,
+		Namespace:           namespace,
+		Fqdn:                fqdn,
+		UseRegex:            true,
+		ApplicationRootPath: appRootPath,
+	}
+	hrCreate := hostrule.HostRule()
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HostRules(namespace).Create(context.TODO(), hrCreate, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding HostRule: %v", err)
+	}
+	g.Eventually(func() string {
+		hostrule, _ := v1beta1CRDClient.AkoV1beta1().HostRules("default").Get(context.TODO(), hrname, metav1.GetOptions{})
+		return hostrule.Status.Status
+	}, 20*time.Second).Should(gomega.Equal("Accepted"))
+
+	vsKey := cache.NamespaceName{Namespace: "admin", Name: "cluster--fc94484f7312a22cfb5bcc517b05649e256c24a8-EVH"}
+	integrationtest.VerifyMetadataHostRule(t, g, vsKey, "default/hr-cluster--foo.com-L7-dedicated", true)
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 30*time.Second).Should(gomega.BeTrue())
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+
+	var evhNode *avinodes.AviEvhVsNode
+	if *isVipPerNS == "true" {
+		evhNode = nodes[0].EvhNodes[0]
+	} else {
+		evhNode = nodes[0]
+	}
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(2))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("REGEX_MATCH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCase).Should(gomega.Equal("INSENSITIVE"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].Path[0]).To(gomega.Equal("/something(/|$)(.*)"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].MatchCriteria).Should(gomega.Equal("REGEX_MATCH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].MatchCase).Should(gomega.Equal("INSENSITIVE"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].StringGroupRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].Path[0]).To(gomega.Equal(appRootPath))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].Path).To(gomega.Equal("/"))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].RedirectPort).To(gomega.Equal(int32(8080)))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].RedirectPath).To(gomega.Equal(strings.TrimPrefix(appRootPath, "/")))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts[0].MatchCriteria).To(gomega.Equal("EQUALS"))
+
+	integrationtest.TeardownHostRule(t, g, vsKey, hrname)
+	time.Sleep(2 * time.Second)
+
+	g.Expect(evhNode.HttpPolicyRefs).To(gomega.HaveLen(1))
+	g.Expect(evhNode.HttpPolicyRefs[0].RedirectPorts).To(gomega.BeNil())
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap).To(gomega.HaveLen(2))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].MatchCriteria).Should(gomega.Equal("BEGINS_WITH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].Path[0]).To(gomega.Equal("/something(/|$)(.*)"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[0].StringGroupRefs).To(gomega.HaveLen(0))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].MatchCriteria).Should(gomega.Equal("BEGINS_WITH"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].Path[0]).To(gomega.Equal("/"))
+	g.Expect(evhNode.HttpPolicyRefs[0].HppMap[1].StringGroupRefs).To(gomega.HaveLen(0))
+
+	TearDownIngressForCacheSyncCheckPath(t, modelName)
+}
+
+func TestHTTPRuleCreateDeleteWithEnableHTTP2ForEvh(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelName, _ := GetDedicatedModel("foo.com", "default")
+	rrName := "samplerr-foo"
+
+	SetupDomain()
+	secretName := "my-secret"
+	ingressName := "foo-with-targets"
+	svcName := "avisvc"
+
+	SetUpTestForIngress(t, svcName, modelName)
+	integrationtest.AddSecret(secretName, "default", "tlsCert", "tlsKey")
+	integrationtest.PollForCompletion(t, modelName, 5)
+	ingressObject := integrationtest.FakeIngress{
+		Name:        ingressName,
+		Namespace:   "default",
+		DnsNames:    []string{"foo.com"},
+		Ips:         []string{"8.8.8.8"},
+		HostNames:   []string{"v1"},
+		Paths:       []string{"/foo", "/bar"},
+		ServiceName: svcName,
+		TlsSecretDNS: map[string][]string{
+			secretName: {"foo.com"},
+		},
+	}
+
+	ingrFake := ingressObject.Ingress(true)
+	if _, err := KubeClient.NetworkingV1().Ingresses("default").Create(context.TODO(), ingrFake, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding Ingress: %v", err)
+	}
+	integrationtest.PollForCompletion(t, modelName, 5)
+
+	poolFooKey := cache.NamespaceName{Namespace: "admin", Name: lib.Encode("cluster--default-foo.com_foo-"+ingressName+"-"+svcName, lib.Pool)}
+	poolBarKey := cache.NamespaceName{Namespace: "admin", Name: lib.Encode("cluster--default-foo.com_bar-"+ingressName+"-"+svcName, lib.Pool)}
+	httpRulePath := "/"
+	httprule := integrationtest.FakeHTTPRule{
+		Name:      rrName,
+		Namespace: "default",
+		Fqdn:      "foo.com",
+		PathProperties: []integrationtest.FakeHTTPRulePath{{
+			Path:        httpRulePath,
+			EnableHTTP2: true,
+		}},
+	}
+
+	rrCreate := httprule.HTTPRule()
+	if _, err := lib.AKOControlConfig().V1beta1CRDClientset().AkoV1beta1().HTTPRules("default").Create(context.TODO(), rrCreate, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("error in adding HTTPRule: %v", err)
+	}
+
+	integrationtest.VerifyMetadataHTTPRule(t, g, poolFooKey, "default/"+rrName+"/"+httpRulePath, true)
+	integrationtest.VerifyMetadataHTTPRule(t, g, poolBarKey, "default/"+rrName+"/"+httpRulePath, true)
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviEvhVS()
+
+	var evhNode *avinodes.AviEvhVsNode
+	if *isVipPerNS == "true" {
+		evhNode = nodes[0].EvhNodes[0]
+	} else {
+		evhNode = nodes[0]
+	}
+
+	g.Expect(*evhNode.PoolRefs[0].EnableHttp2).Should(gomega.Equal(true))
+
+	// delete httprule disables HTTP2
+	integrationtest.TeardownHTTPRule(t, rrName)
+	integrationtest.VerifyMetadataHTTPRule(t, g, poolFooKey, "default/"+rrName+"/"+httpRulePath, false)
+	integrationtest.VerifyMetadataHTTPRule(t, g, poolBarKey, "default/"+rrName+"/"+httpRulePath, false)
+
+	g.Expect(evhNode.PoolRefs[0].EnableHttp2).To(gomega.BeNil())
 
 	TearDownIngressForCacheSyncCheck(t, modelName)
 }

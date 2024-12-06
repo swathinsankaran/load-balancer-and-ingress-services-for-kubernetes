@@ -15,15 +15,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 
-	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-infra/avirest"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-infra/ingestion"
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/k8s"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
+	v1beta1crd "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/client/v1beta1/clientset/versioned"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -73,7 +76,21 @@ func InitializeAKOInfra() {
 		utils.AviLog.Fatalf("Error building kubernetes clientset: %s", err.Error())
 	}
 
+	v1beta1crdClient, err := v1beta1crd.NewForConfig(cfg)
+	if err != nil {
+		utils.AviLog.Fatalf("Error building AKO CRD v1beta1 clientset: %s", err.Error())
+	}
+
 	utils.AviLog.Infof("Successfully created kube client for ako-infra")
+
+	lib.AKOControlConfig().SetEventRecorder(lib.AKOEventComponent, kubeClient, false)
+	pods, err := kubeClient.CoreV1().Pods(utils.GetAKONamespace()).List(context.TODO(), metav1.ListOptions{Limit: 1})
+	if err != nil {
+		utils.AviLog.Warnf("Error getting AKO pod details, %s.", err.Error())
+	}
+	for _, pod := range pods.Items {
+		lib.AKOControlConfig().SaveAKOPodObjectMeta(&pod)
+	}
 
 	registeredInformers, err := lib.InformersToRegister(kubeClient, nil)
 	if err != nil {
@@ -85,7 +102,11 @@ func InitializeAKOInfra() {
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: kubeClient}, registeredInformers, informersArg)
 	lib.NewDynamicInformers(dynamicClient, true)
 
+	lib.AKOControlConfig().SetCRDClientsetAndEnableInfraSettingParam(v1beta1crdClient)
+	k8s.NewInfraSettingCRDInformer()
+
 	c := ingestion.SharedVCFK8sController()
+
 	stopCh := utils.SetupSignalHandler()
 	ctrlCh := make(chan struct{})
 
@@ -108,15 +129,17 @@ func InitializeAKOInfra() {
 		}
 	}
 
+	c.InitNetworkingHandler()
+	lib.RunAviInfraSettingInformer(stopCh)
 	c.AddSecretEventHandler(stopCh)
 	a.SetupSEGroup(transportZone)
 	c.AddAvailabilityZoneCREventHandler(stopCh)
-	avirest.SyncLSLRNetwork()
+	c.AddNamespaceEventHandler(stopCh)
+	c.Sync()
 	a.AnnotateSystemNamespace(lib.GetClusterID(), utils.CloudName)
 	c.AddNetworkInfoEventHandler(stopCh)
-	c.AddNamespaceEventHandler(stopCh)
 
-	worker := avirest.NewLRLSFullSyncWorker()
+	worker := c.InitFullSyncWorker()
 	go worker.Run()
 
 	<-stopCh

@@ -55,11 +55,7 @@ func init() {
 func IsV4(addr string) bool {
 	ip := net.ParseIP(addr)
 	v4 := ip.To4()
-	if v4 == nil {
-		return false
-	} else {
-		return true
-	}
+	return v4 != nil
 }
 
 /*
@@ -185,6 +181,8 @@ func instantiateInformers(kubeClient KubeClientIntf, registeredInformers []strin
 			informers.PodInformer = kubeInformerFactory.Core().V1().Pods()
 		case EndpointInformer:
 			informers.EpInformer = kubeInformerFactory.Core().V1().Endpoints()
+		case EndpointSlicesInformer:
+			informers.EpSlicesInformer = kubeInformerFactory.Discovery().V1().EndpointSlices()
 		case SecretInformer:
 			if akoNSBoundInformer {
 				informers.SecretInformer = akoNSInformerFactory.Core().V1().Secrets()
@@ -309,7 +307,7 @@ func HasElem(s interface{}, elem interface{}) bool {
 		for i := 0; i < arrV.Len(); i++ {
 			// Important - Panics if slice element points to an unexported struct field
 			// see https://golang.org/pkg/reflect/#Value.Interface
-			if arrV.Index(i).Interface() == elem {
+			if reflect.DeepEqual(arrV.Index(i).Interface(), elem) {
 				return true
 			}
 		}
@@ -625,4 +623,38 @@ func String(s *string) string {
 		return *s
 	}
 	return ""
+}
+
+func CheckSubdomainOverlapping(hostName1, hostName2 string) bool {
+	host1SubdomainList := strings.Split(hostName1, ".")
+	host2SubdomainList := strings.Split(hostName2, ".")
+
+	shortestListLen := len(host1SubdomainList)
+	if len(host2SubdomainList) < shortestListLen {
+		shortestListLen = len(host2SubdomainList)
+	}
+	index1 := len(host1SubdomainList) - 1
+	index2 := len(host2SubdomainList) - 1
+	for ; shortestListLen > 0; shortestListLen-- {
+		if host1SubdomainList[index1] != WILDCARD && host2SubdomainList[index2] != WILDCARD {
+			if host1SubdomainList[index1] != host2SubdomainList[index2] {
+				return false
+			}
+		}
+		index1 = index1 - 1
+		index2 = index2 - 1
+	}
+	return true
+}
+func GetUriEncoded(uri string) string {
+	newUri, err := url.Parse(uri)
+	if err != nil {
+		AviLog.Errorf("Error while parsing uri: %+v", err)
+	}
+	queryValues := newUri.Query()
+	if len(queryValues) == 0 {
+		return uri
+	}
+	newUri.RawQuery = queryValues.Encode()
+	return newUri.String()
 }

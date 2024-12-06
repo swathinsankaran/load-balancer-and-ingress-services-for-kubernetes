@@ -44,26 +44,33 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
-func SetUpTestForSvcLB(t *testing.T) {
-	objects.SharedAviGraphLister().Delete(SINGLEPORTMODEL)
-	CreateSVC(t, NAMESPACE, SINGLEPORTSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false)
-	CreateEP(t, NAMESPACE, SINGLEPORTSVC, false, false, "1.1.1")
-	PollForCompletion(t, SINGLEPORTMODEL, 5)
+var endpointSliceEnabled bool
+var objNameMap ObjectNameMap
+var MODEL_REDNS_PREFIX = "admin/cluster--red-ns-"
+
+func SetUpTestForSvcLB(t *testing.T, svcName string) {
+	modelName := MODEL_REDNS_PREFIX + svcName
+	objects.SharedAviGraphLister().Delete(modelName)
+	CreateSVC(t, NAMESPACE, svcName, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false)
+	CreateEPorEPS(t, NAMESPACE, svcName, false, false, "1.1.1")
+	PollForCompletion(t, modelName, 5)
 }
 
-func SetUpTestForSvcLBWithLBClass(t *testing.T, LBClass string) {
-	objects.SharedAviGraphLister().Delete(SINGLEPORTMODEL)
-	CreateSVCWithValidOrInvalidLBClass(t, NAMESPACE, SINGLEPORTSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, LBClass)
-	CreateEP(t, NAMESPACE, SINGLEPORTSVC, false, false, "1.1.1")
-	PollForCompletion(t, SINGLEPORTMODEL, 5)
+func SetUpTestForSvcLBWithLBClass(t *testing.T, LBClass, svcName string) {
+	modelName := MODEL_REDNS_PREFIX + svcName
+	objects.SharedAviGraphLister().Delete(modelName)
+	CreateSVCWithValidOrInvalidLBClass(t, NAMESPACE, svcName, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, LBClass)
+	CreateEPorEPS(t, NAMESPACE, svcName, false, false, "1.1.1")
+	PollForCompletion(t, modelName, 5)
 }
 
-func TearDownTestForSvcLB(t *testing.T, g *gomega.GomegaWithT) {
-	objects.SharedAviGraphLister().Delete(SINGLEPORTMODEL)
-	DelSVC(t, NAMESPACE, SINGLEPORTSVC)
-	DelEP(t, NAMESPACE, SINGLEPORTSVC)
+func TearDownTestForSvcLB(t *testing.T, g *gomega.GomegaWithT, svcName string) {
+	modelName := MODEL_REDNS_PREFIX + svcName
+	objects.SharedAviGraphLister().Delete(modelName)
+	DelSVC(t, NAMESPACE, svcName)
+	DelEPorEPS(t, NAMESPACE, svcName)
 	mcache := cache.SharedAviObjCache()
-	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)}
+	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)}
 	g.Eventually(func() bool {
 		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
@@ -71,7 +78,7 @@ func TearDownTestForSvcLB(t *testing.T, g *gomega.GomegaWithT) {
 }
 
 func SetUpTestForSvcLBWithExtDNS(t *testing.T) {
-	modelSvcDNS01 := "admin/cluster--red-ns-" + EXTDNSSVC
+	modelSvcDNS01 := MODEL_REDNS_PREFIX + EXTDNSSVC
 	objects.SharedAviGraphLister().Delete(modelSvcDNS01)
 	svcObj := ConstructService(NAMESPACE, EXTDNSSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, make(map[string]string), "")
 	svcObj.Annotations = map[string]string{lib.ExternalDNSAnnotation: EXTDNSANNOTATION}
@@ -79,15 +86,15 @@ func SetUpTestForSvcLBWithExtDNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, EXTDNSSVC, false, false, "1.1.1")
+	CreateEPorEPS(t, NAMESPACE, EXTDNSSVC, false, false, "1.1.1")
 	PollForCompletion(t, modelSvcDNS01, 5)
 }
 
 func TearDownTestForSvcLBWithExtDNS(t *testing.T, g *gomega.GomegaWithT) {
-	modelSvcDNS01 := "admin/cluster--red-ns-" + EXTDNSSVC
+	modelSvcDNS01 := MODEL_REDNS_PREFIX + EXTDNSSVC
 	objects.SharedAviGraphLister().Delete(modelSvcDNS01)
 	DelSVC(t, NAMESPACE, EXTDNSSVC)
-	DelEP(t, NAMESPACE, EXTDNSSVC)
+	DelEPorEPS(t, NAMESPACE, EXTDNSSVC)
 	mcache := cache.SharedAviObjCache()
 	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, EXTDNSSVC)}
 	g.Eventually(func() bool {
@@ -96,26 +103,29 @@ func TearDownTestForSvcLBWithExtDNS(t *testing.T, g *gomega.GomegaWithT) {
 	}, 5*time.Second).Should(gomega.Equal(false))
 }
 
-func SetUpTestForSvcLBMultiport(t *testing.T) {
-	objects.SharedAviGraphLister().Delete(MULTIPORTMODEL)
-	CreateSVC(t, NAMESPACE, MULTIPORTSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, true)
-	CreateEP(t, NAMESPACE, MULTIPORTSVC, true, true, "1.1.1")
-	PollForCompletion(t, MULTIPORTMODEL, 10)
+func SetUpTestForSvcLBMultiport(t *testing.T, svcName string) {
+	modelName := MODEL_REDNS_PREFIX + svcName
+	objects.SharedAviGraphLister().Delete(modelName)
+	CreateSVC(t, NAMESPACE, svcName, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, true)
+	CreateEPorEPS(t, NAMESPACE, svcName, true, true, "1.1.1")
+	PollForCompletion(t, modelName, 10)
 }
 
-func SetUpTestForSvcLBMixedProtocol(t *testing.T, multiProtocol ...corev1.Protocol) {
-	objects.SharedAviGraphLister().Delete(SINGLEPORTMODEL)
-	CreateSVC(t, NAMESPACE, SINGLEPORTSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, multiProtocol...)
-	CreateEP(t, NAMESPACE, SINGLEPORTSVC, false, false, "1.1.1", multiProtocol...)
-	PollForCompletion(t, SINGLEPORTMODEL, 10)
+func SetUpTestForSvcLBMixedProtocol(t *testing.T, svcName string, multiProtocol ...corev1.Protocol) {
+	modelName := MODEL_REDNS_PREFIX + svcName
+	objects.SharedAviGraphLister().Delete(modelName)
+	CreateSVC(t, NAMESPACE, svcName, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, multiProtocol...)
+	CreateEPorEPS(t, NAMESPACE, svcName, false, false, "1.1.1", multiProtocol...)
+	PollForCompletion(t, modelName, 10)
 }
 
-func TearDownTestForSvcLBMultiport(t *testing.T, g *gomega.GomegaWithT) {
-	objects.SharedAviGraphLister().Delete(MULTIPORTMODEL)
-	DelSVC(t, NAMESPACE, MULTIPORTSVC)
-	DelEP(t, NAMESPACE, MULTIPORTSVC)
+func TearDownTestForSvcLBMultiport(t *testing.T, g *gomega.GomegaWithT, svcName string) {
+	modelName := MODEL_REDNS_PREFIX + svcName
+	objects.SharedAviGraphLister().Delete(modelName)
+	DelSVC(t, NAMESPACE, svcName)
+	DelEPorEPS(t, NAMESPACE, svcName)
 	mcache := cache.SharedAviObjCache()
-	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, MULTIPORTSVC)}
+	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)}
 	g.Eventually(func() bool {
 		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
@@ -123,7 +133,7 @@ func TearDownTestForSvcLBMultiport(t *testing.T, g *gomega.GomegaWithT) {
 }
 
 func SetUpTestForSharedVIPSvcLB(t *testing.T, proto1, proto2 corev1.Protocol) {
-	modelSvc01 := "admin/cluster--red-ns-" + SHAREDVIPSVC01
+	modelSvc01 := MODEL_REDNS_PREFIX + SHAREDVIPSVC01
 	objects.SharedAviGraphLister().Delete(modelSvc01)
 	svcObj := ConstructService(NAMESPACE, SHAREDVIPSVC01, proto1, corev1.ServiceTypeLoadBalancer, false, make(map[string]string), "")
 	svcObj.Annotations = map[string]string{lib.SharedVipSvcLBAnnotation: SHAREDVIPKEY}
@@ -131,10 +141,10 @@ func SetUpTestForSharedVIPSvcLB(t *testing.T, proto1, proto2 corev1.Protocol) {
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, SHAREDVIPSVC01, false, false, "1.1.1")
+	CreateEPorEPS(t, NAMESPACE, SHAREDVIPSVC01, false, false, "1.1.1")
 	PollForCompletion(t, modelSvc01, 5)
 
-	modelSvc02 := "admin/cluster--red-ns-" + SHAREDVIPSVC02
+	modelSvc02 := MODEL_REDNS_PREFIX + SHAREDVIPSVC02
 	objects.SharedAviGraphLister().Delete(modelSvc01)
 	svcObj = ConstructService(NAMESPACE, SHAREDVIPSVC02, proto2, corev1.ServiceTypeLoadBalancer, false, make(map[string]string), "")
 	svcObj.Annotations = map[string]string{lib.SharedVipSvcLBAnnotation: SHAREDVIPKEY}
@@ -142,15 +152,15 @@ func SetUpTestForSharedVIPSvcLB(t *testing.T, proto1, proto2 corev1.Protocol) {
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, SHAREDVIPSVC02, false, false, "2.1.1")
+	CreateEPorEPS(t, NAMESPACE, SHAREDVIPSVC02, false, false, "2.1.1")
 	PollForCompletion(t, modelSvc02, 5)
 }
 
 func TearDownTestForSharedVIPSvcLB(t *testing.T, g *gomega.GomegaWithT) {
-	modelSvc01 := "admin/cluster--red-ns-" + SHAREDVIPSVC01
+	modelSvc01 := MODEL_REDNS_PREFIX + SHAREDVIPSVC01
 	objects.SharedAviGraphLister().Delete(modelSvc01)
 	DelSVC(t, NAMESPACE, SHAREDVIPSVC01)
-	DelEP(t, NAMESPACE, SHAREDVIPSVC01)
+	DelEPorEPS(t, NAMESPACE, SHAREDVIPSVC01)
 	mcache := cache.SharedAviObjCache()
 	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SHAREDVIPSVC01)}
 	g.Eventually(func() bool {
@@ -158,10 +168,10 @@ func TearDownTestForSharedVIPSvcLB(t *testing.T, g *gomega.GomegaWithT) {
 		return found
 	}, 5*time.Second).Should(gomega.Equal(false))
 
-	modelSvc02 := "admin/cluster--red-ns-" + SHAREDVIPSVC02
+	modelSvc02 := MODEL_REDNS_PREFIX + SHAREDVIPSVC02
 	objects.SharedAviGraphLister().Delete(modelSvc02)
 	DelSVC(t, NAMESPACE, SHAREDVIPSVC02)
-	DelEP(t, NAMESPACE, SHAREDVIPSVC02)
+	DelEPorEPS(t, NAMESPACE, SHAREDVIPSVC02)
 	mcache = cache.SharedAviObjCache()
 	vsKey = cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SHAREDVIPSVC02)}
 	g.Eventually(func() bool {
@@ -171,7 +181,7 @@ func TearDownTestForSharedVIPSvcLB(t *testing.T, g *gomega.GomegaWithT) {
 }
 
 func SetUpTestForSharedVIPSvcLBWithExtDNS(t *testing.T, proto1, proto2 corev1.Protocol) {
-	modelSvc01 := "admin/cluster--red-ns-" + SHAREDVIPSVC01
+	modelSvc01 := MODEL_REDNS_PREFIX + SHAREDVIPSVC01
 	objects.SharedAviGraphLister().Delete(modelSvc01)
 	svcObj := ConstructService(NAMESPACE, SHAREDVIPSVC01, proto1, corev1.ServiceTypeLoadBalancer, false, make(map[string]string), "")
 	svcObj.Annotations = map[string]string{lib.SharedVipSvcLBAnnotation: SHAREDVIPKEY, lib.ExternalDNSAnnotation: EXTDNSANNOTATION}
@@ -179,10 +189,10 @@ func SetUpTestForSharedVIPSvcLBWithExtDNS(t *testing.T, proto1, proto2 corev1.Pr
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, SHAREDVIPSVC01, false, false, "1.1.1")
+	CreateEPorEPS(t, NAMESPACE, SHAREDVIPSVC01, false, false, "1.1.1")
 	PollForCompletion(t, modelSvc01, 5)
 
-	modelSvc02 := "admin/cluster--red-ns-" + SHAREDVIPSVC02
+	modelSvc02 := MODEL_REDNS_PREFIX + SHAREDVIPSVC02
 	objects.SharedAviGraphLister().Delete(modelSvc01)
 	svcObj = ConstructService(NAMESPACE, SHAREDVIPSVC02, proto2, corev1.ServiceTypeLoadBalancer, false, make(map[string]string), "")
 	svcObj.Annotations = map[string]string{lib.SharedVipSvcLBAnnotation: SHAREDVIPKEY}
@@ -190,7 +200,7 @@ func SetUpTestForSharedVIPSvcLBWithExtDNS(t *testing.T, proto1, proto2 corev1.Pr
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, SHAREDVIPSVC02, false, false, "2.1.1")
+	CreateEPorEPS(t, NAMESPACE, SHAREDVIPSVC02, false, false, "2.1.1")
 	PollForCompletion(t, modelSvc02, 5)
 }
 
@@ -218,6 +228,8 @@ func TestMain(m *testing.M) {
 	os.Setenv("DEFAULT_LB_CONTROLLER", "true")
 
 	akoControlConfig := lib.AKOControlConfig()
+	endpointSliceEnabled = lib.GetEndpointSliceEnabled()
+	akoControlConfig.SetEndpointSlicesEnabled(endpointSliceEnabled)
 	KubeClient = k8sfake.NewSimpleClientset()
 	CRDClient = crdfake.NewSimpleClientset()
 	v1alpha2CRDClient = v1alpha2crdfake.NewSimpleClientset()
@@ -238,13 +250,17 @@ func TestMain(m *testing.M) {
 
 	registeredInformers := []string{
 		utils.ServiceInformer,
-		utils.EndpointInformer,
 		utils.IngressInformer,
 		utils.IngressClassInformer,
 		utils.SecretInformer,
 		utils.NSInformer,
 		utils.NodeInformer,
 		utils.ConfigMapInformer,
+	}
+	if akoControlConfig.GetEndpointSlicesEnabled() {
+		registeredInformers = append(registeredInformers, utils.EndpointSlicesInformer)
+	} else {
+		registeredInformers = append(registeredInformers, utils.EndpointInformer)
 	}
 	utils.NewInformers(utils.KubeClientIntf{ClientSet: KubeClient}, registeredInformers)
 	informers := k8s.K8sinformers{Cs: KubeClient}
@@ -283,6 +299,7 @@ func TestMain(m *testing.M) {
 	AddDefaultNamespace(NAMESPACE)
 
 	go ctrl.InitController(informers, registeredInformers, ctrlCh, stopCh, quickSyncCh, waitGroupMap)
+	objNameMap.InitMap()
 	os.Exit(m.Run())
 }
 
@@ -290,100 +307,107 @@ func TestLBSvcWithLBClassWithAviDefaultLBController(t *testing.T) {
 	// This test expects to start with defaultLBController = true
 	g := gomega.NewWithT(t)
 
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
+	modelName := MODEL_REDNS_PREFIX + svcName
+
 	// test invalid service spec.LoadBalancerClass != ako.vmware.com/avi-lb
-	SetUpTestForSvcLBWithLBClass(t, INVALID_LB_CLASS)
+	SetUpTestForSvcLBWithLBClass(t, INVALID_LB_CLASS, svcName)
 	g.Eventually(func() bool {
-		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
 		return found
 	}, 10*time.Second).Should(gomega.Equal(false))
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 
 	// test valid service with spec.LoadBalancerClass == ako.vmware.com/avi-lb
-	SetUpTestForSvcLBWithLBClass(t, "ako.vmware.com/avi-lb")
+	SetUpTestForSvcLBWithLBClass(t, "ako.vmware.com/avi-lb", svcName)
 	g.Eventually(func() bool {
-		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
 		return found
 	}, 10*time.Second).Should(gomega.Equal(true))
-	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes).To(gomega.HaveLen(1))
-	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
 	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
 	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
 	address := "1.1.1.1"
 	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 
 	// test valid service with spec.LoadBalancerClass == "" (unpopulated)
-	SetUpTestForSvcLB(t)
+	SetUpTestForSvcLB(t, svcName)
 	g.Eventually(func() bool {
-		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
 		return found
 	}, 10*time.Second).Should(gomega.Equal(true))
-	_, aviModel = objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	_, aviModel = objects.SharedAviGraphLister().Get(modelName)
 	nodes = aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes).To(gomega.HaveLen(1))
-	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
 	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
 	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
 	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 func TestLBSvcWithLBClassWithoutAviDefaultLBController(t *testing.T) {
 	g := gomega.NewWithT(t)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
+	modelName := MODEL_REDNS_PREFIX + svcName
 	lib.AKOControlConfig().SetDefaultLBController(false)
 
 	// test invalid service spec.LoadBalancerClass != ako.vmware.com/avi-lb
-	SetUpTestForSvcLBWithLBClass(t, INVALID_LB_CLASS)
+	SetUpTestForSvcLBWithLBClass(t, INVALID_LB_CLASS, svcName)
 	g.Eventually(func() bool {
-		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
 		return found
 	}, 10*time.Second).Should(gomega.Equal(false))
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 
 	// test valid service with spec.LoadBalancerClass = ako.vmware.com/avi-lb
-	SetUpTestForSvcLBWithLBClass(t, "ako.vmware.com/avi-lb")
+	SetUpTestForSvcLBWithLBClass(t, "ako.vmware.com/avi-lb", svcName)
 	g.Eventually(func() bool {
-		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
 		return found
 	}, 10*time.Second).Should(gomega.Equal(true))
-	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes).To(gomega.HaveLen(1))
-	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
 	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
 	g.Expect(nodes[0].PoolRefs).To(gomega.HaveLen(1))
 	address := "1.1.1.1"
 	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 
 	// test invalid service with spec.LoadBalancerClass == "" (unpopulated)
-	SetUpTestForSvcLB(t)
+	SetUpTestForSvcLB(t, svcName)
 	g.Eventually(func() bool {
-		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
 		return found
 	}, 10*time.Second).Should(gomega.Equal(false))
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 
 	lib.AKOControlConfig().SetDefaultLBController(true)
 }
 
 func TestAviSvcCreationSinglePort(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-	SetUpTestForSvcLB(t)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
+	modelName := MODEL_REDNS_PREFIX + svcName
+	SetUpTestForSvcLB(t, svcName)
 
 	g.Eventually(func() bool {
-		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
 		return found
 	}, 10*time.Second).Should(gomega.Equal(true))
-	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes).To(gomega.HaveLen(1))
-	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
 	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
 
@@ -394,7 +418,7 @@ func TestAviSvcCreationSinglePort(t *testing.T) {
 
 	// If we transition the service from Loadbalancer to ClusterIP - it should get deleted.
 	svcExample := (FakeService{
-		Name:         SINGLEPORTSVC,
+		Name:         svcName,
 		Namespace:    NAMESPACE,
 		Type:         corev1.ServiceTypeClusterIP,
 		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
@@ -405,14 +429,14 @@ func TestAviSvcCreationSinglePort(t *testing.T) {
 		t.Fatalf("error in adding Service: %v", err)
 	}
 	mcache := cache.SharedAviObjCache()
-	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)}
+	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)}
 	g.Eventually(func() bool {
 		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
 	}, 15*time.Second).Should(gomega.Equal(false))
 	// If we transition the service from clusterIP to Loadbalancer - vs should get ceated
 	svcExample = (FakeService{
-		Name:         SINGLEPORTSVC,
+		Name:         svcName,
 		Namespace:    NAMESPACE,
 		Type:         corev1.ServiceTypeLoadBalancer,
 		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
@@ -427,17 +451,18 @@ func TestAviSvcCreationSinglePort(t *testing.T) {
 		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
 	}, 15*time.Second).Should(gomega.Equal(true))
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 func TestAviSvcCreationSinglePortMultiTenantEnabled(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	SetAkoTenant()
 	defer ResetAkoTenant()
-	modelName := fmt.Sprintf("%s/cluster--red-ns-testsvc", AKOTENANT)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
+	modelName := fmt.Sprintf("%s/cluster--red-ns-%s", AKOTENANT, svcName)
 	objects.SharedAviGraphLister().Delete(modelName)
-	CreateSVC(t, NAMESPACE, SINGLEPORTSVC, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false)
-	CreateEP(t, NAMESPACE, SINGLEPORTSVC, false, false, "1.1.1")
+	CreateSVC(t, NAMESPACE, svcName, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false)
+	CreateEPorEPS(t, NAMESPACE, svcName, false, false, "1.1.1")
 
 	var aviModel interface{}
 	var found bool
@@ -451,7 +476,7 @@ func TestAviSvcCreationSinglePortMultiTenantEnabled(t *testing.T) {
 
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes).To(gomega.HaveLen(1))
-	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 	// Tenant should be akotenant instead of admin
 	g.Expect(nodes[0].Tenant).To(gomega.Equal(AKOTENANT))
 	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
@@ -462,10 +487,10 @@ func TestAviSvcCreationSinglePortMultiTenantEnabled(t *testing.T) {
 	g.Expect(nodes[0].PoolRefs[0].Servers[0].Ip.Addr).To(gomega.Equal(&address))
 
 	objects.SharedAviGraphLister().Delete(modelName)
-	DelSVC(t, NAMESPACE, SINGLEPORTSVC)
-	DelEP(t, NAMESPACE, SINGLEPORTSVC)
+	DelSVC(t, NAMESPACE, svcName)
+	DelEPorEPS(t, NAMESPACE, svcName)
 	mcache := cache.SharedAviObjCache()
-	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", SINGLEPORTSVC, NAMESPACE)}
+	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", svcName, NAMESPACE)}
 	g.Eventually(func() bool {
 		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
@@ -474,9 +499,10 @@ func TestAviSvcCreationSinglePortMultiTenantEnabled(t *testing.T) {
 
 func TestAviSvcCreationMultiPort(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-	modelName := fmt.Sprintf("%s/cluster--%s-%s", AVINAMESPACE, NAMESPACE, MULTIPORTSVC)
+	svcName := objNameMap.GenerateName(MULTIPORTSVC)
+	modelName := fmt.Sprintf("%s/cluster--%s-%s", AVINAMESPACE, NAMESPACE, svcName)
 
-	SetUpTestForSvcLBMultiport(t)
+	SetUpTestForSvcLBMultiport(t, svcName)
 
 	g.Eventually(func() bool {
 		found, _ := objects.SharedAviGraphLister().Get(modelName)
@@ -485,7 +511,7 @@ func TestAviSvcCreationMultiPort(t *testing.T) {
 	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes).To(gomega.HaveLen(1))
-	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, MULTIPORTSVC)))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
 	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
 
@@ -510,15 +536,16 @@ func TestAviSvcCreationMultiPort(t *testing.T) {
 	g.Expect(nodes[0].ApplicationProfile).To(gomega.Equal(utils.DEFAULT_L4_APP_PROFILE))
 	g.Expect(nodes[0].NetworkProfile).To(gomega.Equal(utils.TCP_NW_FAST_PATH))
 
-	TearDownTestForSvcLBMultiport(t, g)
+	TearDownTestForSvcLBMultiport(t, g, svcName)
 }
 
 func TestL4NamingConvention(t *testing.T) {
 	// checks naming convention of all generated nodes
 	g := gomega.NewGomegaWithT(t)
-	modelName := fmt.Sprintf("%s/cluster--%s-%s", AVINAMESPACE, NAMESPACE, MULTIPORTSVC)
+	svcName := objNameMap.GenerateName(MULTIPORTSVC)
+	modelName := fmt.Sprintf("%s/cluster--%s-%s", AVINAMESPACE, NAMESPACE, svcName)
 
-	SetUpTestForSvcLBMultiport(t)
+	SetUpTestForSvcLBMultiport(t, svcName)
 
 	g.Eventually(func() bool {
 		found, _ := objects.SharedAviGraphLister().Get(modelName)
@@ -526,19 +553,20 @@ func TestL4NamingConvention(t *testing.T) {
 	}, 15*time.Second).Should(gomega.Equal(true))
 	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
-	g.Expect(nodes[0].Name).To(gomega.Equal("cluster--red-ns-testsvcmulti"))
-	g.Expect(nodes[0].PoolRefs[0].Name).To(gomega.ContainSubstring("cluster--red-ns-testsvcmulti-TCP-808"))
-	g.Expect(nodes[0].VSVIPRefs[0].Name).To(gomega.Equal("cluster--red-ns-testsvcmulti"))
-	g.Expect(nodes[0].L4PolicyRefs[0].Name).To(gomega.Equal("cluster--red-ns-testsvcmulti"))
+	g.Expect(nodes[0].Name).To(gomega.Equal("cluster--red-ns-" + svcName))
+	g.Expect(nodes[0].PoolRefs[0].Name).To(gomega.ContainSubstring("cluster--red-ns-" + svcName + "-TCP-808"))
+	g.Expect(nodes[0].VSVIPRefs[0].Name).To(gomega.Equal("cluster--red-ns-" + svcName))
+	g.Expect(nodes[0].L4PolicyRefs[0].Name).To(gomega.Equal("cluster--red-ns-" + svcName))
 
-	TearDownTestForSvcLBMultiport(t, g)
+	TearDownTestForSvcLBMultiport(t, g, svcName)
 }
 
 func TestAviSvcMultiPortApplicationProf(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-	modelName := fmt.Sprintf("%s/cluster--%s-%s", AVINAMESPACE, NAMESPACE, MULTIPORTSVC)
+	svcName := objNameMap.GenerateName(MULTIPORTSVC)
+	modelName := fmt.Sprintf("%s/cluster--%s-%s", AVINAMESPACE, NAMESPACE, svcName)
 
-	SetUpTestForSvcLBMultiport(t)
+	SetUpTestForSvcLBMultiport(t, svcName)
 
 	g.Eventually(func() bool {
 		found, _ := objects.SharedAviGraphLister().Get(modelName)
@@ -547,7 +575,7 @@ func TestAviSvcMultiPortApplicationProf(t *testing.T) {
 	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes).To(gomega.HaveLen(1))
-	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, MULTIPORTSVC)))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
 	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
 
@@ -573,26 +601,27 @@ func TestAviSvcMultiPortApplicationProf(t *testing.T) {
 	g.Expect(nodes[0].ApplicationProfile).To(gomega.Equal(utils.DEFAULT_L4_APP_PROFILE))
 	g.Expect(nodes[0].NetworkProfile).To(gomega.Equal(utils.TCP_NW_FAST_PATH))
 
-	TearDownTestForSvcLBMultiport(t, g)
+	TearDownTestForSvcLBMultiport(t, g, svcName)
 }
 
 func TestAviSvcUpdateEndpoint(t *testing.T) {
-	var err error
 	g := gomega.NewGomegaWithT(t)
-	modelName := fmt.Sprintf("%s/cluster--%s-%s", AVINAMESPACE, NAMESPACE, SINGLEPORTSVC)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
+	modelName := fmt.Sprintf("%s/cluster--%s-%s", AVINAMESPACE, NAMESPACE, svcName)
 
-	SetUpTestForSvcLB(t)
+	SetUpTestForSvcLB(t, svcName)
 
-	epExample := &corev1.Endpoints{
-		ObjectMeta: metav1.ObjectMeta{Namespace: NAMESPACE, Name: SINGLEPORTSVC},
-		Subsets: []corev1.EndpointSubset{{
-			Addresses: []corev1.EndpointAddress{{IP: "1.2.3.14"}, {IP: "1.2.3.24"}},
-			Ports:     []corev1.EndpointPort{{Name: "foo", Port: 8080, Protocol: "TCP"}},
-		}},
-	}
-	if _, err = KubeClient.CoreV1().Endpoints(NAMESPACE).Update(context.TODO(), epExample, metav1.UpdateOptions{}); err != nil {
-		t.Fatalf("Error in updating the Endpoint: %v", err)
-	}
+	// epExample := &corev1.Endpoints{
+	// 	ObjectMeta: metav1.ObjectMeta{Namespace: NAMESPACE, Name:svcName},
+	// 	Subsets: []corev1.EndpointSubset{{
+	// 		Addresses: []corev1.EndpointAddress{{IP: "1.2.3.14"}, {IP: "1.2.3.24"}},
+	// 		Ports:     []corev1.EndpointPort{{Name: "foo", Port: 8080, Protocol: "TCP"}},
+	// 	}},
+	// }
+	// if _, err = KubeClient.CoreV1().Endpoints(NAMESPACE).Update(context.TODO(), epExample, metav1.UpdateOptions{}); err != nil {
+	// 	t.Fatalf("Error in updating the Endpoint: %v", err)
+	// }
+	ScaleCreateEPorEPS(t, NAMESPACE, svcName)
 
 	var aviModel interface{}
 	g.Eventually(func() []avinodes.AviPoolMetaServer {
@@ -609,7 +638,7 @@ func TestAviSvcUpdateEndpoint(t *testing.T) {
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	for _, pool := range nodes[0].PoolRefs {
 		if pool.Port == 8080 {
-			address := "1.2.3.24"
+			address := "1.2.3.5"
 			g.Expect(pool.Servers).To(gomega.HaveLen(2))
 			g.Expect(pool.Servers[1].Ip.Addr).To(gomega.Equal(&address))
 		} else {
@@ -617,18 +646,19 @@ func TestAviSvcUpdateEndpoint(t *testing.T) {
 		}
 	}
 
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 // Rest Cache sync tests
 
 func TestCreateServiceLBCacheSync(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
 
-	SetUpTestForSvcLB(t)
+	SetUpTestForSvcLB(t, svcName)
 
 	mcache := cache.SharedAviObjCache()
-	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)}
+	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)}
 	vsCache, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 	if !found {
 		t.Fatalf("Cache not found for VS: %v", vsKey)
@@ -637,15 +667,15 @@ func TestCreateServiceLBCacheSync(t *testing.T) {
 		if !ok {
 			t.Fatalf("Invalid VS object. Cannot cast.")
 		}
-		g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+		g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 		g.Expect(vsCacheObj.Tenant).To(gomega.Equal(AVINAMESPACE))
 		g.Expect(vsCacheObj.PoolKeyCollection).To(gomega.HaveLen(1))
-		g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc-TCP-8080"))
+		g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName + "-TCP-8080"))
 		g.Expect(vsCacheObj.L4PolicyCollection).To(gomega.HaveLen(1))
-		g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc"))
+		g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName))
 	}
 
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 	g.Eventually(func() bool {
 		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
@@ -654,6 +684,7 @@ func TestCreateServiceLBCacheSync(t *testing.T) {
 
 func TestCreateServiceLBWithFaultCacheSync(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
 
 	injectFault := true
 	AddMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -695,10 +726,10 @@ func TestCreateServiceLBWithFaultCacheSync(t *testing.T) {
 	})
 	defer ResetMiddleware()
 
-	SetUpTestForSvcLB(t)
+	SetUpTestForSvcLB(t, svcName)
 
 	mcache := cache.SharedAviObjCache()
-	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)}
+	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)}
 	g.Eventually(func() bool {
 		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
@@ -711,25 +742,26 @@ func TestCreateServiceLBWithFaultCacheSync(t *testing.T) {
 		if !ok {
 			t.Fatalf("Invalid VS object. Cannot cast.")
 		}
-		g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+		g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 		g.Expect(vsCacheObj.Tenant).To(gomega.Equal(AVINAMESPACE))
 		g.Expect(vsCacheObj.PoolKeyCollection).To(gomega.HaveLen(1))
-		g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc-TCP-8080"))
+		g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName + "-TCP-8080"))
 		g.Expect(vsCacheObj.L4PolicyCollection).To(gomega.HaveLen(1))
-		g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc"))
+		g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName))
 	}
 
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 func TestCreateMultiportServiceLBCacheSync(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-	MULTIPORTSVC, NAMESPACE, AVINAMESPACE := "testsvcmulti", "red-ns", "admin"
+	svcName := objNameMap.GenerateName(MULTIPORTSVC)
+	NAMESPACE, AVINAMESPACE := "red-ns", "admin"
 
-	SetUpTestForSvcLBMultiport(t)
+	SetUpTestForSvcLBMultiport(t, svcName)
 
 	mcache := cache.SharedAviObjCache()
-	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, MULTIPORTSVC)}
+	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)}
 	vsCache, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 	if !found {
 		t.Fatalf("Cache not found for VS: %v", vsKey)
@@ -738,24 +770,24 @@ func TestCreateMultiportServiceLBCacheSync(t *testing.T) {
 	if !ok {
 		t.Fatalf("Invalid VS object. Cannot cast.")
 	}
-	g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, MULTIPORTSVC)))
+	g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 	g.Expect(vsCacheObj.Tenant).To(gomega.Equal(AVINAMESPACE))
 	g.Expect(vsCacheObj.PoolKeyCollection).To(gomega.HaveLen(3))
 	g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp(`^(cluster--[a-zA-Z0-9-]+-808(0|1|2))$`))
 	g.Expect(vsCacheObj.L4PolicyCollection).To(gomega.HaveLen(1))
 	g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp(`^(cluster--[a-zA-Z0-9-]+)$`))
 
-	TearDownTestForSvcLBMultiport(t, g)
+	TearDownTestForSvcLBMultiport(t, g, svcName)
 }
 
 func TestUpdateAndDeleteServiceLBCacheSync(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-	var err error
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
 
-	SetUpTestForSvcLB(t)
+	SetUpTestForSvcLB(t, svcName)
 
 	// Get hold of the pool checksum on CREATE
-	poolName := "cluster--red-ns-testsvc-TCP-8080"
+	poolName := "cluster--red-ns-" + svcName + "-TCP-8080"
 	mcache := cache.SharedAviObjCache()
 	poolKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: poolName}
 	poolCacheBefore, _ := mcache.PoolCache.AviCacheGet(poolKey)
@@ -763,16 +795,17 @@ func TestUpdateAndDeleteServiceLBCacheSync(t *testing.T) {
 	oldPoolCksum := poolCacheBeforeObj.CloudConfigCksum
 
 	// UPDATE Test: After Endpoint update, Cache checksums must change
-	epExample := &corev1.Endpoints{
-		ObjectMeta: metav1.ObjectMeta{Namespace: NAMESPACE, Name: SINGLEPORTSVC},
-		Subsets: []corev1.EndpointSubset{{
-			Addresses: []corev1.EndpointAddress{{IP: "1.2.3.14"}, {IP: "1.2.3.24"}},
-			Ports:     []corev1.EndpointPort{{Name: "foo", Port: 8080, Protocol: "TCP"}},
-		}},
-	}
-	if _, err = KubeClient.CoreV1().Endpoints(NAMESPACE).Update(context.TODO(), epExample, metav1.UpdateOptions{}); err != nil {
-		t.Fatalf("Error in updating the Endpoint: %v", err)
-	}
+	// epExample := &corev1.Endpoints{
+	// 	ObjectMeta: metav1.ObjectMeta{Namespace: NAMESPACE, Name:svcName},
+	// 	Subsets: []corev1.EndpointSubset{{
+	// 		Addresses: []corev1.EndpointAddress{{IP: "1.2.3.14"}, {IP: "1.2.3.24"}},
+	// 		Ports:     []corev1.EndpointPort{{Name: "foo", Port: 8080, Protocol: "TCP"}},
+	// 	}},
+	// }
+	// if _, err = KubeClient.CoreV1().Endpoints(NAMESPACE).Update(context.TODO(), epExample, metav1.UpdateOptions{}); err != nil {
+	// 	t.Fatalf("Error in updating the Endpoint: %v", err)
+	// }
+	ScaleCreateEPorEPS(t, NAMESPACE, svcName)
 
 	var poolCacheObj *cache.AviPoolCache
 	var poolCache interface{}
@@ -795,7 +828,7 @@ func TestUpdateAndDeleteServiceLBCacheSync(t *testing.T) {
 	g.Expect(poolCacheObj.Tenant).To(gomega.Equal(AVINAMESPACE))
 
 	// DELETE Test: Cache corresponding to the pool MUST NOT be found
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 	g.Eventually(func() bool {
 		_, found = mcache.PoolCache.AviCacheGet(poolKey)
 		return found
@@ -806,6 +839,7 @@ func TestUpdateAndDeleteServiceLBCacheSync(t *testing.T) {
 // multiport serviceLB is increased from 1 to 5 and then decreased back to 1
 func TestScaleUpAndDownServiceLBCacheSync(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
 	var model, service string
 
 	// Simulate a delay of 200ms in the Avi API
@@ -815,17 +849,18 @@ func TestScaleUpAndDownServiceLBCacheSync(t *testing.T) {
 	})
 	defer ResetMiddleware()
 
-	SetUpTestForSvcLB(t)
+	SetUpTestForSvcLB(t, svcName)
 
+	svcName2 := objNameMap.GenerateName(MULTIPORTSVC)
 	// create numScale more multiport service of type loadbalancer
 	numScale := 5
 	for i := 0; i < numScale; i++ {
-		service = fmt.Sprintf("%s%d", MULTIPORTSVC, i)
-		model = strings.Replace(MULTIPORTMODEL, MULTIPORTSVC, service, 1)
+		service = fmt.Sprintf("%s%d", svcName2, i)
+		model = MODEL_REDNS_PREFIX + service
 
 		objects.SharedAviGraphLister().Delete(model)
 		CreateSVC(t, NAMESPACE, service, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, true)
-		CreateEP(t, NAMESPACE, service, true, true, "1.1.1")
+		CreateEPorEPS(t, NAMESPACE, service, true, true, "1.1.1")
 	}
 
 	// verify that numScale services are created on the graph and corresponding cache objects
@@ -835,8 +870,8 @@ func TestScaleUpAndDownServiceLBCacheSync(t *testing.T) {
 
 	mcache := cache.SharedAviObjCache()
 	for i := 0; i < numScale; i++ {
-		service = fmt.Sprintf("%s%d", MULTIPORTSVC, i)
-		model = strings.Replace(MULTIPORTMODEL, MULTIPORTSVC, service, 1)
+		service = fmt.Sprintf("%s%d", svcName2, i)
+		model = MODEL_REDNS_PREFIX + service
 
 		PollForCompletion(t, model, 5)
 		found, aviModel = objects.SharedAviGraphLister().Get(model)
@@ -852,17 +887,17 @@ func TestScaleUpAndDownServiceLBCacheSync(t *testing.T) {
 
 	// delete the numScale services
 	for i := 0; i < numScale; i++ {
-		service = fmt.Sprintf("%s%d", MULTIPORTSVC, i)
-		model = strings.Replace(MULTIPORTMODEL, MULTIPORTSVC, service, 1)
+		service = fmt.Sprintf("%s%d", svcName2, i)
+		model = MODEL_REDNS_PREFIX + service
 		objects.SharedAviGraphLister().Delete(model)
 		DelSVC(t, NAMESPACE, service)
-		DelEP(t, NAMESPACE, service)
+		DelEPorEPS(t, NAMESPACE, service)
 	}
 
 	// verify that the graph nodes and corresponding cache are deleted for the numScale services
 	for i := 0; i < numScale; i++ {
-		service = fmt.Sprintf("%s%d", MULTIPORTSVC, i)
-		model = strings.Replace(MULTIPORTMODEL, MULTIPORTSVC, service, 1)
+		service = fmt.Sprintf("%s%d", svcName2, i)
+		model = MODEL_REDNS_PREFIX + service
 		g.Eventually(func() interface{} {
 			found, aviModel = objects.SharedAviGraphLister().Get(model)
 			return aviModel
@@ -876,21 +911,23 @@ func TestScaleUpAndDownServiceLBCacheSync(t *testing.T) {
 	}
 
 	// verifying whether the first service created still has the corresponding cache entry
-	vsKey = cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)}
+	vsKey = cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)}
 	g.Eventually(func() bool {
 		_, found = mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
 	}, 40*time.Second).Should(gomega.Equal(true))
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 func TestAviSvcCreationWithStaticIP(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
+	modelName := MODEL_REDNS_PREFIX + svcName
 
 	staticIP := "80.80.80.80"
-	objects.SharedAviGraphLister().Delete(SINGLEPORTMODEL)
+	objects.SharedAviGraphLister().Delete(modelName)
 	svcExample := (FakeService{
-		Name:           SINGLEPORTSVC,
+		Name:           svcName,
 		Namespace:      NAMESPACE,
 		Type:           corev1.ServiceTypeLoadBalancer,
 		LoadBalancerIP: staticIP,
@@ -900,11 +937,11 @@ func TestAviSvcCreationWithStaticIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in creating Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, SINGLEPORTSVC, false, false, "1.1.1")
-	PollForCompletion(t, SINGLEPORTMODEL, 5)
+	CreateEPorEPS(t, NAMESPACE, svcName, false, false, "1.1.1")
+	PollForCompletion(t, modelName, 5)
 
 	g.Eventually(func() string {
-		if found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL); found && aviModel != nil {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found && aviModel != nil {
 			nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 			if len(nodes) > 0 && len(nodes[0].VSVIPRefs) > 0 {
 				return nodes[0].VSVIPRefs[0].IPAddress
@@ -912,7 +949,7 @@ func TestAviSvcCreationWithStaticIP(t *testing.T) {
 		}
 		return ""
 	}, 20*time.Second).Should(gomega.Equal(staticIP))
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 // Infra CRD tests via service annotation
@@ -925,10 +962,12 @@ func TestWithInfraSettingStatusUpdates(t *testing.T) {
 
 	g := gomega.NewGomegaWithT(t)
 	settingName := "infra-setting"
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
+	modelName := MODEL_REDNS_PREFIX + svcName
 
-	objects.SharedAviGraphLister().Delete(SINGLEPORTMODEL)
+	objects.SharedAviGraphLister().Delete(modelName)
 	svcExample := (FakeService{
-		Name:         SINGLEPORTSVC,
+		Name:         svcName,
 		Namespace:    NAMESPACE,
 		Type:         corev1.ServiceTypeLoadBalancer,
 		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
@@ -938,8 +977,8 @@ func TestWithInfraSettingStatusUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in creating Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, SINGLEPORTSVC, false, false, "1.1.1")
-	PollForCompletion(t, SINGLEPORTMODEL, 5)
+	CreateEPorEPS(t, NAMESPACE, svcName, false, false, "1.1.1")
+	PollForCompletion(t, modelName, 5)
 
 	// Create with bad seGroup ref.
 	settingCreate := (FakeAviInfraSetting{
@@ -960,7 +999,7 @@ func TestWithInfraSettingStatusUpdates(t *testing.T) {
 	// defaults to global seGroup and networkName.
 	netList := utils.GetVipNetworkList()
 	g.Eventually(func() bool {
-		if found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL); found && aviModel != nil {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found && aviModel != nil {
 			if nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS(); len(nodes) > 0 {
 				return nodes[0].ServiceEngineGroup == lib.GetSEGName() &&
 					len(nodes[0].VSVIPRefs[0].VipNetworks) > 0 &&
@@ -987,7 +1026,7 @@ func TestWithInfraSettingStatusUpdates(t *testing.T) {
 	}, 15*time.Second).Should(gomega.Equal("Accepted"))
 
 	g.Eventually(func() bool {
-		if found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL); found && aviModel != nil {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found && aviModel != nil {
 			if nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS(); len(nodes) > 0 {
 				return nodes[0].ServiceEngineGroup == "thisisaviref-seGroup" &&
 					len(nodes[0].VSVIPRefs[0].VipNetworks) > 0 &&
@@ -1014,12 +1053,12 @@ func TestWithInfraSettingStatusUpdates(t *testing.T) {
 		return setting.Status.Status
 	}, 15*time.Second).Should(gomega.Equal("Rejected"))
 	g.Eventually(func() bool {
-		if found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL); found && aviModel != nil {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found && aviModel != nil {
 			if nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS(); len(nodes) > 0 {
-				return nodes[0].ServiceEngineGroup == "thisisaviref-seGroup" &&
+				return nodes[0].ServiceEngineGroup == lib.GetSEGName() &&
 					len(nodes[0].VSVIPRefs[0].VipNetworks) > 0 &&
-					nodes[0].VSVIPRefs[0].VipNetworks[0].NetworkName == "thisisaviref-networkName" &&
-					*nodes[0].EnableRhi
+					nodes[0].VSVIPRefs[0].VipNetworks[0].NetworkName == netList[0].NetworkName &&
+					!*nodes[0].EnableRhi
 			}
 		}
 		return false
@@ -1042,7 +1081,7 @@ func TestWithInfraSettingStatusUpdates(t *testing.T) {
 	}, 15*time.Second).Should(gomega.Equal("Accepted"))
 
 	g.Eventually(func() bool {
-		if found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL); found && aviModel != nil {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found && aviModel != nil {
 			if nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS(); len(nodes) > 0 {
 				if len(nodes[0].VSVIPRefs[0].VipNetworks) == 3 &&
 					nodes[0].VSVIPRefs[0].VipNetworks[0].NetworkName == "multivip-network1" &&
@@ -1058,7 +1097,7 @@ func TestWithInfraSettingStatusUpdates(t *testing.T) {
 	}, 35*time.Second).Should(gomega.Equal(true))
 
 	TeardownAviInfraSetting(t, settingName)
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 func TestInfraSettingDelete(t *testing.T) {
@@ -1067,10 +1106,12 @@ func TestInfraSettingDelete(t *testing.T) {
 
 	g := gomega.NewGomegaWithT(t)
 	settingName := "infra-setting"
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
+	modelName := MODEL_REDNS_PREFIX + svcName
 
-	objects.SharedAviGraphLister().Delete(SINGLEPORTMODEL)
+	objects.SharedAviGraphLister().Delete(modelName)
 	svcExample := (FakeService{
-		Name:         SINGLEPORTSVC,
+		Name:         svcName,
 		Namespace:    NAMESPACE,
 		Type:         corev1.ServiceTypeLoadBalancer,
 		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
@@ -1080,20 +1121,20 @@ func TestInfraSettingDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in creating Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, SINGLEPORTSVC, false, false, "1.1.1")
-	PollForCompletion(t, SINGLEPORTMODEL, 5)
+	CreateEPorEPS(t, NAMESPACE, svcName, false, false, "1.1.1")
+	PollForCompletion(t, modelName, 5)
 
 	SetupAviInfraSetting(t, settingName, "")
 
 	g.Eventually(func() string {
-		if found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL); found && aviModel != nil {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found && aviModel != nil {
 			if nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS(); len(nodes) > 0 {
 				return nodes[0].ServiceEngineGroup
 			}
 		}
 		return ""
 	}, 35*time.Second).Should(gomega.Equal("thisisaviref-" + settingName + "-seGroup"))
-	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes[0].VSVIPRefs[0].VipNetworks[0].NetworkName).Should(gomega.Equal("thisisaviref-" + settingName + "-networkName"))
 	g.Expect(*nodes[0].EnableRhi).Should(gomega.Equal(true))
@@ -1103,7 +1144,7 @@ func TestInfraSettingDelete(t *testing.T) {
 	// defaults to global seGroup and networkName.
 	netList := utils.GetVipNetworkList()
 	g.Eventually(func() bool {
-		if found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL); found && aviModel != nil {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found && aviModel != nil {
 			if nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS(); len(nodes) > 0 {
 				return nodes[0].ServiceEngineGroup == lib.GetSEGName() &&
 					len(nodes[0].VSVIPRefs[0].VipNetworks) > 0 &&
@@ -1114,7 +1155,7 @@ func TestInfraSettingDelete(t *testing.T) {
 		return true
 	}, 20*time.Second).Should(gomega.Equal(true))
 
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 func TestInfraSettingChangeMapping(t *testing.T) {
@@ -1125,10 +1166,13 @@ func TestInfraSettingChangeMapping(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
 	settingName1, settingName2 := "infra-setting1", "infra-setting2"
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
+	modelName := MODEL_REDNS_PREFIX + svcName
 
-	objects.SharedAviGraphLister().Delete(SINGLEPORTMODEL)
+	objects.SharedAviGraphLister().Delete(modelName)
+
 	svcExample := (FakeService{
-		Name:         SINGLEPORTSVC,
+		Name:         svcName,
 		Namespace:    NAMESPACE,
 		Type:         corev1.ServiceTypeLoadBalancer,
 		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
@@ -1138,27 +1182,27 @@ func TestInfraSettingChangeMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in creating Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, SINGLEPORTSVC, false, false, "1.1.1")
-	PollForCompletion(t, SINGLEPORTMODEL, 5)
+	CreateEPorEPS(t, NAMESPACE, svcName, false, false, "1.1.1")
+	PollForCompletion(t, modelName, 5)
 
 	SetupAviInfraSetting(t, settingName1, "")
 	SetupAviInfraSetting(t, settingName2, "")
 
 	g.Eventually(func() string {
-		if found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL); found && aviModel != nil {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found && aviModel != nil {
 			if nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS(); len(nodes) > 0 {
 				return nodes[0].ServiceEngineGroup
 			}
 		}
 		return ""
 	}, 35*time.Second).Should(gomega.Equal("thisisaviref-" + settingName1 + "-seGroup"))
-	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes[0].VSVIPRefs[0].VipNetworks[0].NetworkName).Should(gomega.Equal("thisisaviref-" + settingName1 + "-networkName"))
 
 	// TODO: Change service annotation to have infraSettting2
 	svcUpdate := (FakeService{
-		Name:         SINGLEPORTSVC,
+		Name:         svcName,
 		Namespace:    NAMESPACE,
 		Type:         corev1.ServiceTypeLoadBalancer,
 		ServicePorts: []Serviceport{{PortName: "foo1", Protocol: "TCP", PortNumber: 8080, TargetPort: intstr.FromInt(8080)}},
@@ -1171,7 +1215,7 @@ func TestInfraSettingChangeMapping(t *testing.T) {
 	}
 
 	g.Eventually(func() bool {
-		if found, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL); found && aviModel != nil {
+		if found, aviModel := objects.SharedAviGraphLister().Get(modelName); found && aviModel != nil {
 			if nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS(); len(nodes) > 0 {
 				return nodes[0].ServiceEngineGroup == "thisisaviref-"+settingName2+"-seGroup" &&
 					len(nodes[0].VSVIPRefs[0].VipNetworks) > 0 &&
@@ -1183,12 +1227,12 @@ func TestInfraSettingChangeMapping(t *testing.T) {
 
 	TeardownAviInfraSetting(t, settingName1)
 	TeardownAviInfraSetting(t, settingName2)
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 func TestSharedVIPSvcWithTCPUDPProtocols(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
-	modelName := "admin/cluster--red-ns-" + SHAREDVIPKEY
+	modelName := MODEL_REDNS_PREFIX + SHAREDVIPKEY
 
 	SetUpTestForSharedVIPSvcLB(t, corev1.ProtocolTCP, corev1.ProtocolUDP)
 
@@ -1203,12 +1247,43 @@ func TestSharedVIPSvcWithTCPUDPProtocols(t *testing.T) {
 	TearDownTestForSharedVIPSvcLB(t, g)
 }
 
+func TestSharedVIPSvcWithTCPUDPProtocolsWithNSXT(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	// simulate nsx-t cloud by setting up t1lr
+	os.Setenv("NSXT_T1_LR", "/infra/t1lr/sample")
+	modelName := MODEL_REDNS_PREFIX + SHAREDVIPKEY
+
+	SetUpTestForSharedVIPSvcLB(t, corev1.ProtocolTCP, corev1.ProtocolUDP)
+
+	g.Eventually(func() bool {
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
+		return found
+	}, 30*time.Second).Should(gomega.Equal(true))
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
+	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
+	g.Expect(nodes).To(gomega.HaveLen(1))
+	VerfiyL4Node(nodes[0], g, "TCP", "UDP")
+
+	// Check t1lr set at vsvip, pool. vrf empty at vsvip, pool and vs
+	g.Expect(nodes[0].VSVIPRefs[0].T1Lr).Should(gomega.Equal("/infra/t1lr/sample"))
+	g.Expect(nodes[0].VSVIPRefs[0].VrfContext).Should(gomega.Equal(""))
+	g.Expect(nodes[0].PoolRefs[0].T1Lr).Should(gomega.Equal("/infra/t1lr/sample"))
+	g.Expect(nodes[0].PoolRefs[0].VrfContext).Should(gomega.Equal(""))
+	g.Expect(nodes[0].PoolRefs[1].T1Lr).Should(gomega.Equal("/infra/t1lr/sample"))
+	g.Expect(nodes[0].PoolRefs[1].VrfContext).Should(gomega.Equal(""))
+	g.Expect(nodes[0].VrfContext).Should(gomega.Equal(""))
+
+	//reset the field
+	os.Setenv("NSXT_T1_LR", "")
+	TearDownTestForSharedVIPSvcLB(t, g)
+}
+
 func TestSharedVipSvcWithInvalidLBClass(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-	modelName := "admin/cluster--red-ns-" + SHAREDVIPKEY
+	modelName := MODEL_REDNS_PREFIX + SHAREDVIPKEY
 
 	// create 1 valid and 1 invalid svc
-	modelSvc01 := "admin/cluster--red-ns-" + SHAREDVIPSVC01
+	modelSvc01 := MODEL_REDNS_PREFIX + SHAREDVIPSVC01
 	objects.SharedAviGraphLister().Delete(modelSvc01)
 	svcObj := ConstructService(NAMESPACE, SHAREDVIPSVC01, corev1.ProtocolTCP, corev1.ServiceTypeLoadBalancer, false, make(map[string]string), lib.AviIngressController)
 	svcObj.Annotations = map[string]string{lib.SharedVipSvcLBAnnotation: SHAREDVIPKEY}
@@ -1216,7 +1291,7 @@ func TestSharedVipSvcWithInvalidLBClass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, SHAREDVIPSVC01, false, false, "1.1.1")
+	CreateEPorEPS(t, NAMESPACE, SHAREDVIPSVC01, false, false, "1.1.1")
 	PollForCompletion(t, modelSvc01, 5)
 
 	// after valid svc creation VS should get created
@@ -1228,7 +1303,7 @@ func TestSharedVipSvcWithInvalidLBClass(t *testing.T) {
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes).To(gomega.HaveLen(1))
 
-	modelSvc02 := "admin/cluster--red-ns-" + SHAREDVIPSVC02
+	modelSvc02 := MODEL_REDNS_PREFIX + SHAREDVIPSVC02
 	objects.SharedAviGraphLister().Delete(modelSvc01)
 	svcObj = ConstructService(NAMESPACE, SHAREDVIPSVC02, corev1.ProtocolSCTP, corev1.ServiceTypeLoadBalancer, false, make(map[string]string), INVALID_LB_CLASS)
 	svcObj.Annotations = map[string]string{lib.SharedVipSvcLBAnnotation: SHAREDVIPKEY}
@@ -1236,7 +1311,7 @@ func TestSharedVipSvcWithInvalidLBClass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, NAMESPACE, SHAREDVIPSVC02, false, false, "2.1.1")
+	CreateEPorEPS(t, NAMESPACE, SHAREDVIPSVC02, false, false, "2.1.1")
 	PollForCompletion(t, modelSvc02, 5)
 
 	// after invalid svc is created, the model should get invalidated and be nil
@@ -1247,7 +1322,7 @@ func TestSharedVipSvcWithInvalidLBClass(t *testing.T) {
 	// after deletion of invalid svc, model should be valid again
 	objects.SharedAviGraphLister().Delete(modelSvc02)
 	DelSVC(t, NAMESPACE, SHAREDVIPSVC02)
-	DelEP(t, NAMESPACE, SHAREDVIPSVC02)
+	DelEPorEPS(t, NAMESPACE, SHAREDVIPSVC02)
 	mcache := cache.SharedAviObjCache()
 	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SHAREDVIPSVC02)}
 	g.Eventually(func() bool {
@@ -1263,7 +1338,7 @@ func TestSharedVipSvcWithInvalidLBClass(t *testing.T) {
 	// teardown valid svc
 	objects.SharedAviGraphLister().Delete(modelSvc01)
 	DelSVC(t, NAMESPACE, SHAREDVIPSVC01)
-	DelEP(t, NAMESPACE, SHAREDVIPSVC01)
+	DelEPorEPS(t, NAMESPACE, SHAREDVIPSVC01)
 	mcache = cache.SharedAviObjCache()
 	vsKey = cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SHAREDVIPSVC01)}
 	g.Eventually(func() bool {
@@ -1274,7 +1349,7 @@ func TestSharedVipSvcWithInvalidLBClass(t *testing.T) {
 func TestSharedVIPSvcWithTCPSCTProtocols(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
-	modelName := "admin/cluster--red-ns-" + SHAREDVIPKEY
+	modelName := MODEL_REDNS_PREFIX + SHAREDVIPKEY
 
 	SetUpTestForSharedVIPSvcLB(t, corev1.ProtocolTCP, corev1.ProtocolSCTP)
 
@@ -1290,8 +1365,8 @@ func TestSharedVIPSvcWithTCPSCTProtocols(t *testing.T) {
 }
 func TestSharedVIPSvcWithUDPSCTProtocols(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-
-	modelName := "admin/cluster--red-ns-" + SHAREDVIPKEY
+	os.Setenv("AUTO_L4_FQDN", "default")
+	modelName := MODEL_REDNS_PREFIX + SHAREDVIPKEY
 
 	SetUpTestForSharedVIPSvcLB(t, corev1.ProtocolUDP, corev1.ProtocolSCTP)
 
@@ -1303,6 +1378,7 @@ func TestSharedVIPSvcWithUDPSCTProtocols(t *testing.T) {
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes).To(gomega.HaveLen(1))
 	VerfiyL4Node(nodes[0], g, "SCTP", "UDP")
+	os.Setenv("AUTO_L4_FQDN", "disable")
 	TearDownTestForSharedVIPSvcLB(t, g)
 }
 
@@ -1310,7 +1386,7 @@ func TestSharedVIPSvcWithUDPSCTProtocols(t *testing.T) {
 func TestSvcExternalDNSWithSharedVIP(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	os.Setenv("AUTO_L4_FQDN", "default")
-	modelName := "admin/cluster--red-ns-" + SHAREDVIPKEY
+	modelName := MODEL_REDNS_PREFIX + SHAREDVIPKEY
 
 	SetUpTestForSharedVIPSvcLBWithExtDNS(t, corev1.ProtocolUDP, corev1.ProtocolSCTP)
 
@@ -1334,7 +1410,7 @@ func TestSvcExtDNSAddition(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	SetUpTestForSvcLBWithExtDNS(t)
 
-	modelSvcDNS01 := "admin/cluster--red-ns-" + EXTDNSSVC
+	modelSvcDNS01 := MODEL_REDNS_PREFIX + EXTDNSSVC
 
 	g.Eventually(func() bool {
 		found, _ := objects.SharedAviGraphLister().Get(modelSvcDNS01)
@@ -1351,16 +1427,18 @@ func TestSvcExtDNSAddition(t *testing.T) {
 
 func TestLBSvcCreationMixedProtocol(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-	SetUpTestForSvcLBMixedProtocol(t, corev1.ProtocolTCP, corev1.ProtocolUDP, corev1.ProtocolSCTP)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
+	modelName := MODEL_REDNS_PREFIX + svcName
+	SetUpTestForSvcLBMixedProtocol(t, svcName, corev1.ProtocolTCP, corev1.ProtocolUDP, corev1.ProtocolSCTP)
 
 	g.Eventually(func() bool {
-		found, _ := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+		found, _ := objects.SharedAviGraphLister().Get(modelName)
 		return found
 	}, 10*time.Second).Should(gomega.Equal(true))
-	_, aviModel := objects.SharedAviGraphLister().Get(SINGLEPORTMODEL)
+	_, aviModel := objects.SharedAviGraphLister().Get(modelName)
 	nodes := aviModel.(*avinodes.AviObjectGraph).GetAviVS()
 	g.Expect(nodes).To(gomega.HaveLen(1))
-	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+	g.Expect(nodes[0].Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 	g.Expect(nodes[0].Tenant).To(gomega.Equal(AVINAMESPACE))
 	g.Expect(nodes[0].PortProto[0].Port).To(gomega.Equal(int32(8080)))
 	g.Expect(nodes[0].PortProto[0].Protocol).To(gomega.Equal("TCP"))
@@ -1382,11 +1460,12 @@ func TestLBSvcCreationMixedProtocol(t *testing.T) {
 	g.Expect(nodes[0].ApplicationProfile).To(gomega.Equal(utils.DEFAULT_L4_APP_PROFILE))
 	g.Expect(nodes[0].NetworkProfile).To(gomega.Equal(utils.MIXED_NET_PROFILE))
 
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 func TestLBSvcCreationSCTPTCP(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
 
 	// middleware verifies the application and network profiles attached to the VS
 	AddMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -1418,10 +1497,10 @@ func TestLBSvcCreationSCTPTCP(t *testing.T) {
 		NormalControllerServer(w, r)
 	})
 
-	SetUpTestForSvcLBMixedProtocol(t, corev1.ProtocolTCP, corev1.ProtocolSCTP)
+	SetUpTestForSvcLBMixedProtocol(t, svcName, corev1.ProtocolTCP, corev1.ProtocolSCTP)
 
 	mcache := cache.SharedAviObjCache()
-	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)}
+	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)}
 	g.Eventually(func() bool {
 		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
@@ -1434,22 +1513,23 @@ func TestLBSvcCreationSCTPTCP(t *testing.T) {
 		if !ok {
 			t.Fatalf("Invalid VS object. Cannot cast.")
 		}
-		g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+		g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 		g.Expect(vsCacheObj.Tenant).To(gomega.Equal(AVINAMESPACE))
 		g.Expect(vsCacheObj.PoolKeyCollection).To(gomega.HaveLen(2))
-		g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc-TCP-8080"))
-		g.Expect(vsCacheObj.PoolKeyCollection[1].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc-SCTP-8080"))
+		g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName + "-TCP-8080"))
+		g.Expect(vsCacheObj.PoolKeyCollection[1].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName + "-SCTP-8080"))
 		g.Expect(vsCacheObj.L4PolicyCollection).To(gomega.HaveLen(1))
-		g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc"))
+		g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName))
 	}
 
 	defer ResetMiddleware()
 
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 func TestLBSvcCreationSCTPUDP(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
 
 	// middleware verifies the application and network profiles attached to the VS
 	AddMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -1481,10 +1561,10 @@ func TestLBSvcCreationSCTPUDP(t *testing.T) {
 		NormalControllerServer(w, r)
 	})
 
-	SetUpTestForSvcLBMixedProtocol(t, corev1.ProtocolUDP, corev1.ProtocolSCTP)
+	SetUpTestForSvcLBMixedProtocol(t, svcName, corev1.ProtocolUDP, corev1.ProtocolSCTP)
 
 	mcache := cache.SharedAviObjCache()
-	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)}
+	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)}
 	g.Eventually(func() bool {
 		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
@@ -1497,22 +1577,23 @@ func TestLBSvcCreationSCTPUDP(t *testing.T) {
 		if !ok {
 			t.Fatalf("Invalid VS object. Cannot cast.")
 		}
-		g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+		g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 		g.Expect(vsCacheObj.Tenant).To(gomega.Equal(AVINAMESPACE))
 		g.Expect(vsCacheObj.PoolKeyCollection).To(gomega.HaveLen(2))
-		g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc-UDP-8080"))
-		g.Expect(vsCacheObj.PoolKeyCollection[1].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc-SCTP-8080"))
+		g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName + "-UDP-8080"))
+		g.Expect(vsCacheObj.PoolKeyCollection[1].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName + "-SCTP-8080"))
 		g.Expect(vsCacheObj.L4PolicyCollection).To(gomega.HaveLen(1))
-		g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc"))
+		g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName))
 	}
 
 	defer ResetMiddleware()
 
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 func TestLBSvcCreationTCPUDP(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
+	svcName := objNameMap.GenerateName(SINGLEPORTSVC)
 
 	// middleware verifies the application and network profiles attached to the VS
 	AddMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -1544,10 +1625,10 @@ func TestLBSvcCreationTCPUDP(t *testing.T) {
 		NormalControllerServer(w, r)
 	})
 
-	SetUpTestForSvcLBMixedProtocol(t, corev1.ProtocolTCP, corev1.ProtocolUDP)
+	SetUpTestForSvcLBMixedProtocol(t, svcName, corev1.ProtocolTCP, corev1.ProtocolUDP)
 
 	mcache := cache.SharedAviObjCache()
-	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)}
+	vsKey := cache.NamespaceName{Namespace: AVINAMESPACE, Name: fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)}
 	g.Eventually(func() bool {
 		_, found := mcache.VsCacheMeta.AviCacheGet(vsKey)
 		return found
@@ -1560,18 +1641,18 @@ func TestLBSvcCreationTCPUDP(t *testing.T) {
 		if !ok {
 			t.Fatalf("Invalid VS object. Cannot cast.")
 		}
-		g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, SINGLEPORTSVC)))
+		g.Expect(vsCacheObj.Name).To(gomega.Equal(fmt.Sprintf("cluster--%s-%s", NAMESPACE, svcName)))
 		g.Expect(vsCacheObj.Tenant).To(gomega.Equal(AVINAMESPACE))
 		g.Expect(vsCacheObj.PoolKeyCollection).To(gomega.HaveLen(2))
-		g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc-TCP-8080"))
-		g.Expect(vsCacheObj.PoolKeyCollection[1].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc-UDP-8080"))
+		g.Expect(vsCacheObj.PoolKeyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName + "-TCP-8080"))
+		g.Expect(vsCacheObj.PoolKeyCollection[1].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName + "-UDP-8080"))
 		g.Expect(vsCacheObj.L4PolicyCollection).To(gomega.HaveLen(1))
-		g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-testsvc"))
+		g.Expect(vsCacheObj.L4PolicyCollection[0].Name).To(gomega.MatchRegexp("cluster--red-ns-" + svcName))
 	}
 
 	defer ResetMiddleware()
 
-	TearDownTestForSvcLB(t, g)
+	TearDownTestForSvcLB(t, g, svcName)
 }
 
 func TestLBSvcWithAutoFQDNAsFlat(t *testing.T) {
@@ -1588,7 +1669,7 @@ func TestLBSvcWithAutoFQDNAsFlat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, svcNamespace, svcName, false, false, "1.1.1")
+	CreateEPorEPS(t, svcNamespace, svcName, false, false, "1.1.1")
 	PollForCompletion(t, modelName, 5)
 
 	g.Eventually(func() bool {
@@ -1605,7 +1686,7 @@ func TestLBSvcWithAutoFQDNAsFlat(t *testing.T) {
 	g.Expect(nodes[0].VSVIPRefs[0].FQDNs[0]).To(gomega.HaveLen(len(svcName) + 1 + len(svcNamespace) + len(".com")))
 
 	DelSVC(t, svcNamespace, svcName)
-	DelEP(t, svcNamespace, svcName)
+	DelEPorEPS(t, svcNamespace, svcName)
 	os.Setenv("AUTO_L4_FQDN", "disable")
 }
 
@@ -1623,7 +1704,7 @@ func TestLBSvcFQDNLengthValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, svcNamespace, svcName, false, false, "1.1.1")
+	CreateEPorEPS(t, svcNamespace, svcName, false, false, "1.1.1")
 	PollForCompletion(t, modelName, 5)
 
 	g.Eventually(func() bool {
@@ -1640,7 +1721,7 @@ func TestLBSvcFQDNLengthValidation(t *testing.T) {
 	g.Expect(nodes[0].VSVIPRefs[0].FQDNs[0]).To(gomega.HaveLen(63 + len(".com")))
 
 	DelSVC(t, svcNamespace, svcName)
-	DelEP(t, svcNamespace, svcName)
+	DelEPorEPS(t, svcNamespace, svcName)
 	os.Setenv("AUTO_L4_FQDN", "disable")
 }
 
@@ -1658,7 +1739,7 @@ func TestLBSvcWithNameLen63(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, svcNamespace, svcName, false, false, "1.1.1")
+	CreateEPorEPS(t, svcNamespace, svcName, false, false, "1.1.1")
 	PollForCompletion(t, modelName, 5)
 
 	g.Eventually(func() bool {
@@ -1675,7 +1756,7 @@ func TestLBSvcWithNameLen63(t *testing.T) {
 	g.Expect(nodes[0].VSVIPRefs[0].FQDNs[0]).To(gomega.HaveLen(63 + len(".com")))
 
 	DelSVC(t, svcNamespace, svcName)
-	DelEP(t, svcNamespace, svcName)
+	DelEPorEPS(t, svcNamespace, svcName)
 	os.Setenv("AUTO_L4_FQDN", "disable")
 }
 
@@ -1693,7 +1774,7 @@ func TestLBSvcWithNamespaceNameLen63(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, svcNamespace, svcName, false, false, "1.1.1")
+	CreateEPorEPS(t, svcNamespace, svcName, false, false, "1.1.1")
 	PollForCompletion(t, modelName, 5)
 
 	g.Eventually(func() bool {
@@ -1710,7 +1791,7 @@ func TestLBSvcWithNamespaceNameLen63(t *testing.T) {
 	g.Expect(nodes[0].VSVIPRefs[0].FQDNs[0]).To(gomega.HaveLen(63 + len(".com")))
 
 	DelSVC(t, svcNamespace, svcName)
-	DelEP(t, svcNamespace, svcName)
+	DelEPorEPS(t, svcNamespace, svcName)
 	os.Setenv("AUTO_L4_FQDN", "disable")
 }
 
@@ -1728,7 +1809,7 @@ func TestLBSvcWithNameLen63AndNamespaceNameLen63(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error in adding Service: %v", err)
 	}
-	CreateEP(t, svcNamespace, svcName, false, false, "1.1.1")
+	CreateEPorEPS(t, svcNamespace, svcName, false, false, "1.1.1")
 	PollForCompletion(t, modelName, 5)
 
 	g.Eventually(func() bool {
@@ -1746,7 +1827,7 @@ func TestLBSvcWithNameLen63AndNamespaceNameLen63(t *testing.T) {
 	g.Expect(nodes[0].VSVIPRefs[0].FQDNs[0]).To(gomega.HaveSuffix("red-ns-012345678901234567890123456789012345.com"))
 
 	DelSVC(t, svcNamespace, svcName)
-	DelEP(t, svcNamespace, svcName)
+	DelEPorEPS(t, svcNamespace, svcName)
 	os.Setenv("AUTO_L4_FQDN", "disable")
 }
 
@@ -1756,7 +1837,7 @@ func TestLBSvcWithExtDNSAndAutoFQDNAsFlat(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	SetUpTestForSvcLBWithExtDNS(t)
 
-	modelName := "admin/cluster--red-ns-" + EXTDNSSVC
+	modelName := MODEL_REDNS_PREFIX + EXTDNSSVC
 
 	g.Eventually(func() bool {
 		found, _ := objects.SharedAviGraphLister().Get(modelName)

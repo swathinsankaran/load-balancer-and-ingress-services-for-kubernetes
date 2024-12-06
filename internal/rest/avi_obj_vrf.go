@@ -31,16 +31,17 @@ import (
 
 func (rest *RestOperations) AviVrfGet(key, uuid, name string) *avimodels.VrfContext {
 
-	if rest.aviRestPoolClient == nil {
+	aviRestPoolClient := avicache.SharedAVIClients(lib.GetTenant())
+	if aviRestPoolClient == nil {
 		utils.AviLog.Warnf("key: %s, msg: aviRestPoolClient not initialized", key)
 		return nil
 	}
-	if len(rest.aviRestPoolClient.AviClient) < 1 {
+	if len(aviRestPoolClient.AviClient) < 1 {
 		utils.AviLog.Warnf("key: %s, msg: client in aviRestPoolClient not initialized", key)
 		return nil
 	}
 
-	client := rest.aviRestPoolClient.AviClient[0]
+	client := aviRestPoolClient.AviClient[0]
 	uri := "/api/vrfcontext/" + uuid
 
 	rawData, err := lib.AviGetRaw(client, uri)
@@ -82,7 +83,7 @@ func (rest *RestOperations) AviVrfBuild(key string, vrfNode *nodes.AviVrfNode, u
 	vrf.StaticRoutes = append(vrf.StaticRoutes, mergedStaticRoutes...)
 
 	opTenant := lib.GetAdminTenant()
-	if lib.GetCloudType() == lib.CLOUD_OPENSTACK {
+	if lib.GetCloudType() == lib.CLOUD_OPENSTACK || lib.GetTenant() != "" {
 		//In case of Openstack cloud, use tenant vrf
 		opTenant = lib.GetTenant()
 	}

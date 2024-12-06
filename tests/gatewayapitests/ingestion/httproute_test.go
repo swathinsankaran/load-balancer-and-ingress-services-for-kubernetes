@@ -31,13 +31,14 @@ func TestHTTPRouteCUD(t *testing.T) {
 	namespace := "default"
 	ports := []int32{8080, 8081}
 	key := "HTTPRoute" + "/" + namespace + "/" + httpRouteName
+	gwkey := "Gateway/" + DEFAULT_NAMESPACE + "/" + gatewayName
 	akogatewayapiobjects.GatewayApiLister().UpdateGatewayClass(gatewayClassName, true)
 
 	akogatewayapitests.SetupGatewayClass(t, gatewayClassName, akogatewayapilib.GatewayController)
 	t.Logf("Created GatewayClass %s", gatewayClassName)
 	waitAndverify(t, "GatewayClass/gateway-class-01")
 
-	listeners := akogatewayapitests.GetListenersV1(ports)
+	listeners := akogatewayapitests.GetListenersV1(ports, false, false)
 	akogatewayapitests.SetupGateway(t, gatewayName, namespace, gatewayClassName, nil, listeners)
 	t.Logf("Created Gateway %s", gatewayName)
 	waitAndverify(t, "Gateway/default/gateway-01")
@@ -55,9 +56,11 @@ func TestHTTPRouteCUD(t *testing.T) {
 	// delete
 	akogatewayapitests.TeardownHTTPRoute(t, httpRouteName, namespace)
 	waitAndverify(t, key)
+	akogatewayapitests.TeardownGateway(t, gatewayName, namespace)
+	waitAndverify(t, gwkey)
 }
 
-func TestHTTPRouteInvalidHostname(t *testing.T) {
+func TestHTTPRouteHostnameInvalid(t *testing.T) {
 	gatewayClassName := "gateway-class-02"
 	gatewayName := "gateway-02"
 	httpRouteName := "httproute-02"
@@ -72,7 +75,7 @@ func TestHTTPRouteInvalidHostname(t *testing.T) {
 	t.Logf("Created GatewayClass %s", gatewayClassName)
 	waitAndverify(t, gwClassKey)
 
-	listeners := akogatewayapitests.GetListenersV1(ports)
+	listeners := akogatewayapitests.GetListenersV1(ports, false, false)
 	akogatewayapitests.SetupGateway(t, gatewayName, namespace, gatewayClassName, nil, listeners)
 	t.Logf("Created Gateway %s", gatewayName)
 	waitAndverify(t, gwKey)
@@ -80,7 +83,7 @@ func TestHTTPRouteInvalidHostname(t *testing.T) {
 	parentRefs := akogatewayapitests.GetParentReferencesV1([]string{gatewayName}, namespace, ports)
 	hostnames := []gatewayv1.Hostname{"*.example.com"}
 	akogatewayapitests.SetupHTTPRoute(t, httpRouteName, namespace, parentRefs, hostnames, nil)
-	waitAndverify(t, "")
+	waitAndverify(t, key)
 
 	// update
 	hostnames = []gatewayv1.Hostname{"foo-8080.com"}
@@ -114,15 +117,128 @@ func TestHTTPRouteGatewayNotPresent(t *testing.T) {
 	parentRefs := akogatewayapitests.GetParentReferencesV1([]string{gatewayName}, namespace, ports)
 	hostnames := []gatewayv1.Hostname{"foo-8080.com", "foo-8081.com"}
 	akogatewayapitests.SetupHTTPRoute(t, httpRouteName, namespace, parentRefs, hostnames, nil)
-	waitAndverify(t, "")
+	waitAndverify(t, key)
 
 	// update
-	listeners := akogatewayapitests.GetListenersV1(ports)
+	listeners := akogatewayapitests.GetListenersV1(ports, false, false)
 	akogatewayapitests.SetupGateway(t, gatewayName, namespace, gatewayClassName, nil, listeners)
 	t.Logf("Created Gateway %s", gatewayName)
 	waitAndverify(t, gwKey)
 	hostnames = []gatewayv1.Hostname{"foo-8080.com"}
 	akogatewayapitests.UpdateHTTPRoute(t, httpRouteName, namespace, parentRefs, hostnames, nil)
+	waitAndverify(t, key)
+
+	// delete
+	akogatewayapitests.TeardownHTTPRoute(t, httpRouteName, namespace)
+	waitAndverify(t, key)
+	akogatewayapitests.TeardownGateway(t, gatewayName, DEFAULT_NAMESPACE)
+	waitAndverify(t, gwKey)
+	akogatewayapitests.TeardownGatewayClass(t, gatewayClassName)
+	waitAndverify(t, gwClassKey)
+}
+
+func TestHTTPRouteGatewayWithEmptyHostnameInGateway(t *testing.T) {
+	gatewayClassName := "gateway-class-07"
+	gatewayName := "gateway-07"
+	httpRouteName := "httproute-07"
+	gwKey := "Gateway/" + DEFAULT_NAMESPACE + "/" + gatewayName
+	gwClassKey := "GatewayClass/" + gatewayClassName
+	namespace := "default"
+	ports := []int32{8080}
+	key := "HTTPRoute" + "/" + namespace + "/" + httpRouteName
+
+	// gatewayclass
+	akogatewayapiobjects.GatewayApiLister().UpdateGatewayClass(gatewayClassName, true)
+	akogatewayapitests.SetupGatewayClass(t, gatewayClassName, akogatewayapilib.GatewayController)
+	t.Logf("Created GatewayClass %s", gatewayClassName)
+	waitAndverify(t, gwClassKey)
+
+	// Gateway with empty hostname
+	listeners := akogatewayapitests.GetListenersV1(ports, true, false)
+	akogatewayapitests.SetupGateway(t, gatewayName, namespace, gatewayClassName, nil, listeners)
+	t.Logf("Created Gateway %s without hostname", gatewayName)
+	waitAndverify(t, gwKey)
+
+	t.Logf("Now creating httproute")
+	parentRefs := akogatewayapitests.GetParentReferencesV1([]string{gatewayName}, namespace, ports)
+	hostnames := []gatewayv1.Hostname{"foo-8080.com"}
+	akogatewayapitests.SetupHTTPRoute(t, httpRouteName, namespace, parentRefs, hostnames, nil)
+	waitAndverify(t, key)
+
+	// delete
+	akogatewayapitests.TeardownHTTPRoute(t, httpRouteName, namespace)
+	waitAndverify(t, key)
+	akogatewayapitests.TeardownGateway(t, gatewayName, DEFAULT_NAMESPACE)
+	waitAndverify(t, gwKey)
+	akogatewayapitests.TeardownGatewayClass(t, gatewayClassName)
+	waitAndverify(t, gwClassKey)
+}
+
+func TestHTTPRouteGatewayWithEmptyHostnameInHTTPRoute(t *testing.T) {
+	gatewayClassName := "gateway-class-05"
+	gatewayName := "gateway-05"
+	httpRouteName := "httproute-05"
+	gwKey := "Gateway/" + DEFAULT_NAMESPACE + "/" + gatewayName
+	gwClassKey := "GatewayClass/" + gatewayClassName
+	namespace := "default"
+	ports := []int32{8080}
+	key := "HTTPRoute" + "/" + namespace + "/" + httpRouteName
+
+	// gatewayclass
+	akogatewayapiobjects.GatewayApiLister().UpdateGatewayClass(gatewayClassName, true)
+	akogatewayapitests.SetupGatewayClass(t, gatewayClassName, akogatewayapilib.GatewayController)
+	t.Logf("Created GatewayClass %s", gatewayClassName)
+	waitAndverify(t, gwClassKey)
+
+	// Gateway
+	listeners := akogatewayapitests.GetListenersV1(ports, false, false)
+	akogatewayapitests.SetupGateway(t, gatewayName, namespace, gatewayClassName, nil, listeners)
+	t.Logf("Created Gateway %s", gatewayName)
+	waitAndverify(t, gwKey)
+
+	// httproute without hostname
+	t.Logf("Now creating httproute without hostname")
+	parentRefs := akogatewayapitests.GetParentReferencesV1([]string{gatewayName}, namespace, ports)
+	hostnames := []gatewayv1.Hostname{}
+	akogatewayapitests.SetupHTTPRoute(t, httpRouteName, namespace, parentRefs, hostnames, nil)
+	waitAndverify(t, key)
+
+	// delete
+	akogatewayapitests.TeardownHTTPRoute(t, httpRouteName, namespace)
+	waitAndverify(t, key)
+	akogatewayapitests.TeardownGateway(t, gatewayName, DEFAULT_NAMESPACE)
+	waitAndverify(t, gwKey)
+	akogatewayapitests.TeardownGatewayClass(t, gatewayClassName)
+	waitAndverify(t, gwClassKey)
+}
+
+func TestHTTPRouteGatewayWithEmptyHostname(t *testing.T) {
+	gatewayClassName := "gateway-class-06"
+	gatewayName := "gateway-06"
+	httpRouteName := "httproute-06"
+	gwKey := "Gateway/" + DEFAULT_NAMESPACE + "/" + gatewayName
+	gwClassKey := "GatewayClass/" + gatewayClassName
+	namespace := "default"
+	ports := []int32{8080}
+	key := "HTTPRoute" + "/" + namespace + "/" + httpRouteName
+
+	// gatewayclass
+	akogatewayapiobjects.GatewayApiLister().UpdateGatewayClass(gatewayClassName, true)
+	akogatewayapitests.SetupGatewayClass(t, gatewayClassName, akogatewayapilib.GatewayController)
+	t.Logf("Created GatewayClass %s", gatewayClassName)
+	waitAndverify(t, gwClassKey)
+
+	// Gateway without hostname
+	listeners := akogatewayapitests.GetListenersV1(ports, true, false)
+	akogatewayapitests.SetupGateway(t, gatewayName, namespace, gatewayClassName, nil, listeners)
+	t.Logf("Created Gateway %s", gatewayName)
+	waitAndverify(t, gwKey)
+
+	// httproute without hostname
+	t.Logf("Now creating httproute without hostname")
+	parentRefs := akogatewayapitests.GetParentReferencesV1([]string{gatewayName}, namespace, ports)
+	hostnames := []gatewayv1.Hostname{}
+	akogatewayapitests.SetupHTTPRoute(t, httpRouteName, namespace, parentRefs, hostnames, nil)
 	waitAndverify(t, key)
 
 	// delete

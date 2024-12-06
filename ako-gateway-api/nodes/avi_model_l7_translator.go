@@ -16,35 +16,82 @@ package nodes
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/vmware/alb-sdk/go/models"
 	"google.golang.org/protobuf/proto"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	akogatewayapilib "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/lib"
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/objects"
 	akogatewayapiobjects "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/objects"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/nodes"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 )
 
-func (o *AviObjectGraph) ProcessL7Routes(key string, routeModel RouteModel, parentNsName string, childVSes map[string]struct{}) {
-	for _, rule := range routeModel.ParseRouteRules().Rules {
+func (o *AviObjectGraph) AddDefaultHTTPPolicySet(key string) {
+	parentVS := o.GetAviEvhVS()[0]
+
+	policyRefName := akogatewayapilib.GetDefaultHTTPPSName()
+	// find default backend, if found make sure it is at last index
+	for i, policyRef := range parentVS.HttpPolicyRefs {
+		if policyRef.Name == policyRefName {
+			if i != len(parentVS.HttpPolicyRefs)-1 {
+				utils.AviLog.Debugf("key: %s msg: Found %s httpref at non last position", key, policyRefName)
+				temp := parentVS.HttpPolicyRefs[i]
+				parentVS.HttpPolicyRefs = append(parentVS.HttpPolicyRefs[:i], parentVS.HttpPolicyRefs[i+1:]...)
+				parentVS.HttpPolicyRefs = append(parentVS.HttpPolicyRefs, temp)
+			}
+			return
+		}
+	}
+	// if not found add it to last index
+
+	utils.AviLog.Debugf("key: %s msg: %s httpref not found. Adding", key, policyRefName)
+	defaultPolicyRef := &nodes.AviHttpPolicySetNode{Name: policyRefName, Tenant: lib.GetTenant()}
+	defaultPolicyRef.RequestRules = []*models.HTTPRequestRule{
+		{
+			Name:   proto.String("default-backend-rule"),
+			Enable: proto.Bool(true),
+			Index:  proto.Int32(0),
+			Match: &models.MatchTarget{
+				Path: &models.PathMatch{
+					MatchCriteria: proto.String("BEGINS_WITH"),
+					MatchStr:      []string{"/"},
+				},
+			},
+			SwitchingAction: &models.HttpswitchingAction{
+				Action:     proto.String("HTTP_SWITCHING_SELECT_LOCAL"),
+				StatusCode: proto.String("HTTP_LOCAL_RESPONSE_STATUS_CODE_404"),
+			},
+		},
+	}
+	parentVS.HttpPolicyRefs = append(parentVS.HttpPolicyRefs, defaultPolicyRef)
+}
+
+func (o *AviObjectGraph) ProcessL7Routes(key string, routeModel RouteModel, parentNsName string, childVSes map[string]struct{}, fullsync bool) {
+	httpRouteConfig := routeModel.ParseRouteConfig(key)
+	httpRouteRules := httpRouteConfig.Rules
+	for _, rule := range httpRouteRules {
 		// TODO: add the scenarios where we will not create child VS here.
 		if rule.Matches == nil {
 			continue
 		}
-		o.BuildChildVS(key, routeModel, parentNsName, rule, childVSes)
+		o.BuildChildVS(key, routeModel, parentNsName, rule, childVSes, fullsync)
 	}
 }
 
-func (o *AviObjectGraph) BuildChildVS(key string, routeModel RouteModel, parentNsName string, rule *Rule, childVSes map[string]struct{}) {
+func (o *AviObjectGraph) BuildChildVS(key string, routeModel RouteModel, parentNsName string, rule *Rule, childVSes map[string]struct{}, fullsync bool) {
 
 	parentNode := o.GetAviEvhVS()
 	parentNs, _, parentName := lib.ExtractTypeNameNamespace(parentNsName)
+	routeTypeNsName := lib.HTTPRoute + "/" + routeModel.GetNamespace() + "/" + routeModel.GetName()
 
-	found, hosts := akogatewayapiobjects.GatewayApiLister().GetGatewayRouteToHostname(parentNs, parentName)
+	gwRouteNsName := fmt.Sprintf("%s/%s", parentNsName, routeTypeNsName)
+	found, hosts := akogatewayapiobjects.GatewayApiLister().GetGatewayRouteToHostname(gwRouteNsName)
 	if !found {
 		utils.AviLog.Warnf("key: %s, msg: No hosts mapped to the route %s/%s/%s", key, routeModel.GetType(), routeModel.GetNamespace(), routeModel.GetName())
 		return
@@ -63,7 +110,8 @@ func (o *AviObjectGraph) BuildChildVS(key string, routeModel RouteModel, parentN
 	childNode.EVHParent = false
 
 	childNode.ServiceMetadata = lib.ServiceMetadataObj{
-		Gateway: parentNsName,
+		Gateway:   parentNsName,
+		HTTPRoute: routeModel.GetNamespace() + "/" + routeModel.GetName(),
 	}
 	childNode.ApplicationProfile = utils.DEFAULT_L7_APP_PROFILE
 	childNode.ServiceEngineGroup = lib.GetSEGName()
@@ -73,20 +121,22 @@ func (o *AviObjectGraph) BuildChildVS(key string, routeModel RouteModel, parentN
 		Namespace:   parentNs,
 		Host:        hosts,
 	}
-	for _, host := range hosts {
-		if !utils.HasElem(parentNode[0].VSVIPRefs[0].FQDNs, host) {
-			parentNode[0].VSVIPRefs[0].FQDNs = append(parentNode[0].VSVIPRefs[0].FQDNs, host)
-		}
+	updateHostname(key, parentNsName, parentNode[0])
+
+	// create vhmatch from the match
+	o.BuildVHMatch(key, parentNsName, routeTypeNsName, childNode, rule, hosts)
+
+	if len(childNode.VHMatches) == 0 {
+		utils.AviLog.Warnf("key: %s, msg: No valid domain name added for child virtual service", key)
+		o.ProcessRouteDeletion(key, parentNsName, routeModel, fullsync)
+		return
 	}
 
 	// create pg pool from the backend
 	o.BuildPGPool(key, parentNsName, childNode, routeModel, rule)
 
-	// create vhmatch from the match
-	o.BuildVHMatch(key, childNode, routeModel, rule)
-
 	// create the httppolicyset if the filter is present
-	o.BuildHTTPPolicySet(key, childNode, routeModel, rule)
+	o.BuildHTTPPolicySet(key, childNode, routeModel, rule, 0, childVSName)
 
 	foundEvhModel := nodes.FindAndReplaceEvhInModel(childNode, parentNode, key)
 	if !foundEvhModel {
@@ -97,6 +147,32 @@ func (o *AviObjectGraph) BuildChildVS(key string, routeModel RouteModel, parentN
 	utils.AviLog.Infof("key: %s, msg: processing of child vs %s attached to parent vs %s completed", key, childNode.Name, childNode.VHParentName)
 }
 
+func updateHostname(key, parentNsName string, parentNode *nodes.AviEvhVsNode) {
+	ok, routeNsNames := akogatewayapiobjects.GatewayApiLister().GetGatewayToRoute(parentNsName)
+	if !ok || len(routeNsNames) == 0 {
+		utils.AviLog.Warnf("key: %s, msg: No routes from gateway, removing all FQDNs", key)
+		parentNode.VSVIPRefs[0].FQDNs = []string{}
+		return
+	}
+	uniqueHostnamesSet := sets.NewString()
+	for _, routeNsName := range routeNsNames {
+		gwRouteNsName := fmt.Sprintf("%s/%s", parentNsName, routeNsName)
+		ok, hostnames := akogatewayapiobjects.GatewayApiLister().GetGatewayRouteToHostname(gwRouteNsName)
+		if !ok {
+			utils.AviLog.Warnf("key: %s, msg: Unable to fetch hostname from route: %s", key, routeNsName)
+		} else {
+			uniqueHostnamesSet.Insert(hostnames...)
+		}
+	}
+
+	uniqueHostnames := slices.DeleteFunc(uniqueHostnamesSet.List(), func(s string) bool {
+		return strings.Contains(s, utils.WILDCARD)
+	})
+
+	utils.AviLog.Debugf("key: %s, unique hostnames %v found for gatewayNs: %s", key, uniqueHostnames, parentNsName)
+	parentNode.VSVIPRefs[0].FQDNs = uniqueHostnames
+}
+
 func (o *AviObjectGraph) BuildPGPool(key, parentNsName string, childVsNode *nodes.AviEvhVsNode, routeModel RouteModel, rule *Rule) {
 	//reset pool, poolgroupreferences
 	childVsNode.PoolGroupRefs = nil
@@ -105,10 +181,13 @@ func (o *AviObjectGraph) BuildPGPool(key, parentNsName string, childVsNode *node
 	// create the PG from backends
 	routeTypeNsName := lib.HTTPRoute + "/" + routeModel.GetNamespace() + "/" + routeModel.GetName()
 	parentNs, _, parentName := lib.ExtractTypeNameNamespace(parentNsName)
-	_, listeners := akogatewayapiobjects.GatewayApiLister().GetRouteToGatewayListener(routeTypeNsName)
+	listeners := akogatewayapiobjects.GatewayApiLister().GetRouteToGatewayListener(routeTypeNsName, parentNsName)
+	if len(listeners) == 0 {
+		utils.AviLog.Warnf("key: %s, msg: No matching listener available for the route : %s", key, routeTypeNsName)
+		return
+	}
 	//ListenerName/port/protocol/allowedRouteSpec
-	listenerSlice := strings.Split(listeners[0], "/")
-	listenerProtocol := listenerSlice[2]
+	listenerProtocol := listeners[0].Protocol
 	PGName := akogatewayapilib.GetPoolGroupName(parentNs, parentName,
 		routeModel.GetNamespace(), routeModel.GetName(),
 		utils.Stringify(rule.Matches))
@@ -116,12 +195,13 @@ func (o *AviObjectGraph) BuildPGPool(key, parentNsName string, childVsNode *node
 		Name:   PGName,
 		Tenant: lib.GetTenant(),
 	}
-	for _, backend := range rule.Backends {
+
+	for _, httpbackend := range rule.Backends {
 		poolName := akogatewayapilib.GetPoolName(parentNs, parentName,
 			routeModel.GetNamespace(), routeModel.GetName(),
 			utils.Stringify(rule.Matches),
-			backend.Namespace, backend.Name, strconv.Itoa(int(backend.Port)))
-		svcObj, err := utils.GetInformers().ServiceInformer.Lister().Services(backend.Namespace).Get(backend.Name)
+			httpbackend.Backend.Namespace, httpbackend.Backend.Name, strconv.Itoa(int(httpbackend.Backend.Port)))
+		svcObj, err := utils.GetInformers().ServiceInformer.Lister().Services(httpbackend.Backend.Namespace).Get(httpbackend.Backend.Name)
 		if err != nil {
 			utils.AviLog.Debugf("key: %s, msg: there was an error in retrieving the service", key)
 			o.RemovePoolRefsFromPG(poolName, o.GetPoolGroupByName(PGName))
@@ -131,17 +211,29 @@ func (o *AviObjectGraph) BuildPGPool(key, parentNsName string, childVsNode *node
 			Name:       poolName,
 			Tenant:     lib.GetTenant(),
 			Protocol:   listenerProtocol,
-			PortName:   akogatewayapilib.FindPortName(backend.Name, backend.Namespace, backend.Port, key),
-			TargetPort: akogatewayapilib.FindTargetPort(backend.Name, backend.Namespace, backend.Port, key),
-			Port:       backend.Port,
+			PortName:   akogatewayapilib.FindPortName(httpbackend.Backend.Name, httpbackend.Backend.Namespace, httpbackend.Backend.Port, key),
+			TargetPort: akogatewayapilib.FindTargetPort(httpbackend.Backend.Name, httpbackend.Backend.Namespace, httpbackend.Backend.Port, key),
+			Port:       httpbackend.Backend.Port,
 			ServiceMetadata: lib.ServiceMetadataObj{
-				NamespaceServiceName: []string{backend.Namespace + "/" + backend.Name},
+				NamespaceServiceName: []string{httpbackend.Backend.Namespace + "/" + httpbackend.Backend.Name},
 			},
 			VrfContext: lib.GetVrf(),
 		}
+
+		t1LR := lib.GetT1LRPath()
+		if t1LR != "" {
+			poolNode.T1Lr = t1LR
+			poolNode.VrfContext = ""
+			utils.AviLog.Infof("key: %s, msg: setting t1LR: %s for pool node.", key, t1LR)
+		}
 		poolNode.NetworkPlacementSettings = lib.GetNodeNetworkMap()
 		serviceType := lib.GetServiceType()
-		if serviceType == lib.NodePort {
+		if serviceType == lib.NodePortLocal {
+			servers := nodes.PopulateServersForNPL(poolNode, svcObj.ObjectMeta.Namespace, svcObj.ObjectMeta.Name, false, key)
+			if servers != nil {
+				poolNode.Servers = servers
+			}
+		} else if serviceType == lib.NodePort {
 			servers := nodes.PopulateServersForNodePort(poolNode, svcObj.ObjectMeta.Namespace, svcObj.ObjectMeta.Name, false, key)
 			if servers != nil {
 				poolNode.Servers = servers
@@ -156,8 +248,9 @@ func (o *AviObjectGraph) BuildPGPool(key, parentNsName string, childVsNode *node
 			// Replace the poolNode.
 			childVsNode.ReplaceEvhPoolInEVHNode(poolNode, key)
 		}
+
 		pool_ref := fmt.Sprintf("/api/pool?name=%s", poolNode.Name)
-		ratio := uint32(backend.Weight)
+		ratio := uint32(httpbackend.Backend.Weight)
 		PG.Members = append(PG.Members, &models.PoolGroupMember{PoolRef: &pool_ref, Ratio: &ratio})
 	}
 	if len(PG.Members) > 0 {
@@ -166,10 +259,12 @@ func (o *AviObjectGraph) BuildPGPool(key, parentNsName string, childVsNode *node
 	}
 }
 
-func (o *AviObjectGraph) BuildVHMatch(key string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, rule *Rule) {
+func (o *AviObjectGraph) BuildVHMatch(key string, parentNsName string, routeTypeNsName string, vsNode *nodes.AviEvhVsNode, rule *Rule, hosts []string) {
 	var vhMatches []*models.VHMatch
 
-	for _, host := range routeModel.ParseRouteRules().Hosts {
+	listeners := objects.GatewayApiLister().GetRouteToGatewayListener(routeTypeNsName, parentNsName)
+
+	for _, host := range hosts {
 		hostname := host
 		vhMatch := &models.VHMatch{
 			Host: &hostname,
@@ -208,6 +303,17 @@ func (o *AviObjectGraph) BuildVHMatch(key string, vsNode *nodes.AviEvhVsNode, ro
 				rule.Matches.Hdrs = append(rule.Matches.Hdrs, hdrMatch)
 			}
 
+			//port match from listener
+			matchCriteria := "IS_IN"
+			rule.Matches.VsPort = &models.PortMatch{
+				MatchCriteria: &matchCriteria,
+			}
+			for _, listener := range listeners {
+				rule.Matches.VsPort.Ports = append(rule.Matches.VsPort.Ports, int64(listener.Port))
+			}
+			//TODO correctly add protocol
+			//rule.Matches.Protocol.Protocols = &listeners[0].Protocol
+
 			vhMatch.Rules = append(vhMatch.Rules, rule)
 		}
 		vhMatches = append(vhMatches, vhMatch)
@@ -217,30 +323,41 @@ func (o *AviObjectGraph) BuildVHMatch(key string, vsNode *nodes.AviEvhVsNode, ro
 	utils.AviLog.Infof("key: %s, msg: Attached match criteria to vs %s", key, vsNode.Name)
 }
 
-func (o *AviObjectGraph) BuildHTTPPolicySet(key string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, rule *Rule) {
+func (o *AviObjectGraph) BuildHTTPPolicySet(key string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, rule *Rule, index int, httpPSName string) {
 
 	if len(rule.Filters) == 0 {
 		vsNode.HttpPolicyRefs = nil
 		return
 	}
-
-	policy := &nodes.AviHttpPolicySetNode{Name: vsNode.Name, Tenant: lib.GetTenant()}
-	vsNode.HttpPolicyRefs = []*nodes.AviHttpPolicySetNode{policy}
-
-	o.BuildHTTPPolicySetHTTPRequestRedirectRules(key, vsNode, routeModel, rule.Filters)
-	if len(vsNode.HttpPolicyRefs[0].RequestRules) == 1 {
+	var policy *nodes.AviHttpPolicySetNode
+	// add it over here for httppolicyset
+	for i, http := range vsNode.HttpPolicyRefs {
+		if http.Name == httpPSName {
+			policy = vsNode.HttpPolicyRefs[i]
+			index = i
+			break
+		}
+	}
+	if policy == nil {
+		policy = &nodes.AviHttpPolicySetNode{Name: httpPSName, Tenant: lib.GetTenant()}
+		vsNode.HttpPolicyRefs = append(vsNode.HttpPolicyRefs, policy)
+		index = len(vsNode.HttpPolicyRefs) - 1
+	}
+	isRedirectPresent := o.BuildHTTPPolicySetHTTPRequestRedirectRules(key, httpPSName, vsNode, routeModel, rule.Filters, index)
+	if isRedirectPresent {
 		// When the RedirectAction is specified the Request and Response Modify Header Action
 		// won't have any effect, hence returning.
 		utils.AviLog.Infof("key: %s, msg: Attached HTTP redirect policy to vs %s", key, vsNode.Name)
 		return
 	}
-	o.BuildHTTPPolicySetHTTPRequestRules(key, vsNode, routeModel, rule.Filters)
-	o.BuildHTTPPolicySetHTTPResponseRules(key, vsNode, routeModel, rule.Filters)
+	o.BuildHTTPPolicySetHTTPRequestRules(key, httpPSName, vsNode, routeModel, rule.Filters, index)
+	o.BuildHTTPPolicySetHTTPResponseRules(key, vsNode, routeModel, rule.Filters, index)
 	utils.AviLog.Infof("key: %s, msg: Attached HTTP policies to vs %s", key, vsNode.Name)
 }
 
-func (o *AviObjectGraph) BuildHTTPPolicySetHTTPRequestRules(key string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, filters []*Filter) {
-	requestRule := &models.HTTPRequestRule{Name: &vsNode.Name, Enable: proto.Bool(true), Index: proto.Int32(1)}
+func (o *AviObjectGraph) BuildHTTPPolicySetHTTPRequestRules(key, httpPSName string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, filters []*Filter, index int) {
+	requestRule := &models.HTTPRequestRule{Name: &httpPSName, Enable: proto.Bool(true), Index: proto.Int32(int32(index + 1))}
+	vsNode.HttpPolicyRefs[index].RequestRules = []*models.HTTPRequestRule{}
 	for _, filter := range filters {
 		if filter.RequestFilter != nil {
 			var j uint32 = 0
@@ -264,13 +381,13 @@ func (o *AviObjectGraph) BuildHTTPPolicySetHTTPRequestRules(key string, vsNode *
 		}
 	}
 	if len(requestRule.HdrAction) != 0 {
-		vsNode.HttpPolicyRefs[0].RequestRules = []*models.HTTPRequestRule{requestRule}
-		utils.AviLog.Debugf("key: %s, msg: Attached HTTP request policies %s to vs %s", key, utils.Stringify(vsNode.HttpPolicyRefs[0].RequestRules), vsNode.Name)
+		vsNode.HttpPolicyRefs[index].RequestRules = append(vsNode.HttpPolicyRefs[index].RequestRules, requestRule)
+		utils.AviLog.Debugf("key: %s, msg: Attached HTTP request policies %v to vs %s", key, utils.Stringify(vsNode.HttpPolicyRefs[index].RequestRules), vsNode.Name)
 	}
 }
 
-func (o *AviObjectGraph) BuildHTTPPolicySetHTTPResponseRules(key string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, filters []*Filter) {
-	responseRule := &models.HTTPResponseRule{Name: &vsNode.Name, Enable: proto.Bool(true), Index: proto.Int32(1)}
+func (o *AviObjectGraph) BuildHTTPPolicySetHTTPResponseRules(key string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, filters []*Filter, index int) {
+	responseRule := &models.HTTPResponseRule{Name: &vsNode.Name, Enable: proto.Bool(true), Index: proto.Int32(int32(index + 1))}
 	for _, filter := range filters {
 		if filter.ResponseFilter != nil {
 			var j uint32 = 0
@@ -294,8 +411,8 @@ func (o *AviObjectGraph) BuildHTTPPolicySetHTTPResponseRules(key string, vsNode 
 		}
 	}
 	if len(responseRule.HdrAction) != 0 {
-		vsNode.HttpPolicyRefs[0].ResponseRules = []*models.HTTPResponseRule{responseRule}
-		utils.AviLog.Debugf("key: %s, msg: Attached HTTP response policies %s to vs %s", key, utils.Stringify(vsNode.HttpPolicyRefs[0].ResponseRules), vsNode.Name)
+		vsNode.HttpPolicyRefs[index].ResponseRules = []*models.HTTPResponseRule{responseRule}
+		utils.AviLog.Debugf("key: %s, msg: Attached HTTP response policies %v to vs %s", key, utils.Stringify(vsNode.HttpPolicyRefs[index].ResponseRules), vsNode.Name)
 	}
 }
 
@@ -304,7 +421,7 @@ func (o *AviObjectGraph) BuildHTTPPolicySetHTTPRuleHdrAction(key string, action 
 	hdrAction.Action = proto.String(action)
 	hdrAction.Hdr = &models.HTTPHdrData{}
 	hdrAction.Hdr.Name = proto.String(header.Name)
-	hdrAction.HdrIndex = headerIndex
+	hdrAction.HdrIndex = &headerIndex
 	if header.Value != "" {
 		hdrAction.Hdr.Value = &models.HTTPHdrValue{}
 		hdrAction.Hdr.Value.IsSensitive = proto.Bool(false)
@@ -313,8 +430,9 @@ func (o *AviObjectGraph) BuildHTTPPolicySetHTTPRuleHdrAction(key string, action 
 	return hdrAction
 }
 
-func (o *AviObjectGraph) BuildHTTPPolicySetHTTPRequestRedirectRules(key string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, filters []*Filter) {
+func (o *AviObjectGraph) BuildHTTPPolicySetHTTPRequestRedirectRules(key, httpPSname string, vsNode *nodes.AviEvhVsNode, routeModel RouteModel, filters []*Filter, index int) bool {
 	redirectAction := &models.HTTPRedirectAction{}
+	isRedirectPresent := false
 	for _, filter := range filters {
 		// considering only the first RedirectFilter
 		if filter.RedirectFilter != nil {
@@ -333,10 +451,12 @@ func (o *AviObjectGraph) BuildHTTPPolicySetHTTPRequestRedirectRules(key string, 
 				statusCode = fmt.Sprintf("HTTP_REDIRECT_STATUS_CODE_%d", filter.RedirectFilter.StatusCode)
 			}
 			redirectAction.StatusCode = &statusCode
-			requestRule := &models.HTTPRequestRule{Name: &vsNode.Name, Enable: proto.Bool(true), Index: proto.Int32(1), RedirectAction: redirectAction}
-			vsNode.HttpPolicyRefs[0].RequestRules = []*models.HTTPRequestRule{requestRule}
-			utils.AviLog.Debugf("key: %s, msg: Attached HTTP request redirect policies %s to vs %s", key, utils.Stringify(vsNode.HttpPolicyRefs[0].RequestRules), vsNode.Name)
+			requestRule := &models.HTTPRequestRule{Name: &httpPSname, Enable: proto.Bool(true), RedirectAction: redirectAction, Index: proto.Int32(int32(index + 1))}
+			vsNode.HttpPolicyRefs[index].RequestRules = []*models.HTTPRequestRule{requestRule}
+			isRedirectPresent = true
+			utils.AviLog.Debugf("key: %s, msg: Attached HTTP request redirect policies %s to vs %s", key, utils.Stringify(vsNode.HttpPolicyRefs[index].RequestRules), vsNode.Name)
 			break
 		}
 	}
+	return isRedirectPresent
 }

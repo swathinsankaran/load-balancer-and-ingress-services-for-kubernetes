@@ -15,18 +15,18 @@
 package k8s
 
 import (
+	"context"
 	"fmt"
-	"regexp"
-	"strings"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	akogatewayapilib "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/lib"
 	akogatewayapiobjects "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/objects"
 	akogatewayapistatus "github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/ako-gateway-api/status"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/lib"
+	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/internal/status"
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
 )
 
@@ -46,23 +46,27 @@ func IsGatewayClassValid(key string, gatewayClass *gatewayv1.GatewayClass) bool 
 		ObservedGeneration(gatewayClass.ObjectMeta.Generation).
 		Message("GatewayClass is valid").
 		SetIn(&gatewayClassStatus.Conditions)
-	akogatewayapistatus.Record(key, gatewayClass, &akogatewayapistatus.Status{GatewayClassStatus: gatewayClassStatus})
+	akogatewayapistatus.Record(key, gatewayClass, &status.Status{GatewayClassStatus: gatewayClassStatus})
 	utils.AviLog.Infof("key: %s, msg: GatewayClass object %s is valid", key, gatewayClass.Name)
 	return true
 }
 
-func IsValidGateway(key string, gateway *gatewayv1.Gateway) bool {
+func IsValidGateway(key string, gateway *gatewayv1.Gateway) (bool, bool) {
 	spec := gateway.Spec
-
+	allowedRoutesAll := false
 	defaultCondition := akogatewayapistatus.NewCondition().
 		Type(string(gatewayv1.GatewayConditionAccepted)).
 		Reason(string(gatewayv1.GatewayReasonInvalid)).
 		Status(metav1.ConditionFalse).
 		ObservedGeneration(gateway.ObjectMeta.Generation)
+	programmedCondition := akogatewayapistatus.NewCondition().
+		Type(string(gatewayv1.GatewayConditionProgrammed)).
+		Reason(string(gatewayv1.GatewayReasonInvalid)).
+		Status(metav1.ConditionFalse).
+		ObservedGeneration(gateway.ObjectMeta.Generation).
+		Message("Gateway not programmed")
 
 	gatewayStatus := gateway.Status.DeepCopy()
-
-	//TODO check hostname overlap across gateway using store
 
 	// has 1 or more listeners
 	if len(spec.Listeners) == 0 {
@@ -70,8 +74,10 @@ func IsValidGateway(key string, gateway *gatewayv1.Gateway) bool {
 		defaultCondition.
 			Message("No listeners found").
 			SetIn(&gatewayStatus.Conditions)
-		akogatewayapistatus.Record(key, gateway, &akogatewayapistatus.Status{GatewayStatus: gatewayStatus})
-		return false
+		programmedCondition.
+			SetIn(&gatewayStatus.Conditions)
+		akogatewayapistatus.Record(key, gateway, &status.Status{GatewayStatus: gatewayStatus})
+		return false, allowedRoutesAll
 	}
 
 	// has 1 or none addresses
@@ -80,37 +86,62 @@ func IsValidGateway(key string, gateway *gatewayv1.Gateway) bool {
 		defaultCondition.
 			Message("More than one address is not supported").
 			SetIn(&gatewayStatus.Conditions)
-		akogatewayapistatus.Record(key, gateway, &akogatewayapistatus.Status{GatewayStatus: gatewayStatus})
-		return false
+		programmedCondition.
+			Reason(string(gatewayv1.GatewayReasonAddressNotUsable)).
+			SetIn(&gatewayStatus.Conditions)
+		akogatewayapistatus.Record(key, gateway, &status.Status{GatewayStatus: gatewayStatus})
+		return false, allowedRoutesAll
 	}
 
 	if len(spec.Addresses) == 1 && *spec.Addresses[0].Type != "IPAddress" {
 		utils.AviLog.Errorf("key: %s, msg: gateway address is not of type IPAddress %+v", key, gateway.Name)
 		defaultCondition.
+			Reason(string(gatewayv1.GatewayReasonUnsupportedAddress)).
 			Message("Only IPAddress as AddressType is supported").
 			SetIn(&gatewayStatus.Conditions)
-		akogatewayapistatus.Record(key, gateway, &akogatewayapistatus.Status{GatewayStatus: gatewayStatus})
-		return false
+		programmedCondition.
+			Reason(string(gatewayv1.GatewayReasonAddressNotUsable)).
+			SetIn(&gatewayStatus.Conditions)
+		akogatewayapistatus.Record(key, gateway, &status.Status{GatewayStatus: gatewayStatus})
+		return false, allowedRoutesAll
 	}
 
 	gatewayStatus.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Spec.Listeners))
 
-	var invalidListenerCount int
+	var validListenerCount int
 	for index := range spec.Listeners {
-		if !isValidListener(key, gateway, gatewayStatus, index) {
-			invalidListenerCount++
+		if isValidListener(key, gateway, gatewayStatus, index) {
+			if !allowedRoutesAll {
+				if spec.Listeners[index].AllowedRoutes != nil && spec.Listeners[index].AllowedRoutes.Namespaces != nil && spec.Listeners[index].AllowedRoutes.Namespaces.From != nil {
+					if string(*spec.Listeners[index].AllowedRoutes.Namespaces.From) == akogatewayapilib.AllowedRoutesNamespaceFromAll {
+						allowedRoutesAll = true
+					}
+				}
+			}
+			validListenerCount++
 		}
 	}
 
-	if invalidListenerCount > 0 {
-		utils.AviLog.Errorf("key: %s, msg: Gateway %s contains %d invalid listeners", key, gateway.Name, invalidListenerCount)
+	if validListenerCount == 0 {
+		utils.AviLog.Errorf("key: %s, msg: Gateway %s does not contain any valid listener", key, gateway.Name)
 		defaultCondition.
-			Type(string(gatewayv1.GatewayReasonAccepted)).
+			Type(string(gatewayv1.GatewayConditionAccepted)).
 			Reason(string(gatewayv1.GatewayReasonListenersNotValid)).
-			Message(fmt.Sprintf("Gateway contains %d invalid listener(s)", invalidListenerCount)).
+			Message("Gateway does not contain any valid listener").
 			SetIn(&gatewayStatus.Conditions)
-		akogatewayapistatus.Record(key, gateway, &akogatewayapistatus.Status{GatewayStatus: gatewayStatus})
-		return false
+		programmedCondition.
+			SetIn(&gatewayStatus.Conditions)
+		akogatewayapistatus.Record(key, gateway, &status.Status{GatewayStatus: gatewayStatus})
+		return false, allowedRoutesAll
+	} else if validListenerCount < len(spec.Listeners) {
+		defaultCondition.
+			Reason(string(gatewayv1.GatewayReasonListenersNotValid)).
+			Status(metav1.ConditionTrue).
+			Message("Gateway contains atleast one valid listener").
+			SetIn(&gatewayStatus.Conditions)
+		akogatewayapistatus.Record(key, gateway, &status.Status{GatewayStatus: gatewayStatus})
+		utils.AviLog.Infof("key: %s, msg: Gateway %s contains atleast one valid listener", key, gateway.Name)
+		return true, allowedRoutesAll
 	}
 
 	defaultCondition.
@@ -118,9 +149,9 @@ func IsValidGateway(key string, gateway *gatewayv1.Gateway) bool {
 		Status(metav1.ConditionTrue).
 		Message("Gateway configuration is valid").
 		SetIn(&gatewayStatus.Conditions)
-	akogatewayapistatus.Record(key, gateway, &akogatewayapistatus.Status{GatewayStatus: gatewayStatus})
+	akogatewayapistatus.Record(key, gateway, &status.Status{GatewayStatus: gatewayStatus})
 	utils.AviLog.Infof("key: %s, msg: Gateway %s is valid", key, gateway.Name)
-	return true
+	return true, allowedRoutesAll
 }
 
 func isValidListener(key string, gateway *gatewayv1.Gateway, gatewayStatus *gatewayv1.GatewayStatus, index int) bool {
@@ -131,19 +162,18 @@ func isValidListener(key string, gateway *gatewayv1.Gateway, gatewayStatus *gate
 	gatewayStatus.Listeners[index].AttachedRoutes = akogatewayapilib.ZeroAttachedRoutes
 
 	defaultCondition := akogatewayapistatus.NewCondition().
-		Type(string(gatewayv1.GatewayConditionAccepted)).
-		Reason(string(gatewayv1.GatewayReasonListenersNotValid)).
+		Type(string(gatewayv1.ListenerConditionAccepted)).
+		Reason(string(gatewayv1.ListenerReasonInvalid)).
+		Message("Listener is Invalid").
 		Status(metav1.ConditionFalse).
 		ObservedGeneration(gateway.ObjectMeta.Generation)
 
-	// hostname is not nil or wildcard
-	if listener.Hostname == nil || *listener.Hostname == "*" {
-		utils.AviLog.Errorf("key: %s, msg: hostname with wildcard found in listener %s", key, listener.Name)
-		defaultCondition.
-			Message("Hostname not found or Hostname has invalid configuration").
-			SetIn(&gatewayStatus.Listeners[index].Conditions)
-		return false
-	}
+	programmedCondition := akogatewayapistatus.NewCondition().
+		Type(string(gatewayv1.ListenerConditionProgrammed)).
+		Reason(string(gatewayv1.ListenerReasonInvalid)).
+		Message("Virtual service not configured/updated for this listener").
+		Status(metav1.ConditionFalse).
+		ObservedGeneration(gateway.ObjectMeta.Generation)
 
 	// protocol validation
 	if listener.Protocol != gatewayv1.HTTPProtocolType &&
@@ -153,18 +183,58 @@ func isValidListener(key string, gateway *gatewayv1.Gateway, gatewayStatus *gate
 			Reason(string(gatewayv1.ListenerReasonUnsupportedProtocol)).
 			Message("Unsupported protocol").
 			SetIn(&gatewayStatus.Listeners[index].Conditions)
+		programmedCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
 		gatewayStatus.Listeners[index].SupportedKinds = akogatewayapilib.SupportedKinds[gatewayv1.HTTPSProtocolType]
 		return false
 	}
 
+	// hostname should not overlap with hostname of an existing gateway
+	gatewayNsList, err := akogatewayapilib.AKOControlConfig().GatewayApiInformers().GatewayInformer.Lister().Gateways(gateway.Namespace).List(labels.Set(nil).AsSelector())
+	if err != nil {
+		utils.AviLog.Errorf("Unable to retrieve the gateways during validation: %s", err)
+		return false
+	}
+	for _, gatewayInNamespace := range gatewayNsList {
+		if gateway.Name != gatewayInNamespace.Name {
+			for _, gwListener := range gatewayInNamespace.Spec.Listeners {
+				if gwListener.Hostname == nil {
+					continue
+				}
+				if listener.Hostname != nil && *listener.Hostname == *gwListener.Hostname {
+					utils.AviLog.Errorf("key: %s, msg: Hostname is same as an existing gateway %s hostname %s", key, gatewayInNamespace.Name, *gwListener.Hostname)
+					defaultCondition.
+						Message("Hostname is same as an existing gateway hostname").
+						SetIn(&gatewayStatus.Listeners[index].Conditions)
+					programmedCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
+					return false
+				}
+			}
+		}
+	}
+	// do not check subdomain for empty or * hostname
+	if listener.Hostname != nil && *listener.Hostname != utils.WILDCARD && *listener.Hostname != "" {
+		if !akogatewayapilib.VerifyHostnameSubdomainMatch(string(*listener.Hostname)) {
+			defaultCondition.
+				Message(fmt.Sprintf("Didn't find match for hostname :%s in available sub-domains", string(*listener.Hostname))).
+				SetIn(&gatewayStatus.Listeners[index].Conditions)
+			programmedCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
+			return false
+		}
+	}
+
+	resolvedRefCondition := akogatewayapistatus.NewCondition().
+		Type(string(gatewayv1.ListenerConditionResolvedRefs)).
+		Status(metav1.ConditionFalse).
+		ObservedGeneration(gateway.ObjectMeta.Generation)
 	// has valid TLS config
 	if listener.TLS != nil {
 		if (listener.TLS.Mode != nil && *listener.TLS.Mode != gatewayv1.TLSModeTerminate) || len(listener.TLS.CertificateRefs) == 0 {
 			utils.AviLog.Errorf("key: %s, msg: tls mode/ref not valid %+v/%+v", key, gateway.Name, listener.Name)
-			defaultCondition.
-				Reason(string(gatewayv1.ListenerReasonInvalidCertificateRef)).
+			defaultCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
+			resolvedRefCondition.Reason(string(gatewayv1.ListenerReasonInvalidCertificateRef)).
 				Message("TLS mode or reference not valid").
 				SetIn(&gatewayStatus.Listeners[index].Conditions)
+			programmedCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
 			return false
 		}
 		for _, certRef := range listener.TLS.CertificateRefs {
@@ -172,180 +242,200 @@ func isValidListener(key string, gateway *gatewayv1.Gateway, gatewayStatus *gate
 			if (certRef.Group != nil && string(*certRef.Group) != "") ||
 				certRef.Kind != nil && string(*certRef.Kind) != utils.Secret {
 				utils.AviLog.Errorf("key: %s, msg: CertificateRef is not valid %+v/%+v, must be Secret", key, gateway.Name, listener.Name)
-				defaultCondition.
-					Reason(string(gatewayv1.ListenerReasonInvalidCertificateRef)).
+				defaultCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
+				resolvedRefCondition.Reason(string(gatewayv1.ListenerReasonInvalidCertificateRef)).
 					Message("TLS mode or reference not valid").
 					SetIn(&gatewayStatus.Listeners[index].Conditions)
+				programmedCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
 				return false
 			}
+			name := string(certRef.Name)
+			_, err := utils.GetInformers().ClientSet.CoreV1().Secrets(gateway.ObjectMeta.Namespace).Get(context.TODO(), name, metav1.GetOptions{})
+			if err != nil {
+				utils.AviLog.Errorf("key: %s, msg: Secret specified in CertificateRef does not exist %+v/%+v", key, gateway.Name, listener.Name)
+				gWNSName := gateway.ObjectMeta.Namespace + "/" + gateway.ObjectMeta.Name
+				secretNSName := gateway.ObjectMeta.Namespace + "/" + name
+				akogatewayapiobjects.GatewayApiLister().UpdateSecretToGateway(secretNSName, []string{gWNSName})
+				defaultCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
+				resolvedRefCondition.
+					Reason(string(gatewayv1.ListenerReasonInvalidCertificateRef)).
+					Message("Secret does not exist").
+					SetIn(&gatewayStatus.Listeners[index].Conditions)
+				programmedCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
+				return false
+			}
+		}
+	}
 
+	//allowedRoutes validation
+	if listener.AllowedRoutes != nil {
+		if listener.AllowedRoutes.Kinds != nil {
+			for _, kindInAllowedRoute := range listener.AllowedRoutes.Kinds {
+				if kindInAllowedRoute.Kind != "" && string(kindInAllowedRoute.Kind) != utils.HTTPRoute {
+					utils.AviLog.Errorf("key: %s, msg: AllowedRoute kind is invalid %+v/%+v. Supported AllowedRoute kind is HTTPRoute.", key, gateway.Name, listener.Name)
+					defaultCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
+					resolvedRefCondition.
+						Reason(string(gatewayv1.ListenerReasonInvalidRouteKinds)).
+						Message("AllowedRoute kind is invalid. Only HTTPRoute is supported currently").
+						SetIn(&gatewayStatus.Listeners[index].Conditions)
+					programmedCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
+					return false
+				}
+				if kindInAllowedRoute.Group != nil && *kindInAllowedRoute.Group != "" && string(*kindInAllowedRoute.Group) != gatewayv1.GroupName {
+					utils.AviLog.Errorf("key: %s, msg: AllowedRoute Group is invalid %+v/%+v.", key, gateway.Name, listener.Name)
+					defaultCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
+					resolvedRefCondition.
+						Reason(string(gatewayv1.ListenerReasonInvalidRouteKinds)).
+						Message("AllowedRoute Group is invalid.").
+						SetIn(&gatewayStatus.Listeners[index].Conditions)
+					programmedCondition.SetIn(&gatewayStatus.Listeners[index].Conditions)
+					return false
+				}
+			}
 		}
 	}
 
 	// Valid listener
 	defaultCondition.
-		Reason(string(gatewayv1.GatewayReasonAccepted)).
+		Reason(string(gatewayv1.ListenerReasonAccepted)).
 		Status(metav1.ConditionTrue).
 		Message("Listener is valid").
 		SetIn(&gatewayStatus.Listeners[index].Conditions)
+
+	// Setting the resolvedRef condition
+	resolvedRefCondition.
+		Status(metav1.ConditionTrue).
+		Reason(string(gatewayv1.ListenerReasonResolvedRefs)).
+		Message("All the references are valid").
+		SetIn(&gatewayStatus.Listeners[index].Conditions)
+
 	utils.AviLog.Infof("key: %s, msg: Listener %s/%s is valid", key, gateway.Name, listener.Name)
 	return true
 }
 
-func IsHTTPRouteValid(key string, obj *gatewayv1.HTTPRoute) bool {
+func IsHTTPRouteConfigValid(key string, obj *gatewayv1.HTTPRoute) bool {
 
 	httpRoute := obj.DeepCopy()
 	if len(httpRoute.Spec.ParentRefs) == 0 {
 		utils.AviLog.Errorf("key: %s, msg: Parent Reference is empty for the HTTPRoute %s", key, httpRoute.Name)
 		return false
 	}
-
-	for _, hostname := range httpRoute.Spec.Hostnames {
-		if strings.Contains(string(hostname), "*") {
-			utils.AviLog.Errorf("key: %s, msg: Wildcard in hostname is not supported for the HTTPRoute %s", key, httpRoute.Name)
-			akogatewayapilib.AKOControlConfig().EventRecorder().Eventf(httpRoute, corev1.EventTypeWarning,
-				lib.Detached, "Wildcard in hostname is not supported for the HTTPRoute %s", httpRoute.Name)
-			return false
-		}
-	}
-
-	httpRouteStatus := obj.Status.DeepCopy()
-	httpRouteStatus.Parents = make([]gatewayv1.RouteParentStatus, 0, len(httpRoute.Spec.ParentRefs))
-	var invalidParentRefCount int
-	for index := range httpRoute.Spec.ParentRefs {
-		err := validateParentReference(key, httpRoute, httpRouteStatus, index)
-		if err != nil {
-			invalidParentRefCount++
-			parentRefName := httpRoute.Spec.ParentRefs[index].Name
-			utils.AviLog.Warnf("key: %s, msg: Parent Reference %s of HTTPRoute object %s is not valid, err: %v", key, parentRefName, httpRoute.Name, err)
-		}
-	}
-	akogatewayapistatus.Record(key, httpRoute, &akogatewayapistatus.Status{HTTPRouteStatus: httpRouteStatus})
-
-	// No valid attachment, we can't proceed with this HTTPRoute object.
-	if invalidParentRefCount == len(httpRoute.Spec.ParentRefs) {
-		utils.AviLog.Errorf("key: %s, msg: HTTPRoute object %s is not valid", key, httpRoute.Name)
-		akogatewayapilib.AKOControlConfig().EventRecorder().Eventf(httpRoute, corev1.EventTypeWarning,
-			lib.Detached, "HTTPRoute object %s is not valid", httpRoute.Name)
-		return false
-	}
-	utils.AviLog.Infof("key: %s, msg: HTTPRoute object %s is valid", key, httpRoute.Name)
 	return true
 }
 
-func validateParentReference(key string, httpRoute *gatewayv1.HTTPRoute, httpRouteStatus *gatewayv1.HTTPRouteStatus, index int) error {
+func ValidateGatewayListenerWithSecret(key, namespace, name string, deleteFlag bool) {
+	secretNSName := namespace + "/" + name
+	present, gwList := akogatewayapiobjects.GatewayApiLister().GetSecretToGateway(secretNSName)
+	utils.AviLog.Debugf("key: %s, msg: Gateways associated with secret [%s/%s] are [%v]", key, namespace, name, gwList)
+	if present {
+		clonedGWList := make([]string, len(gwList))
+		copy(clonedGWList, gwList)
+		for _, gwNSName := range gwList {
+			gwNamespace, _, gwName := lib.ExtractTypeNameNamespace(gwNSName)
+			// Check gateway present or not
+			gatewayObj, err := akogatewayapilib.AKOControlConfig().GatewayApiInformers().GatewayInformer.Lister().Gateways(gwNamespace).Get(gwName)
+			if err != nil {
+				// ignore gateway
+				continue
+			}
+			gwStatus := akogatewayapiobjects.GatewayApiLister().GetGatewayToGatewayStatusMapping(gwNamespace + "/" + gwName)
 
-	name := string(httpRoute.Spec.ParentRefs[index].Name)
-	namespace := httpRoute.Namespace
-	if httpRoute.Spec.ParentRefs[index].Namespace != nil {
-		namespace = string(*httpRoute.Spec.ParentRefs[index].Namespace)
+			// go through listeners, check cert is present there or not.
+			validListenerCount := 0
+			certFound := false
+			for listenerIndex, listener := range gatewayObj.Spec.Listeners {
+				if listener.TLS != nil {
+					if (listener.TLS.Mode != nil && *listener.TLS.Mode != gatewayv1.TLSModeTerminate) || len(listener.TLS.CertificateRefs) == 0 {
+						continue
+					}
+					for _, certRef := range listener.TLS.CertificateRefs {
+						// TODO: In future, ref grant impact needs to be considered.
+						certNamespace := namespace
+						if certRef.Namespace != nil {
+							certNamespace = string(*certRef.Namespace)
+						}
+						// add condition for checking gateway status
+						if gwStatus != nil && string(certRef.Name) == name && certNamespace == namespace {
+							setListenerConditions(gwStatus, listenerIndex, gatewayObj.ObjectMeta.Generation, deleteFlag)
+							certFound = true
+							break
+						}
+					}
+				}
+				if gwStatus != nil && !akogatewayapilib.IsListenerInvalid(gwStatus, listenerIndex) {
+					validListenerCount += 1
+				}
+			} // listener loop ends
+			// if cert not found, that means it is stale entry in secret to gateway map
+			if certFound {
+				setGatewayCondition(gwStatus, validListenerCount, len(gatewayObj.Spec.Listeners), gatewayObj.ObjectMeta.Generation)
+			} else {
+				//remove the entry from the clone
+				clonedGWList = utils.Remove(clonedGWList, gwNSName)
+			}
+		} // gw loop ends
+		// update the mapping
+		utils.AviLog.Debugf("key: %s, msg: after validations, Gateways associated with secret [%s/%s] are [%v]", key, namespace, name, gwList)
+		akogatewayapiobjects.GatewayApiLister().UpdateSecretToGateway(secretNSName, clonedGWList)
 	}
+}
 
-	obj, err := akogatewayapilib.AKOControlConfig().GatewayApiInformers().GatewayInformer.Lister().Gateways(namespace).Get(name)
-	if err != nil {
-		utils.AviLog.Errorf("key: %s, msg: unable to get the gateway object. err: %s", key, err)
-		return err
+// Mapping has to be taken care between secret and gateway
+func setListenerConditions(gwStatus *gatewayv1.GatewayStatus, index int, generation int64, isDelete bool) {
+	if !isDelete {
+		akogatewayapistatus.NewCondition().
+			Type(string(gatewayv1.ListenerConditionAccepted)).
+			Reason(string(gatewayv1.ListenerReasonAccepted)).
+			Message("Listener is valid").
+			Status(metav1.ConditionTrue).
+			ObservedGeneration(generation).SetIn(&gwStatus.Listeners[index].Conditions)
+
+		akogatewayapistatus.NewCondition().
+			Type(string(gatewayv1.ListenerConditionResolvedRefs)).
+			Reason(string(gatewayv1.ListenerReasonResolvedRefs)).
+			Message("Reference is valid").
+			Status(metav1.ConditionTrue).
+			ObservedGeneration(generation).SetIn(&gwStatus.Listeners[index].Conditions)
+		return
 	}
-	gateway := obj.DeepCopy()
-
-	gwClass := string(gateway.Spec.GatewayClassName)
-	_, isAKOCtrl := akogatewayapiobjects.GatewayApiLister().IsGatewayClassControllerAKO(gwClass)
-	if !isAKOCtrl {
-		utils.AviLog.Warnf("key: %s, msg: controller for the parent reference %s of HTTPRoute object %s is not ako", key, name, httpRoute.Name)
-		return fmt.Errorf("controller for the parent reference %s of HTTPRoute object %s is not ako", name, httpRoute.Name)
-	}
-	// creates the Parent status only when the AKO is the gateway controller
-	httpRouteStatus.Parents = append(httpRouteStatus.Parents, gatewayv1.RouteParentStatus{})
-	httpRouteStatus.Parents[index].ControllerName = akogatewayapilib.GatewayController
-	httpRouteStatus.Parents[index].ParentRef.Name = gatewayv1.ObjectName(name)
-	httpRouteStatus.Parents[index].ParentRef.Namespace = (*gatewayv1.Namespace)(&namespace)
-
-	defaultCondition := akogatewayapistatus.NewCondition().
-		Type(string(gatewayv1.GatewayConditionAccepted)).
-		Reason(string(gatewayv1.GatewayReasonInvalid)).
+	akogatewayapistatus.NewCondition().
+		Type(string(gatewayv1.ListenerConditionAccepted)).
+		Reason(string(gatewayv1.ListenerReasonInvalid)).
+		Message("Listener is Invalid").
 		Status(metav1.ConditionFalse).
-		ObservedGeneration(httpRoute.ObjectMeta.Generation)
+		ObservedGeneration(generation).SetIn(&gwStatus.Listeners[index].Conditions)
 
-	//section name is optional
-	var listenersForRoute []gatewayv1.Listener
-	if httpRoute.Spec.ParentRefs[index].SectionName != nil {
-		listenerName := *httpRoute.Spec.ParentRefs[index].SectionName
-		httpRouteStatus.Parents[index].ParentRef.SectionName = &listenerName
-		i := akogatewayapilib.FindListenerByName(string(listenerName), gateway.Spec.Listeners)
-		if i == -1 {
-			// listener is not present in gateway
-			utils.AviLog.Errorf("key: %s, msg: unable to find the listener from the Section Name %s in Parent Reference %s", key, name, listenerName)
-			err := fmt.Errorf("Invalid listener name provided")
-			defaultCondition.
-				Message(err.Error()).
-				SetIn(&httpRouteStatus.Parents[index].Conditions)
-			return err
-		}
-		listenersForRoute = append(listenersForRoute, gateway.Spec.Listeners[i])
-	} else {
-		listenersForRoute = append(listenersForRoute, gateway.Spec.Listeners...)
+	akogatewayapistatus.NewCondition().
+		Type(string(gatewayv1.ListenerConditionResolvedRefs)).
+		Reason(string(gatewayv1.ListenerReasonInvalidCertificateRef)).
+		Message("Secret does not exist").
+		Status(metav1.ConditionFalse).
+		ObservedGeneration(generation).SetIn(&gwStatus.Listeners[index].Conditions)
+}
+
+func setGatewayCondition(gwStatus *gatewayv1.GatewayStatus, validListenerCount, totalListenerCount int, observedGeneration int64) {
+	if validListenerCount == 0 {
+		akogatewayapistatus.NewCondition().
+			Type(string(gatewayv1.GatewayConditionAccepted)).
+			Reason(string(gatewayv1.GatewayReasonListenersNotValid)).
+			Message("Gateway does not contain any valid listener").
+			Status(metav1.ConditionFalse).
+			ObservedGeneration(observedGeneration).SetIn(&gwStatus.Conditions)
+		return
 	}
-
-	var listenersMatchedToRoute []gatewayv1.Listener
-	for _, listenerObj := range listenersForRoute {
-		// TODO: Don't attach to a invalid listener configuration
-		// check from store
-		hostInListener := listenerObj.Hostname
-
-		if hostInListener == nil {
-			utils.AviLog.Errorf("key: %s, msg: no hostname found in parent", key)
-			continue
-		}
-		// replace the wildcard character with a regex
-		replacedHostname := strings.Replace(string(*hostInListener), "*", "([a-zA-Z0-9-]{1,})", 1)
-		// create the expression for pattern matching
-		pattern := fmt.Sprintf("^%s$", replacedHostname)
-		expr, err := regexp.Compile(pattern)
-		if err != nil {
-			utils.AviLog.Warnf("key: %s, msg: unable to match the hostname with listener hostname. err: %s", key, err)
-			continue
-		}
-		var matched bool
-		for _, host := range httpRoute.Spec.Hostnames {
-			matched = matched || expr.MatchString(string(host))
-		}
-		if !matched {
-			utils.AviLog.Warnf("key: %s, msg: Gateway object %s don't have any listeners that matches the hostnames in HTTPRoute %s", key, gateway.Name, httpRoute.Name)
-			continue
-		}
-		listenersMatchedToRoute = append(listenersMatchedToRoute, listenerObj)
+	if validListenerCount < totalListenerCount {
+		akogatewayapistatus.NewCondition().
+			Type(string(gatewayv1.GatewayConditionAccepted)).
+			Reason(string(gatewayv1.GatewayReasonListenersNotValid)).
+			Message("Gateway contains atleast one valid listener").
+			Status(metav1.ConditionTrue).
+			ObservedGeneration(observedGeneration).SetIn(&gwStatus.Conditions)
+		return
 	}
-	if len(listenersMatchedToRoute) == 0 {
-		err := fmt.Errorf("Hostname in Gateway Listener doesn't match with any of the hostnames in HTTPRoute")
-		defaultCondition.
-			Message(err.Error()).
-			SetIn(&httpRouteStatus.Parents[index].Conditions)
-		return err
-	}
-	gatewayStatus := gateway.Status.DeepCopy()
-	for _, listenerObj := range listenersMatchedToRoute {
-		listenerName := listenerObj.Name
-		// Increment the attached routes of the listener in the Gateway object
-
-		i := akogatewayapilib.FindListenerStatusByName(string(listenerName), gatewayStatus.Listeners)
-		if i == -1 {
-			utils.AviLog.Errorf("key: %s, msg: Gateway status is missing for the listener with name %s", key, listenerName)
-			err := fmt.Errorf("Couldn't find the listener %s in the Gateway status", listenerName)
-			defaultCondition.
-				Message(err.Error()).
-				SetIn(&httpRouteStatus.Parents[index].Conditions)
-			return err
-		}
-
-		gatewayStatus.Listeners[i].AttachedRoutes += 1
-	}
-	akogatewayapistatus.Record(key, gateway, &akogatewayapistatus.Status{GatewayStatus: gatewayStatus})
-
-	defaultCondition.
+	akogatewayapistatus.NewCondition().
+		Type(string(gatewayv1.GatewayConditionAccepted)).
 		Reason(string(gatewayv1.GatewayReasonAccepted)).
+		Message("Gateway configuration is valid").
 		Status(metav1.ConditionTrue).
-		Message("Parent reference is valid").
-		SetIn(&httpRouteStatus.Parents[index].Conditions)
-	utils.AviLog.Infof("key: %s, msg: Parent Reference %s of HTTPRoute object %s is valid", key, name, httpRoute.Name)
-	return nil
+		ObservedGeneration(observedGeneration).SetIn(&gwStatus.Conditions)
 }

@@ -18,6 +18,7 @@
 package objects
 
 import (
+	"reflect"
 	"sync"
 
 	"github.com/vmware/load-balancer-and-ingress-services-for-kubernetes/pkg/utils"
@@ -109,6 +110,15 @@ func (o *ObjectMapStore) Get(objName string) (bool, interface{}) {
 	defer o.ObjLock.RUnlock()
 	val, ok := o.ObjectMap[objName]
 	if ok {
+		// if its a slice, make a copy since slice header contains address to underlying array
+		// any changes in a function is observed by the caller
+		if val != nil && reflect.TypeOf(val).Kind() == reflect.Slice {
+			value := reflect.ValueOf(val)
+			typeOfVal := reflect.TypeOf(val).Elem()
+			newSlice := reflect.MakeSlice(reflect.SliceOf(typeOfVal), value.Len(), value.Cap())
+			reflect.Copy(newSlice, value)
+			return true, newSlice.Interface()
+		}
 		return true, val
 	}
 	return false, nil
@@ -118,8 +128,11 @@ func (o *ObjectMapStore) Get(objName string) (bool, interface{}) {
 func (o *ObjectMapStore) GetAllObjectNames() map[string]interface{} {
 	o.ObjLock.RLock()
 	defer o.ObjLock.RUnlock()
-	// TODO (sudswas): Pass a copy instead of the reference
-	return o.ObjectMap
+	CopiedObjMap := make(map[string]interface{})
+	for k, v := range o.ObjectMap {
+		CopiedObjMap[k] = v
+	}
+	return CopiedObjMap
 
 }
 

@@ -89,7 +89,7 @@ func (rest *RestOperations) AviVsBuild(vs_meta *nodes.AviVsNode, rest_method uti
 			Name:                  proto.String(vs_meta.Name),
 			CloudConfigCksum:      proto.String(strconv.Itoa(int(vs_meta.CloudConfigCksum))),
 			CreatedBy:             proto.String(lib.AKOUser),
-			CloudRef:              proto.String("/api/cloud?name=" + utils.CloudName),
+			CloudRef:              proto.String(fmt.Sprintf("/api/cloud?name=%s", utils.CloudName)),
 			TenantRef:             proto.String(fmt.Sprintf("/api/tenant/?name=%s", vs_meta.Tenant)),
 			ApplicationProfileRef: proto.String("/api/applicationprofile/?name=" + vs_meta.ApplicationProfile),
 			SeGroupRef:            proto.String("/api/serviceenginegroup?name=" + vs_meta.ServiceEngineGroup),
@@ -145,7 +145,7 @@ func (rest *RestOperations) AviVsBuild(vs_meta *nodes.AviVsNode, rest_method uti
 			svc := avimodels.Service{
 				Port:         &port,
 				EnableSsl:    &vs_meta.PortProto[i].EnableSSL,
-				PortRangeEnd: port,
+				PortRangeEnd: &port,
 				EnableHttp2:  &vs_meta.PortProto[i].EnableHTTP2,
 			}
 			if vs_meta.NetworkProfile == utils.MIXED_NET_PROFILE {
@@ -166,7 +166,7 @@ func (rest *RestOperations) AviVsBuild(vs_meta *nodes.AviVsNode, rest_method uti
 		if vs_meta.NetworkProfile == utils.MIXED_NET_PROFILE {
 			if isTCPPortPresent {
 				license := lib.AKOControlConfig().GetLicenseType()
-				if license == lib.LicenseTypeEnterprise {
+				if license == lib.LicenseTypeEnterprise || license == lib.LicenseTypeEnterpriseCloudServices {
 					vs_meta.NetworkProfile = utils.DEFAULT_TCP_NW_PROFILE
 				} else {
 					vs_meta.NetworkProfile = utils.TCP_NW_FAST_PATH
@@ -319,9 +319,9 @@ func (rest *RestOperations) AviVsSniBuild(vs_meta *nodes.AviVsNode, rest_method 
 		app_prof = vs_meta.ApplicationProfileRef
 	}
 
-	cloudRef := "/api/cloud?name=" + utils.CloudName
+	cloudRef := fmt.Sprintf("/api/cloud?name=%s", utils.CloudName)
 	network_prof := "/api/networkprofile/?name=" + "System-TCP-Proxy"
-	seGroupRef := "/api/serviceenginegroup?name=" + lib.GetSEGName()
+	seGroupRef := fmt.Sprintf("/api/serviceenginegroup?name=%s", lib.GetSEGName())
 	svc_mdata_json, _ := json.Marshal(&vs_meta.ServiceMetadata)
 	svc_mdata := string(svc_mdata_json)
 	sniChild := &avimodels.VirtualService{
@@ -486,6 +486,10 @@ func AviVsHttpPSAdd(vs_meta interface{}, isEVH bool) []*avimodels.HTTPPolicies {
 }
 
 func (rest *RestOperations) StatusUpdateForPool(restMethod utils.RestMethod, vs_cache_obj *avicache.AviVsCache, key string) {
+	if !lib.AKOControlConfig().IsLeader() {
+		utils.AviLog.Debugf("key: %s, AKO is not running as a leader, will not publish the status", key)
+		return
+	}
 	if restMethod == utils.RestPost || restMethod == utils.RestDelete || restMethod == utils.RestPut {
 		for _, poolkey := range vs_cache_obj.PoolKeyCollection {
 			// Fetch the pool object from cache and check the service metadata
@@ -507,6 +511,7 @@ func (rest *RestOperations) StatusUpdateForPool(restMethod utils.RestMethod, vs_
 							Key:                key,
 							VirtualServiceUUID: vs_cache_obj.Uuid,
 							VSName:             vs_cache_obj.Name,
+							Tenant:             vs_cache_obj.Tenant,
 						}
 						statusOption := status.StatusOptions{
 							ObjType: utils.L4LBService,
@@ -523,6 +528,7 @@ func (rest *RestOperations) StatusUpdateForPool(restMethod utils.RestMethod, vs_
 							Key:                key,
 							VirtualServiceUUID: vs_cache_obj.Uuid,
 							VSName:             vs_cache_obj.Name,
+							Tenant:             vs_cache_obj.Tenant,
 						}
 						statusOption := status.StatusOptions{
 							ObjType: utils.Ingress,
@@ -546,6 +552,10 @@ func (rest *RestOperations) StatusUpdateForPool(restMethod utils.RestMethod, vs_
 }
 
 func (rest *RestOperations) StatusUpdateForVS(restMethod utils.RestMethod, vsCacheObj *avicache.AviVsCache, key string) {
+	if !lib.AKOControlConfig().IsLeader() {
+		utils.AviLog.Debugf("key: %s, AKO is not running as a leader, will not publish the status", key)
+		return
+	}
 	IPAddrs := rest.GetIPAddrsFromCache(vsCacheObj)
 	serviceMetadataObj := vsCacheObj.ServiceMetadataObj
 	switch serviceMetadataObj.ServiceMetadataMapping("VS") {
@@ -555,6 +565,7 @@ func (rest *RestOperations) StatusUpdateForVS(restMethod utils.RestMethod, vsCac
 			ServiceMetadata: serviceMetadataObj,
 			Key:             key,
 			VSName:          vsCacheObj.Name,
+			Tenant:          vsCacheObj.Tenant,
 		}
 		statusOption := status.StatusOptions{
 			ObjType: lib.Gateway,
@@ -574,6 +585,7 @@ func (rest *RestOperations) StatusUpdateForVS(restMethod utils.RestMethod, vsCac
 			Key:                key,
 			VirtualServiceUUID: vsCacheObj.Uuid,
 			VSName:             vsCacheObj.Name,
+			Tenant:             vsCacheObj.Tenant,
 		}
 		statusOption := status.StatusOptions{
 			ObjType: utils.L4LBService,
@@ -650,7 +662,7 @@ func (rest *RestOperations) AviVsCacheAdd(rest_op *utils.RestOp, key string) err
 		var vhParentKey interface{}
 		if found_parent {
 			// the uuid is expected to be in the format: "https://IP:PORT/api/virtualservice/virtualservice-88fd9718-f4f9-4e2b-9552-d31336330e0e#mygateway"
-			vs_uuid := avicache.ExtractUuid(vh_parent_uuid.(string), "virtualservice-.*.#")
+			vs_uuid := avicache.ExtractUUID(vh_parent_uuid.(string), "virtualservice-.*.#")
 			utils.AviLog.Debugf("key: %s, msg: extracted the vs uuid from parent ref: %s", key, vs_uuid)
 			// Now let's get the VS key from this uuid
 			var foundvscache bool
@@ -745,10 +757,10 @@ func (rest *RestOperations) AviVsCacheDel(rest_op *utils.RestOp, vsKey avicache.
 	// Delete the SNI Child ref
 	vs_cache, ok := rest.cache.VsCacheMeta.AviCacheGet(vsKey)
 	if ok {
-		vs_cache_obj, found := vs_cache.(*avicache.AviVsCache)
+		vsCacheObj, found := vs_cache.(*avicache.AviVsCache)
 		if found {
 			hostFoundInParentPool := false
-			parent_vs_cache, parent_ok := rest.cache.VsCacheMeta.AviCacheGet(vs_cache_obj.ParentVSRef)
+			parent_vs_cache, parent_ok := rest.cache.VsCacheMeta.AviCacheGet(vsCacheObj.ParentVSRef)
 			if parent_ok {
 				parent_vs_cache_obj, parent_found := parent_vs_cache.(*avicache.AviVsCache)
 				if parent_found {
@@ -757,8 +769,8 @@ func (rest *RestOperations) AviVsCacheDel(rest_op *utils.RestOp, vsKey avicache.
 
 					// if we find a L7Shared pool that has the secure VS host then don't delete status
 					// update is also not required since the shard would not change, IP should remain same
-					if len(vs_cache_obj.ServiceMetadataObj.HostNames) > 0 {
-						hostname := vs_cache_obj.ServiceMetadataObj.HostNames[0]
+					if len(vsCacheObj.ServiceMetadataObj.HostNames) > 0 {
+						hostname := vsCacheObj.ServiceMetadataObj.HostNames[0]
 						hostFoundInParentPool = rest.isHostPresentInSharedPool(hostname, parent_vs_cache_obj, key)
 					}
 
@@ -767,21 +779,21 @@ func (rest *RestOperations) AviVsCacheDel(rest_op *utils.RestOp, vsKey avicache.
 
 			// try to delete the vsvip from cache only if the vs is not of type insecure passthrough
 			// and if controller version is >= 20.1.1
-			if vs_cache_obj.ServiceMetadataObj.PassthroughParentRef == "" {
-				if len(vs_cache_obj.VSVipKeyCollection) > 0 {
-					vsvip := vs_cache_obj.VSVipKeyCollection[0].Name
+			if vsCacheObj.ServiceMetadataObj.PassthroughParentRef == "" {
+				if len(vsCacheObj.VSVipKeyCollection) > 0 {
+					vsvip := vsCacheObj.VSVipKeyCollection[0].Name
 					vsvipKey := avicache.NamespaceName{Namespace: vsKey.Namespace, Name: vsvip}
 					utils.AviLog.Infof("key: %s, msg: deleting vsvip cache for key: %s", key, vsvipKey)
 					rest.cache.VSVIPCache.AviCacheDelete(vsvipKey)
 				}
 			}
-
-			switch vs_cache_obj.ServiceMetadataObj.ServiceMetadataMapping("VS") {
+			switch vsCacheObj.ServiceMetadataObj.ServiceMetadataMapping("VS") {
 			case lib.GatewayVS:
 				updateOptions := status.UpdateOptions{
-					ServiceMetadata: vs_cache_obj.ServiceMetadataObj,
+					ServiceMetadata: vsCacheObj.ServiceMetadataObj,
 					Key:             key,
-					VSName:          vs_cache_obj.Name,
+					VSName:          vsCacheObj.Name,
+					Tenant:          vsCacheObj.Tenant,
 				}
 				statusOption := status.StatusOptions{
 					ObjType: lib.Gateway,
@@ -793,15 +805,16 @@ func (rest *RestOperations) AviVsCacheDel(rest_op *utils.RestOp, vsKey avicache.
 				status.PublishToStatusQueue(updateOptions.ServiceMetadata.Gateway, statusOption)
 				// The pools would have service metadata for backend services, corresponding to which
 				// statuses need to be deleted.
-				for _, poolKey := range vs_cache_obj.PoolKeyCollection {
-					rest.DeletePoolIngressStatus(poolKey, true, vs_cache_obj.Name, key)
+				for _, poolKey := range vsCacheObj.PoolKeyCollection {
+					rest.DeletePoolIngressStatus(poolKey, true, vsCacheObj.Name, key)
 				}
 			case lib.ServiceTypeLBVS:
 				updateOptions := status.UpdateOptions{
-					ServiceMetadata:    vs_cache_obj.ServiceMetadataObj,
+					ServiceMetadata:    vsCacheObj.ServiceMetadataObj,
 					Key:                key,
-					VirtualServiceUUID: vs_cache_obj.Uuid,
-					VSName:             vs_cache_obj.Name,
+					VirtualServiceUUID: vsCacheObj.Uuid,
+					VSName:             vsCacheObj.Name,
+					Tenant:             vsCacheObj.Tenant,
 				}
 				statusOption := status.StatusOptions{
 					ObjType: utils.L4LBService,
@@ -809,8 +822,8 @@ func (rest *RestOperations) AviVsCacheDel(rest_op *utils.RestOp, vsKey avicache.
 					Key:     key,
 					Options: &updateOptions,
 				}
-				utils.AviLog.Infof("key: %s Publishing to status queue, options: %v", vs_cache_obj.ServiceMetadataObj.NamespaceServiceName[0], utils.Stringify(statusOption))
-				status.PublishToStatusQueue(vs_cache_obj.ServiceMetadataObj.NamespaceServiceName[0], statusOption)
+				utils.AviLog.Infof("key: %s Publishing to status queue, options: %v", vsCacheObj.ServiceMetadataObj.NamespaceServiceName[0], utils.Stringify(statusOption))
+				status.PublishToStatusQueue(vsCacheObj.ServiceMetadataObj.NamespaceServiceName[0], statusOption)
 			case lib.ChildVS:
 				if !hostFoundInParentPool {
 					// TODO: revisit
@@ -830,17 +843,17 @@ func (rest *RestOperations) AviVsCacheDel(rest_op *utils.RestOp, vsKey avicache.
 					// }
 					// status.PublishToStatusQueue(updateOptions.ServiceMetadata.IngressName, statusOption)
 
-					for _, poolKey := range vs_cache_obj.PoolKeyCollection {
-						rest.DeletePoolIngressStatus(poolKey, true, vs_cache_obj.Name, key)
+					for _, poolKey := range vsCacheObj.PoolKeyCollection {
+						rest.DeletePoolIngressStatus(poolKey, true, vsCacheObj.Name, key)
 					}
 				}
 
-				status.HostRuleEventBroadcast(vs_cache_obj.Name, vs_cache_obj.ServiceMetadataObj.CRDStatus, lib.CRDMetadata{})
-				status.SSORuleEventBroadcast(vs_cache_obj.Name, vs_cache_obj.ServiceMetadataObj.CRDStatus, lib.CRDMetadata{})
+				status.HostRuleEventBroadcast(vsCacheObj.Name, vsCacheObj.ServiceMetadataObj.CRDStatus, lib.CRDMetadata{})
+				status.SSORuleEventBroadcast(vsCacheObj.Name, vsCacheObj.ServiceMetadataObj.CRDStatus, lib.CRDMetadata{})
 			default:
 				// insecure ingress status updates in regular AKO.
-				for _, poolKey := range vs_cache_obj.PoolKeyCollection {
-					rest.DeletePoolIngressStatus(poolKey, true, vs_cache_obj.Name, key)
+				for _, poolKey := range vsCacheObj.PoolKeyCollection {
+					rest.DeletePoolIngressStatus(poolKey, true, vsCacheObj.Name, key)
 				}
 			}
 		}

@@ -38,6 +38,7 @@ A sample HostRule CRD looks like this:
         - avi-datascript-redirect-app1
         wafPolicy: avi-waf-policy
         applicationProfile: avi-app-ref
+        networkSecurityPolicy: avi-network-security-policy-ref
         icapProfile: 
         - avi-icap-ref
         analyticsProfile: avi-analytics-ref
@@ -56,6 +57,7 @@ A sample HostRule CRD looks like this:
         aliases: # optional
         -  bar.com
         -  baz.com
+        l7Rule: my-l7-rule-name
 
 
 ### Specific usage of HostRule CRD
@@ -238,7 +240,7 @@ Where dedicated VSes are created corresponding to a single application, Shared V
 
         fqdn: foo.com     # dedicated VS
         fqdnType: Exact
-        tcpSetting:
+        tcpSettings:
           listeners:
           - port: 6443
             enableSSL: true
@@ -246,13 +248,13 @@ Where dedicated VSes are created corresponding to a single application, Shared V
 
         fqdn: Shared-VS-L7-1.admin.avi.com    # AKO configured Shared VS fqdn
         fqdnType: Exact
-        tcpSetting:
+        tcpSettings:
           loadBalancerIP: 10.10.10.1
 
 
         fqdn: Shared-VS-L7-1      # bound for clusterName--Shared-VS-L7-1
         fqdnType: Contains
-        tcpSetting:
+        tcpSettings:
           loadBalancerIP: 10.10.10.1
 
 ##### Custom Ports
@@ -278,6 +280,11 @@ The `loadBalancerIP` field can be used to provide a valid preferred IPv4 address
 
 **Note**: The HostRule CRD is not aware of the misconfigurations while it is being created, therefore the HostRule will be `Accepted` nonetheless.
 
+#### L7Rule 
+
+L7rule field can be used to specify the name of [L7Rule](./l7rule.md) CRD. It is used to modify select VS Properties which are not part of HostRule CRD.
+
+**Note**: This property is available only in HostRule `v1beta1` schema definition.
 
 #### <a id="aliases"> Configure aliases for FQDN
 
@@ -291,6 +298,16 @@ This list of FQDNs inherits all the properties of the root FQDN specified under 
 Traffic would arrive with the host header as bar.com to the VIP hosting foo.region1.com and this CRD property would ensure that the request is routed appropriately to the backend service of `foo.region1.com`.
 
 Aliases field must contain unique FQDNs and must not contain GSLB FQDN or the root FQDN. Users must ensure that the `fqdnType` is set as `Exact` before setting this field.
+
+#### Express custom network security policy object ref
+HostRule CRD can be used to express network security policy object references. The network security policy object should have been created in the Avi Controller prior to this CRD creation.
+The `networkSecurityPolicy` setting, in addition to any other parameters provided in the HostRule, is only applied to Parent VSes and dedicated VSes. The `networkSecurityPolicy` setting does not have any effect on child VSes.
+
+         networkSecurityPolicy: avi-network-security-policy-ref
+
+***Note***
+1. This property is available only in HostRule `v1beta1` schema definition.
+2. The HostRule CRD is not aware of the misconfigurations if it is applied to Child VS while it is being created, therefore the HostRule will be `Accepted` nonetheless. AKO will print warning message regarding this.
 
 #### Status Messages
 
